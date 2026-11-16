@@ -32,9 +32,6 @@ use crate::audit::{AuditOpenError, DurableAudit};
 use crate::companion::Companion;
 use crate::project::{ProjectError, Snapshot, SourceFile, SourceNode, component_html};
 
-const MAX_PATH_BYTES: usize = 4096;
-const MAX_PATH_COMPONENTS: usize = 64;
-
 const SOURCE_EXTENSIONS: &[&str] = &["js", "jsx", "ts", "tsx", "vue"];
 const PAGE_EXTENSIONS: &[&str] = &["html", "htm"];
 const OPERATION_KINDS: &[&str] = &[
@@ -1292,7 +1289,6 @@ fn normalize_page(page: &str) -> Result<String, ProjectError> {
 fn normalize_portable_path(path: &str, label: &str) -> Result<String, ProjectError> {
     let path = path.strip_prefix("./").unwrap_or(path);
     if path.is_empty()
-        || path.len() > MAX_PATH_BYTES
         || path.starts_with('/')
         || path.contains(['\\', ':', '\0'])
         || path.chars().any(char::is_control)
@@ -1303,17 +1299,10 @@ fn normalize_portable_path(path: &str, label: &str) -> Result<String, ProjectErr
         ));
     }
     let components: Vec<&str> = path.split('/').collect();
-    if components.len() > MAX_PATH_COMPONENTS {
-        return Err(ProjectError::new(
-            "invalid_path",
-            format!("{label} has too many components"),
-        ));
-    }
     for component in &components {
         if component.is_empty()
             || *component == "."
             || *component == ".."
-            || component.len() > 255
             || component.starts_with('.')
         {
             return Err(ProjectError::new(

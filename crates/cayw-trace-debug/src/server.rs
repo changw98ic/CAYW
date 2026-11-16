@@ -30,9 +30,6 @@ use crate::{
 };
 use cayw_codeintel::{DefinitionQuery, SymbolVersionBridge};
 
-/// Requests are rejected before JSON parsing or store access at this size.
-pub const MAX_BODY_BYTES: usize = 256 * 1024;
-
 /// How long `GET /api/state?after=N` waits for a newer snapshot.
 const LONG_POLL_TIMEOUT: Duration = Duration::from_secs(25);
 /// The store has no notification channel contract, so poll its sequence.
@@ -108,7 +105,7 @@ pub async fn serve_with_codeintel(
         .route("/api/projects/{project_id}/undo", post(undo_route))
         .fallback(not_found)
         .method_not_allowed_fallback(method_not_allowed)
-        .layer(DefaultBodyLimit::max(MAX_BODY_BYTES))
+        .layer(DefaultBodyLimit::disable())
         .layer(middleware::from_fn_with_state(state.clone(), guard))
         .with_state(state);
     axum::serve(listener, app)
@@ -523,22 +520,11 @@ fn decode_body<T: DeserializeOwned>(
 ) -> Result<T, Box<Response>> {
     match payload {
         Ok(Json(value)) => Ok(value),
-        Err(rejection) => {
-            let response = if rejection.status() == StatusCode::PAYLOAD_TOO_LARGE {
-                error_response(
-                    StatusCode::PAYLOAD_TOO_LARGE,
-                    "payload_too_large",
-                    "Request body exceeds 256 KiB",
-                )
-            } else {
-                error_response(
-                    StatusCode::UNPROCESSABLE_ENTITY,
-                    "invalid",
-                    "Expected a valid JSON object matching the edit contract",
-                )
-            };
-            Err(Box::new(response))
-        }
+        Err(_) => Err(Box::new(error_response(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "invalid",
+            "Expected a valid JSON object matching the edit contract",
+        ))),
     }
 }
 

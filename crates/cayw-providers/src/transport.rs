@@ -9,9 +9,6 @@ use reqwest::{Client, Url};
 use std::time::Instant;
 
 const MAX_EVENT_BYTES: usize = 8 * 1024 * 1024;
-const MAX_RESPONSE_BYTES: usize = 64 * 1024 * 1024;
-const MAX_JSON_BYTES: usize = 16 * 1024 * 1024;
-const MAX_RESPONSE_FRAMES: usize = 131_072;
 const DECODE_BATCH_BYTES: usize = 4096;
 
 #[derive(Clone)]
@@ -263,8 +260,6 @@ pub(crate) fn stream(
             let mut decoder = SseDecoder::default();
             let mut json_body = Vec::new();
             let is_json = matches!(protocol, Protocol::Gemini(GeminiMode::GenerateContent, _));
-            let mut received = 0usize;
-            let mut frame_count = 0usize;
             'body: loop {
                 let next = tokio::select! {
                     biased;
@@ -276,8 +271,6 @@ pub(crate) fn stream(
                     Some(Err(_)) => { failure = Some("Provider response stream failed".into()); break; }
                     Some(Ok(bytes)) => {
                         if is_json {
-                            received = received.saturating_add(bytes.len());
-                            if received > MAX_JSON_BYTES { failure = Some("Provider response exceeds the size limit".into()); break; }
                             json_body.extend_from_slice(&bytes);
                             continue;
                         }
@@ -287,18 +280,13 @@ pub(crate) fn stream(
                         while offset < bytes.len() {
                             if let Err(error) = common::checkpoint(&cancel).await { failure = Some(error); break 'body; }
                             let count = (bytes.len() - offset)
-                                .min(DECODE_BATCH_BYTES)
-                                .min(MAX_RESPONSE_BYTES.saturating_sub(received) + 1);
+                                .min(DECODE_BATCH_BYTES);
                             let (consumed, frame) = match decoder.push(&bytes[offset..offset + count]) {
                                 Ok(decoded) => decoded,
                                 Err(error) => { failure = Some(error); break 'body; }
                             };
-                            received += consumed;
                             offset += consumed;
-                            if received > MAX_RESPONSE_BYTES { failure = Some("Provider response exceeds the size limit".into()); break 'body; }
                             if let Some(frame) = frame {
-                                frame_count += 1;
-                                if frame_count > MAX_RESPONSE_FRAMES { failure = Some("Provider response exceeds the frame limit".into()); break 'body; }
                                 let mut updates = state.accept(&frame.data, frame.event.as_deref(), &cancel);
                                 while let Some(update) = updates.next().await {
                                     match update {
@@ -325,8 +313,6 @@ pub(crate) fn stream(
                 };
                 let frames = match frames { Ok(frames) => frames, Err(error) => { failure = Some(error); break; } };
                 for frame in frames {
-                    frame_count += 1;
-                    if frame_count > MAX_RESPONSE_FRAMES { failure = Some("Provider response exceeds the frame limit".into()); break 'body; }
                     if let Err(error) = common::checkpoint(&cancel).await { failure = Some(error); break 'body; }
                     let mut updates = state.accept(&frame.data, frame.event.as_deref(), &cancel);
                     while let Some(update) = updates.next().await {

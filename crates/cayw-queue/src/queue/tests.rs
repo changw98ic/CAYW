@@ -393,49 +393,38 @@ fn legacy_text_column_migrates_once_into_task_input_json() {
 }
 
 #[test]
-fn try_start_child_starts_running_without_waiting_and_enforces_limits() {
+fn child_submission_queues_without_consuming_execution_slots() {
     let root = tempfile::tempdir().unwrap();
     let path = root.path().join("queue.sqlite");
     let _audit = AuditDb::open(&path);
-    let queue = Queue::open(&path, 2, 2, 0).unwrap();
-
-    let first = queue
-        .try_start_child("child-a", "first child", &TaskIntent::General, 2, 1)
-        .unwrap();
-    assert_eq!(first.fence, 1);
-    let record = queue.get(&first.id).unwrap();
-    assert_eq!(record.state, TaskState::Running);
-    assert_eq!(record.worker_id.as_deref(), Some(first.worker.as_str()));
-    assert_eq!(
-        record.input,
-        TaskInput {
-            text: "first child".into(),
-            images: vec![],
-        }
-    );
-    assert!(matches!(
-        queue.try_start_child("child-b", "blocked", &TaskIntent::General, 2, 1),
-        Err(QueueError::QueueFull)
-    ));
-    assert!(matches!(
-        queue.try_start_child("child-a", "duplicate", &TaskIntent::General, 2, 2),
-        Err(QueueError::Busy)
-    ));
+    let queue = Queue::open(&path, 1, 10, 1).unwrap();
+    let children: Vec<_> = (0..10)
+        .map(|n| {
+            queue
+                .enqueue_child(
+                    &format!("child-{n}"),
+                    "child",
+                    &TaskIntent::General,
+                    10,
+                    "tree",
+                    2,
+                )
+                .unwrap()
+        })
+        .collect();
+    assert!(children.iter().all(|lease| {
+        let task = queue.get(&lease.id).unwrap();
+        task.state == TaskState::Queued && !task.holds_slot
+    }));
+    assert!(queue.admit(&children[0], 1).unwrap());
+    assert!(!queue.admit(&children[1], 1).unwrap());
     queue
-        .finish(&first, TaskTerminal::Completed, None, settled)
+        .finish(&children[0], TaskTerminal::Completed, None, settled)
         .unwrap();
-
-    let second = queue
-        .try_start_child("child-b", "second child", &TaskIntent::General, 2, 2)
-        .unwrap();
-    let third = queue
-        .try_start_child("child-c", "third child", &TaskIntent::General, 2, 2)
-        .unwrap();
-    assert_eq!(second.fence, 1);
-    assert_eq!(third.fence, 1);
+    assert!(queue.admit(&children[1], 1).unwrap());
     assert!(matches!(
-        queue.try_start_child("child-d", "fourth child", &TaskIntent::General, 2, 2),
-        Err(QueueError::QueueFull)
+        queue.enqueue_child("child-1", "duplicate", &TaskIntent::General, 10, "tree", 2),
+        Err(QueueError::Busy)
     ));
 }
 
@@ -611,28 +600,19 @@ fn reclaim_preserves_ready_order_and_fences_the_old_worker() {
 }
 
 #[test]
-fn child_start_cannot_bypass_ready_work_and_counts_as_dispatch() {
+fn child_submission_joins_fair_order_and_only_admission_counts_as_dispatch() {
     let root = tempfile::tempdir().unwrap();
-    let path = root.path().join("queue.sqlite");
-    let _audit = AuditDb::open(&path);
-    let queue = open_queue(&path, 2, 4, 100);
-    assert_eq!(queue.dispatch_count().unwrap(), 0);
+    let queue = open_queue(&root.path().join("queue.sqlite"), 2, 4, 100);
+    let older = enqueue(&queue, "older", TaskPriority::Normal, 4);
+    let older = claim(&queue, &older);
     let child = queue
-        .try_start_child("child-a", "child", &TaskIntent::General, 4, 2)
+        .enqueue_child("child", "child", &TaskIntent::General, 4, "tree", 2)
         .unwrap();
-    assert_eq!(queue.dispatch_count().unwrap(), 1);
-    let record = queue.get(&child.id).unwrap();
-    assert!(record.holds_slot);
-    assert_eq!(record.dispatches, 1);
-    complete(&queue, &child);
-
-    let queued = enqueue(&queue, "waiting", TaskPriority::Normal, 4);
-    let _lease = claim(&queue, &queued);
-    assert!(matches!(
-        queue.try_start_child("child-b", "blocked", &TaskIntent::General, 4, 2),
-        Err(QueueError::Busy)
-    ));
-    assert_eq!(queue.dispatch_count().unwrap(), 1);
+    assert_eq!(queue.dispatch_count().unwrap(), 0);
+    assert!(!admit(&queue, &child, 2));
+    assert!(admit(&queue, &older, 2));
+    assert!(admit(&queue, &child, 2));
+    assert_eq!(queue.dispatch_count().unwrap(), 2);
 }
 
 #[test]
@@ -931,41 +911,33 @@ fn legacy_schema_migrates_priority_slots_and_ready_order() {
 }
 
 #[test]
-fn child_capacity_precheck_counts_live_and_slots_consistently() {
+fn child_capacity_counts_accepted_work_not_execution_slots() {
     let root = tempfile::tempdir().unwrap();
     let path = root.path().join("queue.sqlite");
     let _audit = AuditDb::open(&path);
-    let queue = open_queue(&path, 1, 3, 100);
-    queue.check_child_capacity(3, 1).unwrap();
-
-    let parked = enqueue(&queue, "parked", TaskPriority::Normal, 3);
-    let parked_lease = claim(&queue, &parked);
-    assert!(admit(&queue, &parked_lease, 1));
-    queue.park(&parked_lease).unwrap();
-    assert!(queue.check_child_capacity(3, 1).is_ok());
+    let queue = open_queue(&path, 1, 3, 2);
+    let parent = queue
+        .enqueue_child("parent", "parent", &TaskIntent::General, 3, "tree", 2)
+        .unwrap();
+    assert!(queue.admit(&parent, 1).unwrap());
+    assert!(queue.check_child_capacity(3).is_ok());
+    let child = queue
+        .enqueue_child("child", "child", &TaskIntent::General, 3, "tree", 2)
+        .unwrap();
+    assert!(!queue.admit(&child, 1).unwrap());
+    queue.park_dependency(&parent).unwrap();
+    assert_eq!(queue.get(&parent.id).unwrap().state, TaskState::Running);
+    assert!(!queue.get(&parent.id).unwrap().holds_slot);
+    assert!(queue.admit(&child, 1).unwrap());
+    queue.ready(&parent).unwrap();
+    assert!(!queue.admit(&parent, 1).unwrap());
+    queue
+        .finish(&child, TaskTerminal::Completed, None, settled)
+        .unwrap();
+    assert!(queue.admit(&parent, 1).unwrap());
     assert!(matches!(
-        queue.check_child_capacity(1, 1),
+        queue.check_child_capacity(1),
         Err(QueueError::QueueFull)
-    ));
-
-    let draining = enqueue(&queue, "draining", TaskPriority::Normal, 3);
-    let draining_lease = claim(&queue, &draining);
-    assert!(admit(&queue, &draining_lease, 1));
-    queue.block(&draining_lease, "synthetic cleanup").unwrap();
-    let record = queue.get(&draining.id).unwrap();
-    assert_eq!(record.state, TaskState::Draining);
-    assert!(record.holds_slot);
-    assert!(matches!(
-        queue.check_child_capacity(3, 1),
-        Err(QueueError::QueueFull)
-    ));
-    assert!(queue.check_child_capacity(3, 2).is_ok());
-
-    let ready = enqueue(&queue, "ready", TaskPriority::High, 3);
-    let _ready_lease = claim(&queue, &ready);
-    assert!(matches!(
-        queue.check_child_capacity(3, 2),
-        Err(QueueError::Busy)
     ));
 }
 
@@ -1274,4 +1246,88 @@ fn dispatch_key_reuse_preserves_work_and_session_identity() {
         .unwrap();
     assert_eq!(stored.session_id, "session-a");
     assert_eq!(stored.work_id.as_deref(), Some("work-a"));
+}
+
+#[test]
+fn tree_capacity_queues_ten_children_and_does_not_block_other_trees() {
+    let root = tempfile::tempdir().unwrap();
+    let path = root.path().join("queue.sqlite");
+    let _audit = AuditDb::open(&path);
+    let queue = open_queue(&path, 4, 16, 3);
+    let children: Vec<_> = (0..10)
+        .map(|n| {
+            queue
+                .enqueue_child(
+                    &format!("child-{n}"),
+                    "work",
+                    &TaskIntent::General,
+                    16,
+                    "tree",
+                    2,
+                )
+                .unwrap()
+        })
+        .collect();
+    assert!(admit(&queue, &children[0], 4));
+    assert!(admit(&queue, &children[1], 4));
+    assert!(!admit(&queue, &children[2], 4));
+    let independent = enqueue(&queue, "independent", TaskPriority::Normal, 16);
+    let independent = claim(&queue, &independent);
+    assert!(admit(&queue, &independent, 4));
+    drop(queue);
+    let reopened = open_queue(&path, 4, 16, 3);
+    assert!(!admit(&reopened, &children[2], 4));
+    reopened
+        .block(&children[0], "cleanup remains unconfirmed")
+        .unwrap();
+    assert!(!admit(&reopened, &children[2], 4));
+    complete(&reopened, &children[1]);
+    assert!(admit(&reopened, &children[2], 4));
+}
+
+#[test]
+fn nested_child_wait_releases_the_tree_slot_and_reacquires_after_completion() {
+    let root = tempfile::tempdir().unwrap();
+    let path = root.path().join("queue.sqlite");
+    let _audit = AuditDb::open(&path);
+    let queue = open_queue(&path, 1, 4, 1);
+    let parent = queue
+        .enqueue_child("parent", "work", &TaskIntent::General, 4, "tree", 1)
+        .unwrap();
+    assert!(admit(&queue, &parent, 1));
+    let child = queue
+        .enqueue_child("child", "work", &TaskIntent::General, 4, "tree", 1)
+        .unwrap();
+    assert!(!admit(&queue, &child, 1));
+    queue.park_dependency(&parent).unwrap();
+    assert!(admit(&queue, &child, 1));
+    queue.ready(&parent).unwrap();
+    assert!(!admit(&queue, &parent, 1));
+    complete(&queue, &child);
+    assert!(admit(&queue, &parent, 1));
+}
+
+#[test]
+fn recovered_queued_child_cannot_be_restarted_as_an_ordinary_task() {
+    let root = tempfile::tempdir().unwrap();
+    let path = root.path().join("queue.sqlite");
+    let _audit = AuditDb::open(&path);
+    let queue = open_queue(&path, 1, 4, 1);
+    let child = queue
+        .enqueue_child(
+            "child",
+            "original child work",
+            &TaskIntent::General,
+            4,
+            "tree",
+            1,
+        )
+        .unwrap();
+    assert!(queue.claim(&child.id).is_err());
+    queue.recover("child").unwrap();
+    let record = queue.get(&child.id).unwrap();
+    assert_eq!(record.state, TaskState::Interrupted);
+    assert_eq!(record.input.text, "original child work");
+    assert!(!record.holds_slot);
+    assert!(queue.claim(&child.id).is_err());
 }

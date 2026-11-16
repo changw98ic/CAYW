@@ -28,3 +28,5 @@ The runtime cannot preempt synchronous Rust work inside an uncooperative host, r
 ## Large tool results (F01/F03)
 
 When Runtime enables local `ContentStore` (#18), CodeMode scripts can call the host tools `result.store` / `result.get` / `result.batch_get` / `result.search` / `result.release` through `cayw.call`. Bodies live in the same Device content library as `content.read`/`content.put`; handles are session- or task-scoped. This is not a second executor — it extends the existing Host/CodeMode capability catalog. See `docs/validation/issue-33-f01-f03-result-handles.md`.
+
+A configured output byte budget measures serialized payload bytes. It does not add a separate 64-level limit to Host JSON results; enabling a byte budget leaves accepted JSON structure unchanged. Lua table cycle checks, the recursive Lua conversion safety boundary and exact numeric representation checks still apply.

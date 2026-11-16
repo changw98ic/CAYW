@@ -159,7 +159,7 @@ async fn local_stream_stages() {
     let mut terminal = None;
     while let Some(event) = stream.next().await {
         if event.is_terminal() {
-            terminal = Some(event.message().clone());
+            terminal = Some(event.snapshot().expect("terminal snapshot").clone());
         } else {
             updates.push(event);
         }
@@ -197,7 +197,6 @@ async fn local_stream_stages() {
             .append_agent_event(
                 &lease,
                 &AgentEvent::MessageUpdate {
-                    message: event.message().clone(),
                     event: Box::new(event.clone()),
                 },
             )

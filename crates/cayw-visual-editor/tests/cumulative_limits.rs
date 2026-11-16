@@ -155,3 +155,173 @@ async fn framework_over_256_files_16_mib_total_and_8_mib_per_file_opens() {
     );
     handle.shutdown().await;
 }
+
+fn legacy_marker(dir: &std::path::Path) {
+    std::fs::write(dir.join("unknown.json"), serde_json::json!({
+        "code":"reconciliation_required", "message":"audit file exceeds the bounded size; reconcile it before editing", "at_ms":1
+    }).to_string()).unwrap();
+}
+
+#[tokio::test]
+async fn legacy_size_marker_is_repaired_only_after_both_logs_are_settled() {
+    let root = tempfile::tempdir().unwrap();
+    std::fs::write(root.path().join("index.html"), "<p>page</p>").unwrap();
+    let calls = "{\"event\":\"started\",\"call_id\":\"one\"}\n{\"event\":\"settled\",\"call_id\":\"one\"}\n";
+    for (server_log, succeeds) in [
+        (
+            "{\"event\":\"started\",\"request\":\"r\"}\n{\"event\":\"settled\",\"request\":\"r\",\"outcome_unknown\":false}\n",
+            true,
+        ),
+        ("{\"event\":\"started\",\"request\":\"r\"}\n", false),
+        (
+            "{\"event\":\"started\",\"request\":\"r\"}\n{\"event\":\"settled\",\"request\":\"r\",\"outcome_unknown\":true}\n",
+            false,
+        ),
+    ] {
+        let state = tempfile::tempdir().unwrap();
+        std::fs::write(state.path().join("calls.jsonl"), calls).unwrap();
+        std::fs::write(state.path().join("server-events.jsonl"), server_log).unwrap();
+        legacy_marker(state.path());
+        match cayw_visual_editor::start(config(root.path(), state.path(), None)).await {
+            Ok(handle) => {
+                assert!(succeeds);
+                assert!(!state.path().join("unknown.json").exists());
+                handle.shutdown().await;
+            }
+            Err(_) => {
+                assert!(!succeeds);
+                assert!(state.path().join("unknown.json").exists());
+            }
+        }
+    }
+}
+
+#[test]
+fn legacy_size_marker_does_not_clear_missing_corrupt_or_unknown_call_evidence() {
+    for log in [
+        None,
+        Some("broken"),
+        Some("{\"event\":\"started\",\"call_id\":\"one\"}\n"),
+        Some(
+            "{\"event\":\"started\",\"call_id\":\"one\"}\n{\"event\":\"settled\",\"call_id\":\"one\",\"outcome_unknown\":true}\n",
+        ),
+    ] {
+        let state = tempfile::tempdir().unwrap();
+        if let Some(log) = log {
+            std::fs::write(state.path().join("calls.jsonl"), log).unwrap();
+        }
+        legacy_marker(state.path());
+        assert!(AuditStore::open(state.path()).is_err());
+        assert!(AuditStore::open(state.path()).is_err());
+        if log.is_none() {
+            assert!(!state.path().join("calls.jsonl").exists());
+        }
+        assert!(state.path().join("unknown.json").exists());
+    }
+}
+
+#[tokio::test]
+async fn preview_streams_large_resources_and_accepts_deep_long_paths() {
+    let root = tempfile::tempdir().unwrap();
+    let state = tempfile::tempdir().unwrap();
+    std::fs::write(root.path().join("index.html"), "<p>resource test</p>").unwrap();
+    let payload = "x".repeat(9 * 1024 * 1024);
+    std::fs::write(root.path().join("big.js"), &payload).unwrap();
+    let relative = (0..17)
+        .map(|_| "long-directory-name-0123456789")
+        .collect::<Vec<_>>()
+        .join("/")
+        + "/a.js";
+    let path = root.path().join(&relative);
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    std::fs::write(path, "deep resource").unwrap();
+    assert!(relative.len() > 512);
+    let page = relative.replace("a.js", "page.html");
+    std::fs::write(root.path().join(&page), "<p>deep page</p>").unwrap();
+    let page_state = tempfile::tempdir().unwrap();
+    let project = cayw_visual_editor::project::Project::open(root.path(), &page, page_state.path())
+        .await
+        .unwrap();
+    assert!(
+        project
+            .snapshot()
+            .await
+            .unwrap()
+            .source
+            .contains("deep page")
+    );
+
+    let handle = cayw_visual_editor::start(config(root.path(), state.path(), None))
+        .await
+        .unwrap();
+    let base = &handle.preview_origin;
+    for (path, expected) in [
+        ("big.js", payload.as_str()),
+        (relative.as_str(), "deep resource"),
+    ] {
+        let response = reqwest::get(format!("{base}/{path}")).await.unwrap();
+        assert!(response.status().is_success());
+        let actual = response.text().await.unwrap();
+        assert_eq!(actual.len(), expected.len());
+        assert!(actual == expected);
+    }
+    handle.shutdown().await;
+}
+
+#[tokio::test]
+async fn html_edits_preserve_large_text_attributes_and_style_sets() {
+    use cayw_visual_editor::project::Project;
+    use serde_json::json;
+    let root = tempfile::tempdir().unwrap();
+    let state = tempfile::tempdir().unwrap();
+    std::fs::write(
+        root.path().join("index.html"),
+        "<p>text</p><img src=\"a.png\">",
+    )
+    .unwrap();
+    let project = Project::open(root.path(), "index.html", state.path())
+        .await
+        .unwrap();
+    let text = "字".repeat(100000);
+    let snapshot = project.snapshot().await.unwrap();
+    let id = &snapshot.nodes.iter().find(|n| n.tag == "p").unwrap().id;
+    let snapshot = project
+        .apply(json!({"kind":"text","id":id,"text":text}))
+        .await
+        .unwrap();
+    assert!(snapshot.source.contains(&text));
+    let id = &snapshot.nodes.iter().find(|n| n.tag == "img").unwrap().id;
+    let data = format!("data:image/png;base64,{}", "A".repeat(70000));
+    let snapshot = project
+        .apply(json!({"kind":"attribute","id":id,"name":"src","value":data}))
+        .await
+        .unwrap();
+    assert!(snapshot.source.contains(&data));
+    let id = &snapshot.nodes.iter().find(|n| n.tag == "p").unwrap().id;
+    let properties: serde_json::Map<String, serde_json::Value> = (0..40)
+        .map(|n| (format!("--property-{n}"), json!("x".repeat(600))))
+        .collect();
+    let snapshot = project
+        .apply(json!({"kind":"style","id":id,"properties":properties}))
+        .await
+        .unwrap();
+    assert!(snapshot.source.contains("--property-39"));
+}
+
+#[tokio::test]
+async fn legacy_marker_with_missing_server_log_stays_blocked_on_repeated_start() {
+    let root = tempfile::tempdir().unwrap();
+    let state = tempfile::tempdir().unwrap();
+    std::fs::write(root.path().join("index.html"), "<p>page</p>").unwrap();
+    std::fs::write(state.path().join("calls.jsonl"), "").unwrap();
+    legacy_marker(state.path());
+    for _ in 0..2 {
+        assert!(
+            cayw_visual_editor::start(config(root.path(), state.path(), None))
+                .await
+                .is_err()
+        );
+        assert!(state.path().join("unknown.json").exists());
+        assert!(!state.path().join("server-events.jsonl").exists());
+    }
+}

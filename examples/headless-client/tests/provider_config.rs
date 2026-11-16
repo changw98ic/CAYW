@@ -132,12 +132,7 @@ fn sdk_does_not_fall_back_to_legacy_environment() {
     let error: Value = serde_json::from_slice(&output.stderr).unwrap();
     assert_eq!(error["code"], "model_not_configured");
     assert!(!error["outcome_unknown"].as_bool().unwrap());
-    assert!(
-        error["message"]
-            .as_str()
-            .unwrap()
-            .contains("显式 --config")
-    );
+    assert!(error["message"].as_str().unwrap().contains("显式 --config"));
     assert!(!String::from_utf8_lossy(&output.stderr).contains("synthetic-old-key"));
 }
 

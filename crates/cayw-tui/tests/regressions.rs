@@ -45,8 +45,7 @@ fn update(cursor: u64, timestamp: u64, text: &str) -> Value {
         cursor,
         attempt(),
         json!({"type":"agent","event":AgentEvent::MessageUpdate {
-            message: message.clone(),
-            event: Box::new(AssistantEvent::TextDelta { index: 0, delta: text.into(), partial: message }),
+            event: Box::new(AssistantEvent::TextEnd { index: 0, partial: message }),
         }}),
     )
 }
@@ -520,7 +519,11 @@ fn malformed_success_response_preserves_prompt_text_and_does_not_unlock_send() {
 
 async fn reply(writer: &mut tokio::net::tcp::OwnedWriteHalf, id: &Value, result: Value) {
     writer
-        .write_all((json!({"version":1,"id":id,"result":result}).to_string() + "\n").as_bytes())
+        .write_all(
+            (json!({"version":cayw_ipc::PROTOCOL_VERSION,"id":id,"result":result}).to_string()
+                + "\n")
+                .as_bytes(),
+        )
         .await
         .unwrap();
 }
@@ -540,7 +543,7 @@ async fn shutdown_of_prompt_rejected_busy_never_sends_session_cancel() {
             let call: Value = serde_json::from_str(&line).unwrap();
             let method = call["method"].as_str().unwrap();
             match method {
-                "hello" => reply(&mut writer, &call["id"], json!({"version":1,"max_frame_bytes":1048576,"max_in_flight":64,"max_requests_per_connection":65536,"max_id_bytes":128})).await,
+                "hello" => reply(&mut writer, &call["id"], json!({"version":cayw_ipc::PROTOCOL_VERSION,"max_frame_bytes":1048576,"max_in_flight":64,"max_requests_per_connection":65536,"max_id_bytes":128})).await,
                 "task.enqueue" => {
                     assert_eq!(call["params"], json!({"session_id":"s1","text":"question"}));
                     methods.push("enqueue_rejected_busy");
@@ -548,12 +551,12 @@ async fn shutdown_of_prompt_rejected_busy_never_sends_session_cancel() {
                     // when the terminal exits. No run ownership has been established.
                     rejected.take().unwrap().send(()).unwrap();
                     tokio::task::yield_now().await;
-                    let response = json!({"version":1,"id":call["id"],"error":{"code":"busy","message":"another client's run is active"}}).to_string() + "\n";
+                    let response = json!({"version":cayw_ipc::PROTOCOL_VERSION,"id":call["id"],"error":{"code":"busy","message":"another client's run is active"}}).to_string() + "\n";
                     let _ = writer.write_all(response.as_bytes()).await;
                 }
                 "session.cancel" => {
                     methods.push("session.cancel");
-                    let response = json!({"version":1,"id":call["id"],"result":{"cancelled":true}}).to_string() + "\n";
+                    let response = json!({"version":cayw_ipc::PROTOCOL_VERSION,"id":call["id"],"result":{"cancelled":true}}).to_string() + "\n";
                     let _ = writer.write_all(response.as_bytes()).await;
                 }
                 _ => {}

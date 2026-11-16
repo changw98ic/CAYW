@@ -871,3 +871,82 @@ async fn wait_does_not_reset_the_session_deadline() {
     );
     assert!(host.drain_processes().await.is_err());
 }
+
+#[tokio::test]
+async fn unlimited_terminal_input_accepts_more_than_the_output_buffer() {
+    let root = Root::new();
+    let count = 17 * 1024 * 1024;
+    let mut configured = profile(
+        fixture(),
+        &["read-count", &count.to_string()],
+        cayw_device::ProcessIo::Pipes,
+        Duration::from_secs(30),
+        1024,
+    );
+    configured.timeout = None;
+    configured.max_output_bytes = None;
+    let (host, _, _) = host(
+        &root.0,
+        config(
+            BTreeMap::from([("count".into(), configured)]),
+            TerminalLimits::default(),
+        ),
+    );
+    let id = session_id(&exec(&host, "count").await.unwrap());
+    let result = call(
+        &host,
+        "write_stdin",
+        json!({"session_id":id,"action":"write","request_id":"large","data":"x".repeat(count)}),
+    )
+    .await
+    .unwrap();
+    assert_eq!(result["accepted_bytes"], count);
+    assert_eq!(
+        wait_status(&host, &id, 10_000).await["status"]["state"],
+        "exited"
+    );
+    let bytes = read_until_eof(&host, &id, 1024).await;
+    assert_eq!(String::from_utf8(bytes).unwrap().trim(), count.to_string());
+    assert!(!host.outcome_unknown());
+    host.drain_processes().await.unwrap();
+}
+
+#[tokio::test]
+async fn trusted_profiles_accept_os_valid_argument_counts_and_lengths() {
+    let root = Root::new();
+    let mut args = vec!["x".to_string(); 257];
+    args.push("y".repeat(8193));
+    let mut env: BTreeMap<String, String> = (0..257)
+        .map(|n| (format!("KEY_{n}"), "value".into()))
+        .collect();
+    env.insert("LONG_VALUE".into(), "z".repeat(32769));
+    env.insert("K".repeat(1025), "long key".into());
+    let configured = Profile {
+        kind: ProfileKind::Check,
+        program: "/usr/bin/true".into(),
+        args,
+        env,
+        timeout: None,
+        max_output_bytes: None,
+        allow_filter: false,
+        io: cayw_device::ProcessIo::Pipes,
+    };
+    let mut configuration = config(
+        BTreeMap::from([("long".into(), configured.clone())]),
+        TerminalLimits::default(),
+    );
+    configuration.profiles.insert("long".into(), configured);
+    let (host, _, _) = host(&root.0, configuration);
+    let run = call(&host, "check.run", json!({"profile":"long"}))
+        .await
+        .unwrap();
+    assert_eq!(run["success"], true);
+    let id = session_id(&exec(&host, "long").await.unwrap());
+    assert_eq!(
+        wait_status(&host, &id, 10_000).await["status"]["state"],
+        "exited"
+    );
+    let _ = read_until_eof(&host, &id, 1024).await;
+    assert!(!host.outcome_unknown());
+    host.drain_processes().await.unwrap();
+}

@@ -55,9 +55,6 @@ pub const COMPONENT_NAMES: &[&str] = &[
     "cta",
 ];
 
-const MAX_TEXT_BYTES: usize = 256 * 1024;
-const MAX_ATTRIBUTE_VALUE_BYTES: usize = 64 * 1024;
-
 const VOID_TAGS: &[&str] = &[
     "area", "base", "br", "col", "embed", "hr", "img", "input", "link", "meta", "param", "source",
     "track", "wbr", "image",
@@ -798,24 +795,17 @@ fn push_history(history: &mut Vec<String>, value: &str) {
 fn normalize_page(page: &str) -> Result<String, ProjectError> {
     let page = page.strip_prefix('/').unwrap_or(page);
     let page = page.strip_prefix("./").unwrap_or(page);
-    if page.is_empty() || page.len() > 512 || page.chars().any(char::is_control) {
+    if page.is_empty() || page.chars().any(char::is_control) {
         return Err(ProjectError::new(
             "invalid_page",
             "page must be a relative HTML path",
         ));
     }
     let components: Vec<&str> = page.split('/').collect();
-    if components.is_empty() || components.len() > 16 {
-        return Err(ProjectError::new(
-            "invalid_page",
-            "page path has too many components",
-        ));
-    }
     for component in &components {
         if component.is_empty()
             || *component == "."
             || *component == ".."
-            || component.len() > 255
             || component.starts_with('.')
             || component.contains(['\\', ':', '\0'])
         {
@@ -1929,12 +1919,6 @@ fn splice(source: &str, range: Range<usize>, replacement: &str) -> Result<String
 // ---------------------------------------------------------------------------
 
 fn validate_text(text: &str) -> Result<(), ProjectError> {
-    if text.len() > MAX_TEXT_BYTES {
-        return Err(ProjectError::new(
-            "invalid_value",
-            format!("text exceeds the {MAX_TEXT_BYTES}-byte limit"),
-        ));
-    }
     if text
         .chars()
         .any(|character| character.is_control() && !matches!(character, '\n' | '\r' | '\t'))
@@ -2176,14 +2160,13 @@ fn validate_attribute(
             format!("{name} is not an editable attribute"),
         ));
     }
-    if value.len() > MAX_ATTRIBUTE_VALUE_BYTES
-        || value
-            .chars()
-            .any(|character| character.is_control() && !matches!(character, '\n' | '\t'))
+    if value
+        .chars()
+        .any(|character| character.is_control() && !matches!(character, '\n' | '\t'))
     {
         return Err(ProjectError::new(
             "invalid_value",
-            "attribute value exceeds the limit or contains a control character",
+            "attribute value contains a control character",
         ));
     }
     match name {
@@ -2568,12 +2551,6 @@ fn validate_style_properties(
             "style operation requires at least one property",
         ));
     }
-    if properties.len() > 32 {
-        return Err(ProjectError::new(
-            "invalid_style",
-            "style operation is limited to 32 properties",
-        ));
-    }
     let mut updates = Vec::with_capacity(properties.len());
     for (raw_name, raw_value) in properties {
         let trimmed = raw_name.trim();
@@ -2608,14 +2585,13 @@ fn validate_style_properties(
                 format!("style value for {name} must be a string"),
             )
         })?;
-        if value.len() > 512
-            || value
-                .chars()
-                .any(|character| character.is_control() && !matches!(character, '\n' | '\t'))
+        if value
+            .chars()
+            .any(|character| character.is_control() && !matches!(character, '\n' | '\t'))
         {
             return Err(ProjectError::new(
                 "invalid_style",
-                format!("style value for {name} exceeds the limit"),
+                format!("style value for {name} contains a control character"),
             ));
         }
         let (value, important) = strip_important(value.trim());

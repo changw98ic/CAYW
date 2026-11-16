@@ -346,3 +346,28 @@ async fn search_limits_invalid_patterns_and_cancellation_are_known_failures() {
         .unwrap_err();
     assert!(err.message.contains("deadline"));
 }
+
+#[tokio::test]
+async fn default_search_accepts_large_ignored_comment_sets_and_dense_literal_matches() {
+    let temp = tempfile::tempdir().unwrap();
+    fs::write(
+        temp.path().join(".gitignore"),
+        format!("{}#{}\n", "# comment\n".repeat(1025), "x".repeat(65536)),
+    )
+    .unwrap();
+    fs::write(temp.path().join("a.txt"), "a\n".repeat(3 * 1024 * 1024 / 2)).unwrap();
+    let ws = workspace(&temp, Limits::default());
+    let result = call(&ws, "fs.glob", json!({"path":".","pattern":"**/*"}))
+        .await
+        .unwrap();
+    assert!(paths(&result).contains(&"a.txt"));
+    let result = call(
+        &ws,
+        "fs.grep",
+        json!({"path":"a.txt","pattern":"a","literal":true,"max_matches":100}),
+    )
+    .await
+    .unwrap();
+    assert_eq!(result["matches"].as_array().unwrap().len(), 100);
+    assert_eq!(result["truncated"], true);
+}

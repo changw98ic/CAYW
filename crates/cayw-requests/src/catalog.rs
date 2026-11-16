@@ -182,15 +182,15 @@ impl OperationCatalog {
         definitions: &[ToolDefinition],
         scopes: Vec<OperationScope>,
     ) -> Result<Self> {
-        if scopes.is_empty() || scopes.len() > 64 || definitions.len() > 128 {
+        if scopes.is_empty() {
             return Err(RequestError::InvalidInput(
-                "catalog requires 1..64 selected operations and at most 128 definitions".into(),
+                "catalog requires at least one selected operation".into(),
             ));
         }
         let mut catalog = BTreeMap::new();
         for definition in definitions {
             identifier(&definition.name)?;
-            bounded_json(&definition.parameters, ARG_BYTES)?;
+            serde_json::to_vec(&definition.parameters)?;
             let validator = ArgumentValidator::new(&definition.parameters).map_err(|_| {
                 RequestError::InvalidInput("invalid or externally loading host schema".into())
             })?;

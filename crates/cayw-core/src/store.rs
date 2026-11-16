@@ -15,13 +15,13 @@ use std::{
 use uuid::Uuid;
 
 const APPLICATION_ID: u32 = 0x43415957;
-const STORAGE_FORMAT: &str = "cayw-core/3";
+const STORAGE_FORMAT: &str = "cayw-core/4";
 const PROJECTION_CACHE_ENTRIES: usize = 32;
 // Limits retained JSON, not the decoded sessions' allocator overhead.
 const PROJECTION_CACHE_JSON_BYTES: usize = 16 * 1024 * 1024;
 
 mod capabilities;
-mod migration;
+pub(crate) mod migration;
 pub(crate) mod validation;
 mod waits;
 use validation::{check_values, checked_input, encode_readable};
@@ -328,7 +328,7 @@ impl SessionStore {
                 }
                 transaction.execute_batch(
                     "CREATE TABLE core_metadata (format TEXT PRIMARY KEY NOT NULL);
-                     INSERT INTO core_metadata (format) VALUES ('cayw-core/3');
+                     INSERT INTO core_metadata (format) VALUES ('cayw-core/4');
                      CREATE TABLE core_sessions (id TEXT PRIMARY KEY NOT NULL, projection TEXT NOT NULL);
                      CREATE TABLE core_events (
                          session_id TEXT NOT NULL REFERENCES core_sessions(id),
@@ -344,7 +344,7 @@ impl SessionStore {
                 transaction.pragma_update(None, "application_id", APPLICATION_ID)?;
                 transaction.pragma_update(None, "user_version", SCHEMA_VERSION)?;
             } else {
-                if !matches!(version, 1 | 2 | SCHEMA_VERSION) {
+                if !matches!(version, 1 | 2 | 3 | SCHEMA_VERSION) {
                     return Err(CoreError::SchemaVersion {
                         found: version,
                         expected: SCHEMA_VERSION,
@@ -368,6 +368,7 @@ impl SessionStore {
             let expected_format = match version {
                 1 => "cayw-core/1",
                 2 => "cayw-core/2",
+                3 => "cayw-core/3",
                 _ => STORAGE_FORMAT,
             };
             if format != expected_format {
@@ -375,9 +376,13 @@ impl SessionStore {
             }
             transaction.prepare("SELECT id, projection FROM core_sessions LIMIT 0")?;
             transaction.prepare("SELECT session_id, cursor, record FROM core_events LIMIT 0")?;
+            if matches!(version, 1..=3) {
+                migration::archive_original(&transaction, version)?;
+            }
             match version {
                 1 => migration::migrate_v1(&transaction)?,
                 2 => migration::migrate_v2(&transaction)?,
+                3 => migration::migrate_v3(&transaction)?,
                 _ => {}
             }
             // A current schema cannot make an older weak reconciliation valid.
@@ -608,14 +613,23 @@ impl SessionStore {
         connection: &Connection,
         id: &str,
     ) -> Result<Arc<StoredSession>, CoreError> {
+        if connection.is_autocommit() {
+            let transaction = connection.unchecked_transaction()?;
+            let session = self.cached_projection(&transaction, id)?;
+            transaction.commit()?;
+            return Ok(session);
+        }
         let json = projection_json(connection, id)?;
         let mut cache = self
             .projection_cache
             .lock()
             .map_err(|_| CoreError::StorePoisoned)?;
-        if let Some(cached) = cache.take(id)
+        if let Some(mut cached) = cache.take(id)
             && cached.json == json
         {
+            if event_cursor(connection, id)? != cached.session.cursor {
+                replay_updates(connection, Arc::make_mut(&mut cached.session))?;
+            }
             waits::validate_wait_log(connection, &cached.session)?;
             let session = cached.session.clone();
             cache.insert(cached);
@@ -922,13 +936,9 @@ impl SessionStore {
             "INSERT INTO core_events (session_id, cursor, record) VALUES (?1, ?2, ?3)",
             params![state.id, state.cursor as i64, record_json],
         )?;
-        // Host records change only the cursor. SQLite still processes the JSON,
-        // but Rust does not validate and encode the retained history again.
-        let json = transaction.query_row(
-            "UPDATE core_sessions SET projection=json_set(projection, '$.cursor', ?2) WHERE id=?1 RETURNING projection",
-            params![state.id, state.cursor as i64],
-            |row| row.get(0),
-        )?;
+        // Host observations do not change the checkpoint. Readers fold their
+        // cursor together with subsequent stream updates from the original log.
+        let json = projection_json(&transaction, &state.id)?;
         transaction.commit()?;
         self.projection_cache
             .lock()
@@ -991,21 +1001,16 @@ impl SessionStore {
                 event: Box::new(event.clone()),
             },
         };
-        // The event contains the same message at a greater envelope depth than
-        // the projection. Its readable encoding checks every changed JSON value.
+        // Snapshots and metadata carry their complete JSON leaves; text deltas
+        // only append strings to the already validated current message.
         let record_json = encode_readable(&record)?;
-        let lifecycle = serde_json::to_string(&state.lifecycle)?;
         transaction.execute(
             "INSERT INTO core_events (session_id, cursor, record) VALUES (?1, ?2, ?3)",
             params![state.id, state.cursor as i64, record_json],
         )?;
-        // A stream update changes only these two fields. Keep the already
-        // validated history in SQLite instead of decoding and encoding it again.
-        let json = transaction.query_row(
-            "UPDATE core_sessions SET projection=json_set(projection, '$.cursor', ?2, '$.lifecycle', json(?3)) WHERE id=?1 RETURNING projection",
-            params![state.id, state.cursor as i64, lifecycle],
-            |row| row.get(0),
-        )?;
+        // The durable checkpoint stays unchanged until a lifecycle boundary.
+        // The delta and its original cursor are already committed in the log.
+        let json = projection_json(&transaction, &state.id)?;
         transaction.commit()?;
         self.projection_cache
             .lock()
@@ -1813,6 +1818,12 @@ fn projection_json(connection: &Connection, id: &str) -> Result<String, CoreErro
         .ok_or_else(|| CoreError::SessionNotFound(id.into()))
 }
 fn load(connection: &Connection, id: &str) -> Result<StoredSession, CoreError> {
+    if connection.is_autocommit() {
+        let transaction = connection.unchecked_transaction()?;
+        let session = load(&transaction, id)?;
+        transaction.commit()?;
+        return Ok(session);
+    }
     decode_projection(connection, id, &projection_json(connection, id)?)
 }
 fn decode_projection(
@@ -1820,15 +1831,73 @@ fn decode_projection(
     id: &str,
     json: &str,
 ) -> Result<StoredSession, CoreError> {
-    let session = checked_input(serde_json::from_str::<StoredSession>(json)?)?;
+    let mut session = checked_input(serde_json::from_str::<StoredSession>(json)?)?;
     if session.id != id || session.cursor > i64::MAX as u64 || session.fence > i64::MAX as u64 {
         return Err(CoreError::CorruptStore(
             "The session identity or counter is inconsistent".into(),
         ));
     }
+    replay_updates(connection, &mut session)?;
     session.validate_wait_bindings()?;
     waits::validate_wait_log(connection, &session)?;
     Ok(session)
+}
+
+fn event_cursor(connection: &Connection, id: &str) -> Result<u64, CoreError> {
+    let cursor: i64 = connection.query_row(
+        "SELECT COALESCE(MAX(cursor),0) FROM core_events WHERE session_id=?1",
+        [id],
+        |row| row.get(0),
+    )?;
+    u64::try_from(cursor).map_err(|_| CoreError::CorruptStore("negative event cursor".into()))
+}
+
+/// Only observational updates may follow a checkpoint. Execution and permission
+/// transitions always persist their full projection in their own transaction.
+fn replay_updates(connection: &Connection, session: &mut StoredSession) -> Result<(), CoreError> {
+    if event_cursor(connection, &session.id)? < session.cursor {
+        return Err(CoreError::CorruptStore(
+            "checkpoint is ahead of its event log".into(),
+        ));
+    }
+    let mut query = connection.prepare(
+        "SELECT cursor,record FROM core_events WHERE session_id=?1 AND cursor>?2 ORDER BY cursor",
+    )?;
+    let mut rows = query.query(params![session.id, session.cursor as i64])?;
+    while let Some(row) = rows.next()? {
+        let cursor: i64 = row.get(0)?;
+        let json: String = row.get(1)?;
+        let record: EventRecord = serde_json::from_str(&json)?;
+        if cursor as u64 != increment(session.cursor)?
+            || record.cursor != cursor as u64
+            || record.session_id != session.id
+            || record.protocol_version != PROTOCOL_VERSION
+            || record.attempt != session.attempt
+        {
+            return Err(CoreError::CorruptStore(
+                "stream suffix cursor or identity mismatch".into(),
+            ));
+        }
+        match &record.event {
+            CoreEvent::Agent { event }
+                if matches!(event.as_ref(), AgentEvent::MessageUpdate { .. }) =>
+            {
+                let lease = record
+                    .attempt
+                    .as_ref()
+                    .ok_or_else(|| invalid("stream suffix has no lease"))?;
+                apply_agent_event(session, lease, event)?;
+            }
+            CoreEvent::Host { kind, .. } => validate_host_kind(kind)?,
+            _ => {
+                return Err(CoreError::CorruptStore(
+                    "non-observational event is missing its checkpoint".into(),
+                ));
+            }
+        }
+        session.cursor = record.cursor;
+    }
+    Ok(())
 }
 fn insert_session(connection: &Connection, session: &StoredSession) -> Result<(), CoreError> {
     connection.execute(
@@ -1988,19 +2057,23 @@ fn apply_agent_event(
             }
             session.lifecycle_mut()?.open_message = Some(message.clone());
         }
-        AgentEvent::MessageUpdate { message, event } => {
+        AgentEvent::MessageUpdate { event } => {
             let Some(Message::Assistant(open)) = &lifecycle.open_message else {
                 return Err(invalid("MessageUpdate requires an open assistant message"));
             };
-            if !same_assistant_stream(open, message)
-                || event.is_terminal()
-                || event.message() != message
+            if event.is_terminal()
+                || event
+                    .snapshot()
+                    .is_some_and(|snapshot| !same_assistant_stream(open, snapshot))
             {
                 return Err(invalid(
                     "A message update must match its open assistant stream and nonterminal event",
                 ));
             }
-            session.lifecycle_mut()?.open_message = Some(Message::Assistant(message.clone()));
+            let Some(Message::Assistant(open)) = &mut session.lifecycle_mut()?.open_message else {
+                unreachable!("assistant checked above")
+            };
+            event.apply_to(open).map_err(|error| invalid(&error))?;
         }
         AgentEvent::MessageEnd { message } => {
             let open = lifecycle
@@ -2306,11 +2379,8 @@ mod tests {
                 .append_agent_event(
                     &lease,
                     &AgentEvent::MessageUpdate {
-                        message: message.clone(),
-                        event: Box::new(cayw_ai::AssistantEvent::TextDelta {
-                            index: 0,
-                            delta: "x".into(),
-                            partial: message.clone(),
+                        event: Box::new(cayw_ai::AssistantEvent::Snapshot {
+                            message: message.clone(),
                         }),
                     },
                 )
@@ -2600,5 +2670,61 @@ mod tests {
             SessionStore::open(":memory:"),
             Err(CoreError::InvalidInput(_))
         ));
+    }
+}
+
+#[cfg(test)]
+mod checkpoint_replay_tests {
+    use super::*;
+
+    #[test]
+    fn replay_restores_exact_open_message_before_any_new_checkpoint() {
+        let directory = std::env::temp_dir().join(format!("cayw-checkpoint-{}", Uuid::new_v4()));
+        std::fs::create_dir(&directory).unwrap();
+        let path = directory.join("core.sqlite");
+        let store = SessionStore::open(&path).unwrap();
+        let id = store.create_session("replay").unwrap().id;
+        let lease = store.begin_attempt(&id, "worker").unwrap();
+        let mut message = AssistantMessage::new(&cayw_ai::Model::new("fixture", "checkpoint"));
+        message.content = vec![Content::text("prefix")];
+        for event in [
+            AgentEvent::AgentStart,
+            AgentEvent::TurnStart,
+            AgentEvent::MessageStart {
+                message: Message::Assistant(message.clone()),
+            },
+        ] {
+            store.append_agent_event(&lease, &event).unwrap();
+        }
+        let peer = SessionStore::open(&path).unwrap();
+        // Populate both independent caches before either suffix is appended.
+        peer.snapshot(&id).unwrap();
+        for (writer, delta) in [(&store, "-one"), (&peer, "-two")] {
+            writer
+                .append_agent_event(
+                    &lease,
+                    &AgentEvent::MessageUpdate {
+                        event: Box::new(cayw_ai::AssistantEvent::TextDelta {
+                            index: 0,
+                            delta: delta.into(),
+                        }),
+                    },
+                )
+                .unwrap();
+        }
+        let reopened = SessionStore::open(&path).unwrap();
+        for reader in [&store, &peer, &reopened] {
+            let connection = reader.connection.lock().unwrap();
+            let restored = reader.cached_projection(&connection, &id).unwrap();
+            let Some(Message::Assistant(open)) = &restored.lifecycle().unwrap().open_message else {
+                panic!("open assistant")
+            };
+            assert_eq!(open.content, vec![Content::text("prefix-one-two")]);
+            assert_eq!(restored.attempt.as_ref(), Some(&lease));
+        }
+        drop(reopened);
+        drop(peer);
+        drop(store);
+        std::fs::remove_dir_all(directory).unwrap();
     }
 }

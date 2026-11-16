@@ -75,6 +75,7 @@ struct Inner {
     incarnation: String,
     journal_failure: Mutex<Option<String>>,
     limits: Limits,
+    slots_changed: tokio::sync::Notify,
     policy: Arc<dyn RegistryPolicy>,
     state: Mutex<State>,
 }
@@ -133,6 +134,7 @@ impl Registry {
         Ok(Self(Arc::new(Inner {
             incarnation,
             journal_failure: Mutex::new(None),
+            slots_changed: tokio::sync::Notify::new(),
             limits,
             policy,
             state: Mutex::new(State::default()),
@@ -574,7 +576,9 @@ impl Registry {
             target: target.into(),
             arguments: arguments.clone(),
         };
-        let mut reservation = self.reserve(&request, bytes)?;
+        let mut reservation = self
+            .reserve(&request, bytes, &child, &capture.cancel, deadline)
+            .await?;
         let mut journal_guard: Option<JournalGuard> = None;
         let result = async {
             tokio::select! {
@@ -887,51 +891,66 @@ impl Registry {
         }
     }
 
-    fn reserve(
+    async fn reserve(
         &self,
         request: &AccessRequest,
         bytes: usize,
+        cancel: &CancellationToken,
+        source_cancel: &CancellationToken,
+        deadline: Option<tokio::time::Instant>,
     ) -> Result<Reservation, CapabilityError> {
-        let mut state = lock(&self.0.state);
-        let next_id = state
-            .next_id
-            .checked_add(1)
-            .ok_or_else(|| failure("request IDs exhausted"))?;
-        let source = state
-            .sources
-            .get_mut(&request.source.source.id)
-            .ok_or_else(|| failure("source unavailable"))?;
-        check_source(source, request.source.generation)?;
-        if self
-            .0
-            .limits
-            .max_source_operations
-            .is_some_and(|limit| source.operations >= limit)
-            || source.in_flight >= self.0.limits.max_in_flight
-            || self
-                .0
-                .limits
-                .max_source_bytes
-                .is_some_and(|limit| bytes > limit.saturating_sub(source.bytes))
-        {
-            return Err(failure(
-                "source operation, concurrency, or byte budget exhausted",
-            ));
+        loop {
+            let changed = self.0.slots_changed.notified();
+            tokio::pin!(changed);
+            changed.as_mut().enable();
+            {
+                let mut state = lock(&self.0.state);
+                let next_id = state
+                    .next_id
+                    .checked_add(1)
+                    .ok_or_else(|| failure("request IDs exhausted"))?;
+                let source = state
+                    .sources
+                    .get_mut(&request.source.source.id)
+                    .ok_or_else(|| failure("source unavailable"))?;
+                check_source(source, request.source.generation)?;
+                if self
+                    .0
+                    .limits
+                    .max_source_operations
+                    .is_some_and(|limit| source.operations >= limit)
+                    || self
+                        .0
+                        .limits
+                        .max_source_bytes
+                        .is_some_and(|limit| bytes > limit.saturating_sub(source.bytes))
+                {
+                    return Err(failure("source operation or byte budget exhausted"));
+                }
+                if source.in_flight < self.0.limits.max_in_flight {
+                    source.operations += 1;
+                    source.bytes += bytes;
+                    source.in_flight += 1;
+                    state.next_id = next_id;
+                    return Ok(Reservation {
+                        registry: self.clone(),
+                        key: RequestKey {
+                            id: next_id,
+                            source: request.source.clone(),
+                            operation: request.operation,
+                            target: request.target.clone(),
+                        },
+                        effect_pending: false,
+                    });
+                }
+            }
+            tokio::select! { biased;
+                _ = cancel.cancelled() => return Err(failure("bridge cancelled while waiting for execution capacity")),
+                _ = source_cancel.cancelled() => return Err(failure("source invalidated while waiting for execution capacity")),
+                _ = until(deadline) => return Err(failure("bridge capacity deadline")),
+                _ = &mut changed => {},
+            }
         }
-        source.operations += 1;
-        source.bytes += bytes;
-        source.in_flight += 1;
-        state.next_id = next_id;
-        Ok(Reservation {
-            registry: self.clone(),
-            key: RequestKey {
-                id: next_id,
-                source: request.source.clone(),
-                operation: request.operation,
-                target: request.target.clone(),
-            },
-            effect_pending: false,
-        })
     }
 }
 
@@ -1036,6 +1055,7 @@ impl Drop for Reservation {
             .get_mut(&self.key.source.source.id)
             .expect("reserved source");
         source.in_flight -= 1;
+        self.registry.0.slots_changed.notify_waiters();
         if self.effect_pending {
             source.unknown = true;
         }

@@ -326,9 +326,10 @@ struct ReadyCandidate {
 /// dispatch count at ready time are durable, so fairness survives restarts.
 fn ready_candidates(tx: &rusqlite::Transaction<'_>) -> Result<Vec<ReadyCandidate>, QueueError> {
     let mut statement = tx.prepare(
-        "SELECT id,priority,ready_order,ready_since_dispatch FROM runtime_tasks
+        "SELECT id,priority,ready_order,ready_since_dispatch FROM runtime_tasks AS candidate
          WHERE state='queued' AND cancel_requested=0 AND worker IS NOT NULL
            AND ready_order IS NOT NULL AND ready_since_dispatch IS NOT NULL
+           AND (child_tree IS NULL OR (SELECT count(*) FROM runtime_tasks AS active WHERE active.child_tree=candidate.child_tree AND active.holds_slot=1) < child_concurrency)
          ORDER BY ticket",
     )?;
     let rows = statement.query_map([], |row| {
@@ -344,30 +345,14 @@ fn ready_candidates(tx: &rusqlite::Transaction<'_>) -> Result<Vec<ReadyCandidate
 /// One read-only capacity decision shared by the host precheck and child start.
 /// Live rows include queued, running, waiting approval, and draining; slots
 /// count only admitted rows; any claimed queued row blocks a direct child.
-fn check_child_capacity_in(
-    db: &Connection,
-    capacity: usize,
-    concurrency: usize,
-) -> Result<(), QueueError> {
-    let (live, active, ready): (i64, i64, bool) = db.query_row(
-        "SELECT count(*) FILTER(WHERE state IN ('queued','running','waiting_approval','draining')),
-                count(*) FILTER(WHERE holds_slot=1),
-                EXISTS(SELECT 1 FROM runtime_tasks WHERE state='queued' AND worker IS NOT NULL AND cancel_requested=0)
-         FROM runtime_tasks",
-        [],
-        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
-    )?;
-    if ready {
-        return Err(QueueError::Busy);
-    }
-    if live >= capacity as i64 || active >= concurrency as i64 {
+fn check_child_capacity_in(db: &Connection, capacity: usize) -> Result<(), QueueError> {
+    let live: i64 = db.query_row("SELECT count(*) FROM runtime_tasks WHERE state IN ('queued','running','waiting_approval','draining')", [], |row| row.get(0))?;
+    if live >= capacity as i64 {
         return Err(QueueError::QueueFull);
     }
     Ok(())
 }
-/// Promoted entries are ordered FIFO by the round they became ready. Everything
-/// else keeps priority DESC then ready order ASC. A promoted entry is never
-/// pushed back by a later arrival, so overtaking is bounded by the window.
+
 fn order_ready(candidates: &mut [ReadyCandidate], dispatch: u64, fairness_after: u64) {
     candidates.sort_by(|left, right| {
         let left_promoted = dispatch.saturating_sub(left.since) >= fairness_after;
@@ -404,6 +389,18 @@ impl QueuePolicy {
         resources: &ResourcePolicy,
     ) -> Result<Self, QueueError> {
         resources.validate()?;
+        if concurrency == 0
+            || capacity < concurrency
+            || i64::try_from(concurrency).is_err()
+            || i64::try_from(capacity).is_err()
+            || i64::try_from(fairness_after).is_err()
+            || fairness_after.checked_add(capacity - 1).is_none()
+        {
+            return Err(QueueError::InvalidInput(
+                "queue policy must fit persistent counters and capacity must cover concurrency"
+                    .into(),
+            ));
+        }
         Ok(Self {
             concurrency: concurrency as u64,
             capacity: capacity as u64,
@@ -540,6 +537,10 @@ impl Queue {
             priority TEXT NOT NULL DEFAULT 'normal', holds_slot INTEGER NOT NULL DEFAULT 0,
             ready_order INTEGER, ready_since_dispatch INTEGER, dispatches INTEGER NOT NULL DEFAULT 0,
             declared_memory_bytes INTEGER NOT NULL DEFAULT 0 CHECK(declared_memory_bytes>=0));")?;
+        let has_child_tree: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM pragma_table_info('runtime_tasks') WHERE name='child_tree')",[],|row|row.get(0))?;
+        if !has_child_tree {
+            tx.execute_batch("ALTER TABLE runtime_tasks ADD COLUMN child_tree TEXT; ALTER TABLE runtime_tasks ADD COLUMN child_concurrency INTEGER CHECK(child_concurrency>0);")?;
+        }
         let (has_intent, has_text, has_input): (bool, bool, bool) = tx.query_row(
             "SELECT EXISTS(SELECT 1 FROM pragma_table_info('runtime_tasks') WHERE name='intent'),
              EXISTS(SELECT 1 FROM pragma_table_info('runtime_tasks') WHERE name='text'),
@@ -929,32 +930,30 @@ impl Queue {
         )?;
         Ok(changed)
     }
-    /// Read-only child precheck for the host: live capacity, held execution
-    /// slots, and any ready queued work are checked from one consistent read.
-    pub fn check_child_capacity(
-        &self,
-        capacity: usize,
-        concurrency: usize,
-    ) -> Result<(), QueueError> {
-        let db = lock(&self.connection);
-        check_child_capacity_in(&db, capacity, concurrency)
+    /// Child admission checks accepted capacity, not currently occupied execution slots.
+    pub fn check_child_capacity(&self, capacity: usize) -> Result<(), QueueError> {
+        check_child_capacity_in(&lock(&self.connection), capacity)
     }
-    /// Child work starts as running in one IMMEDIATE transaction. Capacity and
-    /// concurrency are checked without waiting, so the caller can return to its
-    /// parent instead of occupying a queued slot. It never bypasses ready work.
-    pub fn try_start_child(
+    /// Persist child work in the same fair queue as ordinary tasks. Its worker
+    /// owns the queued identity but does not yet own an execution slot.
+    pub fn enqueue_child(
         &self,
         session: &str,
         text: &str,
         intent: &TaskIntent,
         capacity: usize,
+        tree: &str,
         concurrency: usize,
     ) -> Result<TaskLease, QueueError> {
+        if tree.is_empty() || concurrency == 0 || i64::try_from(concurrency).is_err() {
+            return Err(QueueError::InvalidInput(
+                "child tree and representable positive concurrency are required".into(),
+            ));
+        }
         let input = TaskInput {
             text: text.into(),
             images: vec![],
         };
-        let input_json = serde_json::to_string(&input)?;
         intent.validate()?;
         let mut db = lock(&self.connection);
         let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
@@ -962,20 +961,29 @@ impl Queue {
         if duplicate {
             return Err(QueueError::Busy);
         }
-        check_child_capacity_in(&tx, capacity, concurrency)?;
-        // Children currently make the canonical zero declaration. Still verify
-        // the shared ledger before reserving a slot; no child path bypasses it.
-        resource_usage_in(&tx)?;
+        check_child_capacity_in(&tx, capacity)?;
         let id = Uuid::new_v4().to_string();
         let worker = Uuid::new_v4().to_string();
-        tx.execute("INSERT INTO runtime_tasks(id,session,input_json,state,queued_at,worker,fence,intent,priority,holds_slot,dispatches) VALUES (?1,?2,?3,'running',?4,?5,1,?6,'normal',1,1)",params![id,session,input_json,sql_u64(timestamp_ms())?,worker,serde_json::to_string(intent)?])?;
-        take_dispatch_count(&tx)?;
+        let order = take_ready_order(&tx)?;
+        let since = dispatch_count_in(&tx)?;
+        tx.execute("INSERT INTO runtime_tasks(id,session,input_json,state,queued_at,worker,fence,intent,priority,holds_slot,dispatches,ready_order,ready_since_dispatch,child_tree,child_concurrency) VALUES (?1,?2,?3,'queued',?4,?5,1,?6,'normal',0,0,?7,?8,?9,?10)",params![id,session,serde_json::to_string(&input)?,sql_u64(timestamp_ms())?,worker,serde_json::to_string(intent)?,counter_sql(order)?,counter_sql(since)?,tree,concurrency as i64])?;
         tx.commit()?;
         Ok(TaskLease {
             id,
             worker,
             fence: 1,
         })
+    }
+    /// An idle parent remains logically running while waiting for a dependency,
+    /// but gives back execution resources. The original lease stays authoritative.
+    pub fn park_dependency(&self, lease: &TaskLease) -> Result<(), QueueError> {
+        let n = lock(&self.connection).execute("UPDATE runtime_tasks SET holds_slot=0,ready_order=NULL,ready_since_dispatch=NULL WHERE id=?1 AND worker=?2 AND fence=?3 AND state='running' AND holds_slot=1 AND cancel_requested=0",params![lease.id,lease.worker,sql_u64(lease.fence)?])?;
+        if n != 1 {
+            return Err(QueueError::Worker(
+                "dependency wait must own its execution slot".into(),
+            ));
+        }
+        Ok(())
     }
     pub fn get(&self, id: &str) -> Result<TaskRecord, QueueError> {
         lock(&self.connection)
@@ -1005,6 +1013,17 @@ impl Queue {
     pub fn claim(&self, id: &str) -> Result<TaskLease, QueueError> {
         let mut db = lock(&self.connection);
         let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let child: bool = tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM runtime_tasks WHERE id=?1 AND child_tree IS NOT NULL)",
+            [id],
+            |row| row.get(0),
+        )?;
+        if child {
+            return Err(QueueError::InvalidInput(
+                "a child task can only execute under its original parent scope".into(),
+            ));
+        }
+
         let record: Option<(Option<String>, bool)> = tx
             .query_row(
                 "SELECT attempt,cancel_requested FROM runtime_tasks WHERE id=?1 AND state='queued'",
@@ -1095,19 +1114,20 @@ impl Queue {
     pub fn ready(&self, lease: &TaskLease) -> Result<(), QueueError> {
         let mut db = lock(&self.connection);
         let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let record: Option<(String, bool)> = tx
+        let record: Option<(String, bool, bool)> = tx
             .query_row(
-                "SELECT state,cancel_requested FROM runtime_tasks WHERE id=?1 AND worker=?2 AND fence=?3",
+                "SELECT state,cancel_requested,holds_slot FROM runtime_tasks WHERE id=?1 AND worker=?2 AND fence=?3",
                 params![lease.id, lease.worker, sql_u64(lease.fence)?],
-                |r| Ok((r.get(0)?, r.get(1)?)),
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
             )
             .optional()?;
-        let (task_state, cancelled) =
+        let (task_state, cancelled, holds_slot) =
             record.ok_or_else(|| QueueError::Worker("task worker was fenced".into()))?;
         if cancelled {
             return Err(QueueError::Cancelled);
         }
         match state(&task_state)? {
+            TaskState::Running if !holds_slot => {}
             TaskState::Queued | TaskState::Running => {
                 tx.commit()?;
                 return Ok(());
@@ -1122,7 +1142,7 @@ impl Queue {
         let since = dispatch_count_in(&tx)?;
         let order = take_ready_order(&tx)?;
         let n = tx.execute(
-            "UPDATE runtime_tasks SET state='queued',ready_since_dispatch=?4,ready_order=?5 WHERE id=?1 AND worker=?2 AND fence=?3 AND state='waiting_approval' AND cancel_requested=0",
+            "UPDATE runtime_tasks SET state='queued',ready_since_dispatch=?4,ready_order=?5 WHERE id=?1 AND worker=?2 AND fence=?3 AND (state='waiting_approval' OR (state='running' AND holds_slot=0)) AND cancel_requested=0",
             params![
                 lease.id,
                 lease.worker,
@@ -1364,9 +1384,13 @@ impl Queue {
         // its input/priority/ready position, but detach the dead claim so it
         // cannot starve unrelated ready work; a later claim takes over.
         tx.execute(
-            "UPDATE runtime_tasks SET worker=NULL,fence=fence+1,holds_slot=0 WHERE session=?1 AND state='queued' AND attempt IS NULL AND cancel_requested=0 AND worker IS NOT NULL",
+            "UPDATE runtime_tasks SET worker=NULL,fence=fence+1,holds_slot=0 WHERE session=?1 AND state='queued' AND attempt IS NULL AND cancel_requested=0 AND worker IS NOT NULL AND child_tree IS NULL",
             [session],
         )?;
+        // A child loses its in-memory parent authority/budget scope when its
+        // executor dies. Preserve the accepted record, but never restart it as
+        // an ordinary task with the caller's different authority.
+        tx.execute("UPDATE runtime_tasks SET state='interrupted',cancel_requested=1,fence=fence+1,holds_slot=0,error='original parent scope stopped; inspect child records before a new dispatch' WHERE session=?1 AND state='queued' AND attempt IS NULL AND child_tree IS NOT NULL",[session])?;
         tx.execute("UPDATE runtime_tasks SET state='interrupted',cancel_requested=1,fence=fence+1,holds_slot=0,error='explicit worker recovery; inspect Core outcomes' WHERE session=?1 AND (state IN ('running','draining','waiting_approval') OR (state='queued' AND attempt IS NOT NULL))",[session])?;
         tx.commit()?;
         Ok(())

@@ -186,13 +186,18 @@ impl Provider for CapturedResponse {
         failure.usage_status = UsageStatus::Unknown;
         failure.usage = Usage::default();
         failure.usage_fields.clear();
+        let mut started = partial.clone();
+        started.content = vec![Content::text("")];
         Box::pin(futures::stream::iter([
+            AssistantEvent::TextStart {
+                index: 0,
+                partial: started,
+            },
             AssistantEvent::TextDelta {
                 index: 0,
                 delta: "saved response prefix".into(),
-                partial: partial.clone(),
             },
-            AssistantEvent::UsageUpdate { partial },
+            AssistantEvent::usage_update(&partial),
             AssistantEvent::Error {
                 message: failure.failure(
                     if self.abort {

@@ -49,7 +49,7 @@ fn lease() -> AttemptLease {
 }
 fn event(cursor: u64, event: CoreEvent) -> EventRecord {
     EventRecord {
-        protocol_version: 3,
+        protocol_version: cayw_core::PROTOCOL_VERSION,
         session_id: "session".into(),
         cursor,
         timestamp: cayw_trace_debug::now_ms(),

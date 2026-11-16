@@ -21,9 +21,6 @@ pub fn content_sha256(bytes: &[u8]) -> String {
     out
 }
 
-const DEFAULT_MAX_SYMBOLS_PER_FILE: usize = 1000;
-const DEFAULT_MAX_DIAGNOSTICS: usize = 4096;
-
 /// Outline-derived symbol snapshot fed by the host (e.g. from `code.outline`).
 ///
 /// This bridge never parses source text itself.
@@ -92,8 +89,8 @@ struct Inner {
 struct Shared {
     inner: Mutex<Inner>,
     diag_seq: AtomicU64,
-    max_symbols_per_file: usize,
-    max_diagnostics: usize,
+    max_symbols_per_file: Option<usize>,
+    max_diagnostics: Option<usize>,
 }
 
 /// Host-owned shared catalog. [`Clone`] is cheap and shares the same index so
@@ -114,8 +111,8 @@ impl SymbolVersionBridge {
             shared: std::sync::Arc::new(Shared {
                 inner: Mutex::new(Inner::default()),
                 diag_seq: AtomicU64::new(1),
-                max_symbols_per_file: DEFAULT_MAX_SYMBOLS_PER_FILE,
-                max_diagnostics: DEFAULT_MAX_DIAGNOSTICS,
+                max_symbols_per_file: None,
+                max_diagnostics: None,
             }),
         }
     }
@@ -125,8 +122,8 @@ impl SymbolVersionBridge {
             shared: std::sync::Arc::new(Shared {
                 inner: Mutex::new(Inner::default()),
                 diag_seq: AtomicU64::new(1),
-                max_symbols_per_file: max_symbols_per_file.max(1),
-                max_diagnostics: max_diagnostics.max(1),
+                max_symbols_per_file: Some(max_symbols_per_file),
+                max_diagnostics: Some(max_diagnostics),
             }),
         }
     }
@@ -147,10 +144,10 @@ impl SymbolVersionBridge {
         let content_sha256 =
             validate_sha256_hex(content_sha256).map_err(CodeIntelError::Invalid)?;
         let language = validate_kind(language).map_err(CodeIntelError::Invalid)?;
-        if symbols.len() > self.shared.max_symbols_per_file {
-            return Err(CodeIntelError::BudgetExceeded(
-                self.shared.max_symbols_per_file,
-            ));
+        if let Some(limit) = self.shared.max_symbols_per_file
+            && symbols.len() > limit
+        {
+            return Err(CodeIntelError::BudgetExceeded(limit));
         }
 
         let mut prepared = Vec::with_capacity(symbols.len());
@@ -361,11 +358,6 @@ impl SymbolVersionBridge {
                 "diagnostic message is empty".into(),
             ));
         }
-        if message.chars().count() > 1024 {
-            return Err(CodeIntelError::Invalid(
-                "diagnostic message exceeds 1024 characters".into(),
-            ));
-        }
         if input.byte_end < input.byte_start {
             return Err(CodeIntelError::Invalid(
                 "diagnostic has inverted byte range".into(),
@@ -377,8 +369,10 @@ impl SymbolVersionBridge {
             .inner
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        if guard.diagnostics.len() >= self.shared.max_diagnostics {
-            return Err(CodeIntelError::BudgetExceeded(self.shared.max_diagnostics));
+        if let Some(limit) = self.shared.max_diagnostics
+            && guard.diagnostics.len() >= limit
+        {
+            return Err(CodeIntelError::BudgetExceeded(limit));
         }
         let entry = guard
             .files

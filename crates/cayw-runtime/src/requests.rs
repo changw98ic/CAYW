@@ -157,7 +157,7 @@ fn service_policy_id(inner: &Inner, base_policy: &str) -> Result<String, Runtime
         "local_agents": local_agents,
         "background": inner.config.background.as_ref().map(|c| json!({
             "max_tasks": c.max_tasks,
-            "max_log_bytes": c.max_log_bytes,
+            "max_output_bytes": c.max_output_bytes,
             "max_retained_finished": c.max_retained_finished,
         })),
         "cells": {

@@ -860,12 +860,7 @@ pub(crate) fn prepare_provider_input_with_ranges(
         }
         Err(error) => {
             contexts.record_error(session_id, error.to_string());
-            let raw = message_tokens(messages);
-            return if raw > budget.input_limit {
-                Err(RuntimeError::Budget("context input"))
-            } else {
-                Ok(messages.to_vec())
-            };
+            return Ok(messages.to_vec());
         }
     };
     let mut changed = false;
@@ -905,13 +900,8 @@ pub(crate) fn prepare_provider_input_with_ranges(
             None
         }
     });
-    if let Some(rendered) = replacement
-        && message_tokens(&rendered) <= budget.input_limit
-    {
+    if let Some(rendered) = replacement {
         return Ok(rendered);
-    }
-    if !budget.window_was_default && planned.input_tokens > budget.input_limit {
-        return Err(RuntimeError::Budget("context input"));
     }
     Ok(messages.to_vec())
 }
@@ -1165,7 +1155,7 @@ fn joined(messages: &[Message]) -> String {
 }
 
 fn apply_assembly(assembly: &Assembly, window_was_default: bool) -> bool {
-    if !assembly.replaces_history || !assembly.sendable || assembly.model_calls != 0 {
+    if !assembly.replaces_history || assembly.model_calls != 0 {
         return false;
     }
     if !window_was_default {
@@ -1304,13 +1294,6 @@ fn excerpt_message(message: &Message, excerpt: &str) -> Message {
         }
         other => other.clone(),
     }
-}
-
-fn message_tokens(messages: &[Message]) -> u64 {
-    messages
-        .iter()
-        .map(|message| u64::try_from(message.text().len()).unwrap_or(u64::MAX))
-        .fold(0_u64, u64::saturating_add)
 }
 
 #[cfg(test)]
@@ -1570,7 +1553,7 @@ mod tests {
     }
 
     #[test]
-    fn set_window_excerpts_a_saved_tool_body_without_deleting_history() {
+    fn configured_window_does_not_excerpt_a_tool_body_using_byte_estimates() {
         let messages = saved_tool_body();
         let before = messages.clone();
         let context = Mutex::new(contexts());
@@ -1583,8 +1566,8 @@ mod tests {
                     if result.tool_call_id == "call-1" && result.tool_name == "read")
             })
             .expect("tool result stays paired");
-        assert!(excerpt.text().contains("original history was not deleted"));
-        assert!(!excerpt.text().contains(&"B".repeat(9_000)));
+        assert!(excerpt.text().contains(&"B".repeat(9_000)));
+        assert_eq!(prepared, before);
         assert!(
             messages
                 .iter()
@@ -1619,12 +1602,12 @@ mod tests {
     }
 
     #[test]
-    fn set_window_refuses_an_oversized_prompt_without_deleting_history() {
+    fn configured_window_byte_estimate_does_not_reject_input() {
         let context = Mutex::new(contexts());
         let messages = vec![Message::user("z".repeat(20_000))];
         let before = messages.clone();
-        let error = prepare_provider_input(&context, "s", &messages, Some(2_000), 100).unwrap_err();
-        assert!(matches!(error, RuntimeError::Budget("context input")));
+        let prepared = prepare_provider_input(&context, "s", &messages, Some(2_000), 100).unwrap();
+        assert_eq!(prepared, before);
         assert_eq!(messages, before);
     }
 

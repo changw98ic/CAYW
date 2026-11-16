@@ -26,12 +26,8 @@ use cayw_codemode::{
 use serde_json::{Value, json};
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
-pub const MAX_NODES: usize = 64;
-pub const MAX_SOURCE_BYTES: usize = 16 * 1024;
-pub const MAX_PLAN_BYTES: usize = 256 * 1024;
-pub const MAX_JSON_DEPTH: usize = 32;
 const MAX_IDENTIFIER_BYTES: usize = 256;
 const MAX_SAFE_INTEGER: u64 = 9_007_199_254_740_991;
 
@@ -92,19 +88,6 @@ pub fn validate_plan(plan: &GraphPlan) -> Result<(), crate::Error> {
     if plan.nodes.is_empty() {
         return Err(invalid("plan must contain at least one node"));
     }
-    if plan.nodes.len() > MAX_NODES {
-        return Err(invalid(format!(
-            "plan contains more than {MAX_NODES} nodes"
-        )));
-    }
-    let encoded = serde_json::to_vec(plan)
-        .map_err(|error| invalid(format!("plan cannot be encoded as JSON: {error}")))?;
-    if encoded.len() > MAX_PLAN_BYTES {
-        return Err(invalid(format!(
-            "encoded plan exceeds {MAX_PLAN_BYTES} bytes"
-        )));
-    }
-
     check_json(&plan.input, "plan input")?;
     check_json(&plan.initial_state, "plan initial_state")?;
     check_json(&plan.context, "plan context")?;
@@ -122,12 +105,6 @@ pub fn validate_plan(plan: &GraphPlan) -> Result<(), crate::Error> {
         }
         if by_id.insert(node.id.as_str(), node).is_some() {
             return Err(invalid(format!("duplicate node id {:?}", node.id)));
-        }
-        if node.source.len() > MAX_SOURCE_BYTES {
-            return Err(invalid(format!(
-                "node {:?} source exceeds {MAX_SOURCE_BYTES} bytes",
-                node.id
-            )));
         }
         check_json(&node.params, &format!("params of node {:?}", node.id))?;
         validate_pointer(&node.input_pointer)
@@ -274,23 +251,18 @@ fn check_number(number: &serde_json::Number, label: &str) -> Result<(), crate::E
 }
 
 fn check_json(value: &Value, label: &str) -> Result<(), crate::Error> {
-    let mut stack = vec![(value, 1usize)];
-    while let Some((current, depth)) = stack.pop() {
-        if depth > MAX_JSON_DEPTH {
-            return Err(invalid(format!(
-                "{label} is nested deeper than {MAX_JSON_DEPTH} levels"
-            )));
-        }
+    let mut stack = vec![value];
+    while let Some(current) = stack.pop() {
         match current {
             Value::Number(number) => check_number(number, label)?,
             Value::Array(items) => {
                 for item in items {
-                    stack.push((item, depth + 1));
+                    stack.push(item);
                 }
             }
             Value::Object(fields) => {
                 for item in fields.values() {
-                    stack.push((item, depth + 1));
+                    stack.push(item);
                 }
             }
             _ => {}
@@ -463,13 +435,7 @@ fn script_from_validated(
     script.push_str(")\n");
 
     script.push_str(
-        "local function __check_depth(value, depth)\n\
-         if depth > 32 then error(\"node result is nested deeper than 32 levels\") end\n\
-         if type(value) == \"table\" then\n\
-           for _, item in pairs(value) do __check_depth(item, depth + 1) end\n\
-         end\n\
-         end\n\
-         local function __resolve(root, pointer)\n\
+        "local function __resolve(root, pointer)\n\
          if pointer == \"\" then return root end\n\
          local current = root\n\
          local position = 2\n\
@@ -644,17 +610,12 @@ fn script_from_validated(
 
     script.push_str(
         "local __visited = {}\n\
-         local __count = 0\n\
          local __last = nil\n\
          while __current ~= nil do\n\
            if __visited[__current] then error(\"repeated node: \" .. tostring(__current)) end\n\
            __visited[__current] = true\n\
-           __count = __count + 1\n\
          ",
     );
-    script.push_str(&format!(
-        "  if __count > {MAX_NODES} then error(\"node budget exceeded\") end\n"
-    ));
     script.push_str(
         "  local __fn = __nodes[__current]\n\
            if __fn == nil then error(\"missing node: \" .. tostring(__current)) end\n\
@@ -670,8 +631,6 @@ fn script_from_validated(
            if type(__result) ~= \"table\" then error(\"node \" .. __current .. \" must return a table\") end\n\
            if __result.output == nil then error(\"node \" .. __current .. \" must return output\") end\n\
            if __result.state == nil then error(\"node \" .. __current .. \" must return state\") end\n\
-           __check_depth(__result.output, 1)\n\
-           __check_depth(__result.state, 1)\n\
            local __branch = __result.branch\n\
            if __branch == cayw.null then __branch = nil end\n\
            if __branch ~= nil and type(__branch) ~= \"string\" then error(\"node \" .. __current .. \" branch must be a string\") end\n\
@@ -883,18 +842,6 @@ struct RunFailure {
     status: Status,
     message: String,
     evidence: Option<u64>,
-}
-
-fn replay_limits(calls: usize) -> Limits {
-    Limits {
-        memory_bytes: Some(16 * 1024 * 1024),
-        instruction_budget: 100_000,
-        timeout: Some(Duration::from_secs(5)),
-        host_wait: Some(Duration::from_secs(5)),
-        shutdown_grace: Duration::from_secs(2),
-        host_calls: Some(calls.saturating_add(1).max(1)),
-        output_bytes: Some(1024 * 1024),
-    }
 }
 
 fn code_mode_failure(error: CodeModeError, evidence: Option<u64>) -> RunFailure {
@@ -1191,7 +1138,7 @@ pub(crate) async fn evaluate_validated(
         host: host.clone(),
         events: Mutex::new(Vec::new()),
     });
-    let code_mode = CodeMode::new(host.clone(), replay_limits(calls.len()))
+    let code_mode = CodeMode::new(host.clone(), Limits::default())
         .map_err(|error| invalid(format!("{mode} could not start its bounded VM: {error}")))?;
     let execution = code_mode
         .execute_with_services(&script, cancel, observer.clone())

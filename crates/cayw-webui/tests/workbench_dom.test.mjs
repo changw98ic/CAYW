@@ -77,7 +77,7 @@ async function setupApp(t, handler, { hash = '' } = {}) {
     calls.push(call);
     let result;
     if (call.method === 'runtime.health') {
-      result = { status: 'ok', protocol_version: 3 };
+      result = { status: 'ok', protocol_version: 4 };
     } else {
       result = await handler(call.method, call.params, req.url);
     }
@@ -268,12 +268,12 @@ test('workbench_dom: stopping first and second external tasks targets each activ
       if (params.task_id === 'ext-task-1') {
         tasks['ext-task-1'] = { ...tasks['ext-task-1'], state: 'cancelled' };
         cursor = 11;
-        events.push({ protocol_version: 3, session_id: 's1', cursor: 11, timestamp: 1, attempt: lease1, event: { type: 'attempt_finished', lease: lease1 } });
+        events.push({ protocol_version: 4, session_id: 's1', cursor: 11, timestamp: 1, attempt: lease1, event: { type: 'attempt_finished', lease: lease1 } });
         phase = 'idle1';
       } else if (params.task_id === 'ext-task-2') {
         tasks['ext-task-2'] = { ...tasks['ext-task-2'], state: 'cancelled' };
         cursor = 13;
-        events.push({ protocol_version: 3, session_id: 's1', cursor: 13, timestamp: 2, attempt: lease2, event: { type: 'attempt_finished', lease: lease2 } });
+        events.push({ protocol_version: 4, session_id: 's1', cursor: 13, timestamp: 2, attempt: lease2, event: { type: 'attempt_finished', lease: lease2 } });
         phase = 'idle2';
       }
       return { cancelled: true };
@@ -290,7 +290,7 @@ test('workbench_dom: stopping first and second external tasks targets each activ
 
   // Start second external task and run the scheduled poll tick
   cursor = 12;
-  events.push({ protocol_version: 3, session_id: 's1', cursor: 12, timestamp: 2, attempt: lease2, event: { type: 'attempt_started', lease: lease2 } });
+  events.push({ protocol_version: 4, session_id: 's1', cursor: 12, timestamp: 2, attempt: lease2, event: { type: 'attempt_started', lease: lease2 } });
   phase = 'ext2';
   await app.runTimers();
   await app.waitTick(150);
@@ -342,9 +342,9 @@ test('workbench_dom: finished local prompt settles while sibling external task r
     if (method === 'task.resume') {
       // Local task finishes at cursor 12, and sibling external task immediately takes over at cursor 13!
       events.push(
-        { protocol_version: 3, session_id: 's1', cursor: 11, timestamp: 1, attempt: localLease, event: { type: 'attempt_started', lease: localLease } },
-        { protocol_version: 3, session_id: 's1', cursor: 12, timestamp: 2, attempt: localLease, event: { type: 'attempt_finished', lease: localLease } },
-        { protocol_version: 3, session_id: 's1', cursor: 13, timestamp: 3, attempt: extLease, event: { type: 'attempt_started', lease: extLease } },
+        { protocol_version: 4, session_id: 's1', cursor: 11, timestamp: 1, attempt: localLease, event: { type: 'attempt_started', lease: localLease } },
+        { protocol_version: 4, session_id: 's1', cursor: 12, timestamp: 2, attempt: localLease, event: { type: 'attempt_finished', lease: localLease } },
+        { protocol_version: 4, session_id: 's1', cursor: 13, timestamp: 3, attempt: extLease, event: { type: 'attempt_started', lease: extLease } },
       );
       cursor = 13;
       phase = 'ext_running';
@@ -365,7 +365,7 @@ test('workbench_dom: finished local prompt settles while sibling external task r
       tasks[params.task_id] = { ...tasks[params.task_id], state: 'cancelled' };
       cursor += 1;
       const doneLease = params.task_id === 'ext-task-10' ? extLease2 : extLease;
-      events.push({ protocol_version: 3, session_id: 's1', cursor, timestamp: 4, attempt: doneLease, event: { type: 'attempt_finished', lease: doneLease } });
+      events.push({ protocol_version: 4, session_id: 's1', cursor, timestamp: 4, attempt: doneLease, event: { type: 'attempt_finished', lease: doneLease } });
       phase = 'idle';
       return { cancelled: true };
     }
@@ -387,8 +387,8 @@ test('workbench_dom: finished local prompt settles while sibling external task r
   failTasksPoll = true;
   cursor = 15;
   events.push(
-    { protocol_version: 3, session_id: 's1', cursor: 14, timestamp: 4, attempt: extLease, event: { type: 'attempt_finished', lease: extLease } },
-    { protocol_version: 3, session_id: 's1', cursor: 15, timestamp: 5, attempt: extLease2, event: { type: 'attempt_started', lease: extLease2 } },
+    { protocol_version: 4, session_id: 's1', cursor: 14, timestamp: 4, attempt: extLease, event: { type: 'attempt_finished', lease: extLease } },
+    { protocol_version: 4, session_id: 's1', cursor: 15, timestamp: 5, attempt: extLease2, event: { type: 'attempt_started', lease: extLease2 } },
   );
   phase = 'ext2_running';
   await app.runTimers();

@@ -35,16 +35,16 @@ const RESULT: &str = "bg.result";
 const MAX_NAME_BYTES: usize = 128;
 const MAX_LOG_PAGE: usize = 64 * 1024;
 const DEFAULT_MAX_TASKS: usize = 64;
-const DEFAULT_MAX_LOG_BYTES: usize = 4 * 1024 * 1024;
-const DEFAULT_RETAINED: usize = 128;
 
 /// Trusted host opt-in. `None` omits every `bg.*` tool from the catalog.
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct BackgroundConfig {
     pub max_tasks: usize,
-    pub max_log_bytes: usize,
-    pub max_retained_finished: usize,
+    /// Explicit process-output quota; None streams all output to disk.
+    pub max_output_bytes: Option<usize>,
+    /// Explicit retention policy; None preserves completed records and logs.
+    pub max_retained_finished: Option<usize>,
 }
 
 /// Raw `runtime_background_tasks` row, in SELECT column order.
@@ -67,15 +67,18 @@ impl Default for BackgroundConfig {
     fn default() -> Self {
         Self {
             max_tasks: DEFAULT_MAX_TASKS,
-            max_log_bytes: DEFAULT_MAX_LOG_BYTES,
-            max_retained_finished: DEFAULT_RETAINED,
+            max_output_bytes: None,
+            max_retained_finished: None,
         }
     }
 }
 
 impl BackgroundConfig {
     pub fn validate(&self) -> Result<(), RuntimeError> {
-        if self.max_tasks == 0 || self.max_log_bytes == 0 || self.max_retained_finished == 0 {
+        if self.max_tasks == 0
+            || self.max_output_bytes == Some(0)
+            || self.max_retained_finished == Some(0)
+        {
             return Err(RuntimeError::InvalidInput(
                 "background task limits must be positive".into(),
             ));
@@ -87,6 +90,7 @@ impl BackgroundConfig {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum BackgroundStatus {
+    Queued,
     Running,
     Completed,
     Failed,
@@ -97,6 +101,7 @@ pub enum BackgroundStatus {
 impl BackgroundStatus {
     pub fn as_str(self) -> &'static str {
         match self {
+            Self::Queued => "queued",
             Self::Running => "running",
             Self::Completed => "completed",
             Self::Failed => "failed",
@@ -106,6 +111,7 @@ impl BackgroundStatus {
     }
     pub fn parse(value: &str) -> Result<Self, RuntimeError> {
         match value {
+            "queued" => Ok(Self::Queued),
             "running" => Ok(Self::Running),
             "completed" => Ok(Self::Completed),
             "failed" => Ok(Self::Failed),
@@ -117,7 +123,7 @@ impl BackgroundStatus {
         }
     }
     pub fn is_terminal(self) -> bool {
-        !matches!(self, Self::Running)
+        !matches!(self, Self::Queued | Self::Running)
     }
 }
 
@@ -578,8 +584,9 @@ impl BackgroundRegistry {
 
     fn mark_orphans(&self) -> Result<(), RuntimeError> {
         let connection = lock(&self.connection);
-        let mut statement =
-            connection.prepare("SELECT id FROM runtime_background_tasks WHERE status='running'")?;
+        let mut statement = connection.prepare(
+            "SELECT id FROM runtime_background_tasks WHERE status IN ('queued','running')",
+        )?;
         let ids = statement
             .query_map([], |row| row.get::<_, String>(0))?
             .collect::<Result<Vec<_>, _>>()?;
@@ -588,6 +595,16 @@ impl BackgroundRegistry {
             let Some(_task_lock) = self.try_lock_background(&id)? else {
                 continue;
             };
+            let queued: bool = connection.query_row(
+                "SELECT status='queued' FROM runtime_background_tasks WHERE id=?1",
+                [&id],
+                |row| row.get(0),
+            )?;
+            if queued {
+                connection.execute("UPDATE runtime_background_executors SET cleanup_state='not_started' WHERE task_id=?1", [&id])?;
+                connection.execute("UPDATE runtime_background_tasks SET status='failed', error='queued_executor_stopped_before_start', finished_ms=?2 WHERE id=?1 AND status='queued'", params![id, now_ms()])?;
+                continue;
+            }
             // Losing an executor leaves the command's result unknown, even if
             // its parent task or every currently visible PID has stopped.
             connection.execute(
@@ -609,15 +626,18 @@ impl BackgroundRegistry {
     }
 
     fn prune_finished(&self, connection: &Connection) -> Result<(), RuntimeError> {
+        let Some(retained) = self.config.max_retained_finished else {
+            return Ok(());
+        };
         let finished: usize = connection.query_row(
             "SELECT count(*) FROM runtime_background_tasks WHERE status IN ('completed', 'failed', 'killed')",
             [],
             |row| row.get::<_, i64>(0),
         )? as usize;
-        if finished <= self.config.max_retained_finished {
+        if finished <= retained {
             return Ok(());
         }
-        let excess = finished - self.config.max_retained_finished;
+        let excess = finished - retained;
         let mut stmt = connection.prepare(
             "SELECT id, log_path FROM runtime_background_tasks
              WHERE status IN ('completed', 'failed', 'killed')
@@ -729,7 +749,7 @@ impl BackgroundRegistry {
         let mut stmt = connection.prepare(
             "SELECT id,name,profile,session_id,parent_task_id,status,exit_code,log_bytes,log_path,error,created_ms,finished_ms
              FROM runtime_background_tasks WHERE session_id=?1
-             ORDER BY created_ms DESC LIMIT 256",
+             ORDER BY created_ms DESC, id DESC",
         )?;
         let rows = stmt
             .query_map(params![session_id], |row| {
@@ -760,27 +780,29 @@ impl BackgroundRegistry {
             .collect()
     }
 
-    fn insert_running(
+    fn insert_queued(
         &self,
         id: &str,
         name: &str,
         profile: &str,
-        session_id: &str,
-        parent_task_id: &str,
+        owner: (&str, &str),
         log_path: &Path,
+        capacity: usize,
     ) -> Result<(), RuntimeError> {
+        let (session_id, parent_task_id) = owner;
         let supervisor = observe_supervisor()?;
         let mut connection = lock(&self.connection);
         let tx = connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
-        if Self::count_running(&tx)? >= self.config.max_tasks {
+        let accepted: i64 = tx.query_row("SELECT count(*) FROM runtime_background_tasks WHERE status IN ('queued','running','outcome_unknown')", [], |row| row.get(0))?;
+        if accepted as usize >= capacity {
             return Err(RuntimeError::InvalidInput(
-                "background task capacity is full".into(),
+                "background queue capacity is full; retry after a task completes".into(),
             ));
         }
         tx.execute(
             "INSERT INTO runtime_background_tasks(
                 id,name,profile,session_id,parent_task_id,status,exit_code,log_bytes,log_path,error,created_ms,finished_ms,pid)
-             VALUES(?1,?2,?3,?4,?5,'running',NULL,0,?6,NULL,?7,NULL,NULL)",
+             VALUES(?1,?2,?3,?4,?5,'queued',NULL,0,?6,NULL,?7,NULL,NULL)",
             params![
                 id,
                 name,
@@ -808,6 +830,65 @@ impl BackgroundRegistry {
         Ok(())
     }
 
+    #[cfg(test)]
+    fn insert_running(
+        &self,
+        id: &str,
+        name: &str,
+        profile: &str,
+        session: &str,
+        parent: &str,
+        log: &Path,
+    ) -> Result<(), RuntimeError> {
+        self.insert_queued(id, name, profile, (session, parent), log, usize::MAX)?;
+        assert!(self.dispatch(id)?);
+        Ok(())
+    }
+
+    fn dispatch(&self, id: &str) -> Result<bool, RuntimeError> {
+        let mut connection = lock(&self.connection);
+        let tx = connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        if Self::count_running(&tx)? >= self.config.max_tasks {
+            return Ok(false);
+        }
+        let first: Option<String> = tx.query_row("SELECT id FROM runtime_background_tasks WHERE status='queued' ORDER BY created_ms, rowid LIMIT 1", [], |row| row.get(0)).optional()?;
+        if first.as_deref() != Some(id) {
+            return Ok(false);
+        }
+        Self::require_executor(&tx, id)?;
+        tx.execute(
+            "UPDATE runtime_background_tasks SET status='running' WHERE id=?1 AND status='queued'",
+            [id],
+        )?;
+        tx.commit()?;
+        Ok(true)
+    }
+
+    async fn wait_for_dispatch(
+        &self,
+        id: &str,
+        cancel: &CancellationToken,
+    ) -> Result<bool, RuntimeError> {
+        loop {
+            let cancelled: bool = lock(&self.connection).query_row(
+                "SELECT EXISTS(SELECT 1 FROM runtime_background_cancels WHERE task_id=?1)",
+                [id],
+                |row| row.get(0),
+            )?;
+            if cancel.is_cancelled() || cancelled {
+                self.record_cleanup(id, "not_started")?;
+                return Ok(false);
+            }
+            if self.dispatch(id)? {
+                return Ok(true);
+            }
+            tokio::select! {
+                _ = cancel.cancelled() => {},
+                _ = tokio::time::sleep(Duration::from_millis(25)) => {},
+            }
+        }
+    }
+
     fn require_executor(connection: &Connection, id: &str) -> Result<(), RuntimeError> {
         let supervisor = observe_supervisor()?;
         let identity = connection.query_row(
@@ -817,7 +898,7 @@ impl BackgroundRegistry {
             |row| RawProcessIdentity::read(row, 0),
         )?;
         let owned: bool = connection.query_row(
-            "SELECT EXISTS(SELECT 1 FROM runtime_background_tasks WHERE id=?1 AND status='running')",
+            "SELECT EXISTS(SELECT 1 FROM runtime_background_tasks WHERE id=?1 AND status IN ('queued','running'))",
             [id],
             |row| row.get(0),
         )?;
@@ -961,7 +1042,7 @@ impl BackgroundRegistry {
         exit_code: Option<i32>,
         error: Option<&str>,
     ) -> Result<BackgroundTaskView, RuntimeError> {
-        if status == BackgroundStatus::Running {
+        if matches!(status, BackgroundStatus::Queued | BackgroundStatus::Running) {
             return Err(RuntimeError::InvalidInput(
                 "background finish requires a stopped execution".into(),
             ));
@@ -976,7 +1057,7 @@ impl BackgroundRegistry {
             tx.execute(
                 "UPDATE runtime_background_tasks
                  SET status=?2, exit_code=?3, error=?4, finished_ms=?5
-                 WHERE id=?1 AND status='running'",
+                 WHERE id=?1 AND status IN ('queued','running')",
                 params![
                     id,
                     status.as_str(),
@@ -1045,8 +1126,7 @@ impl BackgroundRegistry {
             .read(&mut buf)
             .map_err(|e| RuntimeError::Workspace(e.to_string()))?;
         buf.truncate(read);
-        let truncated = total > self.config.max_log_bytes as u64
-            || view.log_bytes > self.config.max_log_bytes as u64;
+        let truncated = view.error.as_deref() == Some("output_limit_exceeded");
         let text = String::from_utf8_lossy(&buf).into_owned();
         let next = offset + read as u64;
         Ok(BackgroundLogPage {
@@ -1070,11 +1150,11 @@ impl BackgroundRegistry {
         if let Some(live) = lock(&self.live).get(id) {
             live.cancel.cancel();
             let connection = lock(&self.connection);
-            let _ = connection.execute(
+            connection.execute(
                 "INSERT INTO runtime_background_cancels(task_id, requested_ms) VALUES(?1, ?2)
                  ON CONFLICT(task_id) DO UPDATE SET requested_ms=excluded.requested_ms",
                 params![id, now_ms()],
-            );
+            )?;
             return Ok(view);
         }
         let connection = lock(&self.connection);
@@ -1209,7 +1289,7 @@ impl BackgroundRegistry {
     ) -> Result<BackgroundTaskView, RuntimeError> {
         if matches!(
             status,
-            BackgroundStatus::Running | BackgroundStatus::OutcomeUnknown
+            BackgroundStatus::Queued | BackgroundStatus::Running | BackgroundStatus::OutcomeUnknown
         ) {
             return Err(RuntimeError::InvalidInput(
                 "background recovery requires a known terminal result".into(),
@@ -1502,13 +1582,13 @@ async fn run_task(
     let log_path = registry.root.join(format!("{id}.log"));
     File::create(&log_path).map_err(known)?;
     registry
-        .insert_running(
+        .insert_queued(
             &id,
             name,
             profile_name,
-            session,
-            &scope.context.task.id,
+            (session, &scope.context.task.id),
             &log_path,
+            scope.context.inner.config.max_queued_runs,
         )
         .map_err(known)?;
     let cancel = CancellationToken::new();
@@ -1530,15 +1610,21 @@ async fn run_task(
     tokio::spawn(async move {
         // Keep ownership through the terminal write, including its failure path.
         let _task_lock = lock_file;
-        let outcome = drive_child(
-            registry_worker.clone(),
-            task_id.clone(),
-            profile,
-            workspace,
-            log_path,
-            cancel,
-        )
-        .await;
+        let outcome = match registry_worker.wait_for_dispatch(&task_id, &cancel).await {
+            Ok(false) => ChildOutcome::Killed,
+            Err(error) => ChildOutcome::Unknown(error.to_string()),
+            Ok(true) => {
+                drive_child(
+                    registry_worker.clone(),
+                    task_id.clone(),
+                    profile,
+                    workspace,
+                    log_path,
+                    cancel,
+                )
+                .await
+            }
+        };
         let (status, code, error) = match outcome {
             ChildOutcome::Completed(code) => {
                 if code == 0 {
@@ -1659,13 +1745,10 @@ async fn drive_child(
         cwd: workspace,
         env: profile.env.clone(),
         timeout,
-        max_output_bytes: Some(
-            profile
-                .max_output_bytes
-                .map_or(registry.config.max_log_bytes, |limit| {
-                    registry.config.max_log_bytes.min(limit)
-                }),
-        ),
+        max_output_bytes: [profile.max_output_bytes, registry.config.max_output_bytes]
+            .into_iter()
+            .flatten()
+            .min(),
         io: profile.io,
         output_spill_dir: log_path.parent().map(Path::to_path_buf),
     };
@@ -1951,6 +2034,83 @@ mod tests {
             .insert_running(id, "demo", "build", "sess-1", "task-1", &log)
             .unwrap();
         log
+    }
+
+    #[tokio::test]
+    async fn background_capacity_queues_and_cancelled_waiter_never_starts() {
+        let dir = tempdir().unwrap();
+        let db = dir.path().join("sessions.db");
+        let config = BackgroundConfig {
+            max_tasks: 1,
+            ..Default::default()
+        };
+        let registry = BackgroundRegistry::open(&db, &config).unwrap();
+        let first = hex32(1);
+        insert(&registry, &first);
+        for seed in 2..=11 {
+            let id = hex32(seed);
+            let log = registry.root.join(format!("{id}.log"));
+            File::create(&log).unwrap();
+            registry
+                .insert_queued(&id, "queued", "build", ("sess-1", "task-1"), &log, 11)
+                .unwrap();
+            assert!(!registry.dispatch(&id).unwrap());
+        }
+        assert_eq!(registry.list_session("sess-1").unwrap().len(), 11);
+        let cancelled = hex32(2);
+        registry.request_kill(&cancelled).unwrap();
+        assert!(
+            !registry
+                .wait_for_dispatch(&cancelled, &CancellationToken::new())
+                .await
+                .unwrap()
+        );
+        registry
+            .finish(
+                &cancelled,
+                BackgroundStatus::Killed,
+                None,
+                Some("cancelled"),
+            )
+            .unwrap();
+        let records =
+            BackgroundRegistry::cleanup_records(&lock(&registry.connection), &cancelled).unwrap();
+        assert!(records.root.is_absent());
+        assert_eq!(records.state.as_deref(), Some("not_started"));
+        registry.record_cleanup(&first, "not_started").unwrap();
+        registry
+            .finish(&first, BackgroundStatus::Completed, Some(0), None)
+            .unwrap();
+        assert!(registry.dispatch(&hex32(3)).unwrap());
+        assert!(!registry.dispatch(&hex32(4)).unwrap());
+    }
+
+    #[test]
+    fn queued_background_restart_records_not_started_without_replay() {
+        let dir = tempdir().unwrap();
+        let db = dir.path().join("sessions.db");
+        let config = BackgroundConfig::default();
+        let id = hex32(1);
+        {
+            let registry = BackgroundRegistry::open(&db, &config).unwrap();
+            let log = registry.root.join(format!("{id}.log"));
+            File::create(&log).unwrap();
+            registry
+                .insert_queued(&id, "queued", "build", ("sess-1", "task-1"), &log, 10)
+                .unwrap();
+        }
+        let registry = BackgroundRegistry::open(&db, &config).unwrap();
+        let view = registry.load(&id).unwrap().unwrap();
+        assert_eq!(view.status, BackgroundStatus::Failed);
+        assert_eq!(
+            view.error.as_deref(),
+            Some("queued_executor_stopped_before_start")
+        );
+        assert!(!registry.dispatch(&id).unwrap());
+        let records =
+            BackgroundRegistry::cleanup_records(&lock(&registry.connection), &id).unwrap();
+        assert!(records.root.is_absent());
+        BackgroundRegistry::require_cleanup(&records).unwrap();
     }
 
     fn stopped_identity() -> cayw_host::ProcessIdentity {
@@ -2416,5 +2576,65 @@ mod tests {
             ..BackgroundConfig::default()
         };
         assert!(bad.validate().is_err());
+    }
+    #[tokio::test]
+    async fn default_background_output_over_four_mib_is_complete_and_retained() {
+        let dir = tempdir().unwrap();
+        let registry = Arc::new(
+            BackgroundRegistry::open(
+                &dir.path().join("sessions.db"),
+                &BackgroundConfig::default(),
+            )
+            .unwrap(),
+        );
+        let id = hex32(0x71);
+        let log = insert(&registry, &id);
+        let mut profile = test_profile(vec!["/usr/bin/head -c 5242881 /dev/zero".into()]);
+        profile.max_output_bytes = None;
+        let outcome = drive_child(
+            registry.clone(),
+            id.clone(),
+            profile,
+            dir.path().canonicalize().unwrap(),
+            log.clone(),
+            CancellationToken::new(),
+        )
+        .await;
+        assert!(matches!(outcome, ChildOutcome::Completed(0)));
+        registry
+            .finish(&id, BackgroundStatus::Completed, Some(0), None)
+            .unwrap();
+        assert_eq!(fs::metadata(&log).unwrap().len(), 5 * 1024 * 1024 + 1);
+        assert_eq!(
+            registry.load(&id).unwrap().unwrap().log_bytes,
+            5 * 1024 * 1024 + 1
+        );
+        assert!(!registry.read_logs(&id, 0, 1024).unwrap().truncated);
+    }
+
+    #[test]
+    fn default_background_retains_and_lists_300_finished_tasks_across_reopen() {
+        let dir = tempdir().unwrap();
+        let db = dir.path().join("sessions.db");
+        let config = BackgroundConfig::default();
+        let registry = BackgroundRegistry::open(&db, &config).unwrap();
+        let mut ids = Vec::new();
+        for n in 0..300 {
+            let id = format!("{n:032x}");
+            let log = insert(&registry, &id);
+            fs::write(&log, b"original log").unwrap();
+            registry.record_cleanup(&id, "not_started").unwrap();
+            registry
+                .finish(&id, BackgroundStatus::Completed, Some(0), None)
+                .unwrap();
+            ids.push((id, log));
+        }
+        drop(registry);
+        let reopened = BackgroundRegistry::open(&db, &config).unwrap();
+        assert_eq!(reopened.list_session("sess-1").unwrap().len(), 300);
+        for (id, log) in ids {
+            assert!(reopened.load(&id).unwrap().is_some());
+            assert_eq!(fs::read(log).unwrap(), b"original log");
+        }
     }
 }

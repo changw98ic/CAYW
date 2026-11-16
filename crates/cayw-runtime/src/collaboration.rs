@@ -33,16 +33,8 @@ pub const PLAN: &str = "plan.update";
 const ASKED: &str = "collaboration_question_asked";
 const ANSWERED: &str = "collaboration_question_answered";
 const PLAN_UPDATED: &str = "collaboration_plan_updated";
-const MAX_QUESTION_BYTES: usize = 4096;
-const MAX_ANSWER_BYTES: usize = 4096;
-const MAX_OPTIONS: usize = 16;
-const MAX_OPTION_BYTES: usize = 1024;
-const MAX_STEPS: usize = 32;
-const MAX_STEP_TEXT_BYTES: usize = 1024;
 const MAX_STEP_ID_BYTES: usize = 64;
-const MAX_STEPS_BYTES: usize = 64 * 1024;
 const MAX_IDENTIFIER_BYTES: usize = 128;
-const MAX_ACTOR_BYTES: usize = 1024;
 
 /// Only these two names are model-visible. There is deliberately no answer,
 /// approve, evaluate or grant capability.
@@ -54,8 +46,8 @@ pub fn definitions() -> Vec<ToolDefinition> {
             parameters: json!({
                 "type":"object","additionalProperties":false,"required":["question"],
                 "properties":{
-                    "question":{"type":"string","minLength":1,"maxLength":MAX_QUESTION_BYTES},
-                    "options":{"type":"array","maxItems":MAX_OPTIONS,"items":{"type":"string","minLength":1,"maxLength":MAX_OPTION_BYTES}}
+                    "question":{"type":"string","minLength":1},
+                    "options":{"type":"array","items":{"type":"string","minLength":1}}
                 }
             }),
         },
@@ -66,11 +58,11 @@ pub fn definitions() -> Vec<ToolDefinition> {
                 "type":"object","additionalProperties":false,"required":["expected_version","steps"],
                 "properties":{
                     "expected_version":{"type":"integer","minimum":0},
-                    "steps":{"type":"array","maxItems":MAX_STEPS,"items":{
+                    "steps":{"type":"array","items":{
                         "type":"object","additionalProperties":false,"required":["id","text","status"],
                         "properties":{
                             "id":{"type":"string","minLength":1,"maxLength":MAX_STEP_ID_BYTES,"pattern":"^[A-Za-z0-9_.:-]+$"},
-                            "text":{"type":"string","minLength":1,"maxLength":MAX_STEP_TEXT_BYTES},
+                            "text":{"type":"string","minLength":1},
                             "status":{"enum":["pending","in_progress","completed"]}
                         }
                     }}
@@ -573,21 +565,15 @@ fn plan(
 }
 
 fn validate_ask(input: &AskInput) -> Result<(), CapabilityError> {
-    check_text(&input.question, "question", MAX_QUESTION_BYTES, true)
-        .map_err(CapabilityError::new)?;
-    if input.options.len() > MAX_OPTIONS {
-        return Err(CapabilityError::new(format!(
-            "options may contain at most {MAX_OPTIONS} entries"
-        )));
-    }
+    check_text(&input.question, "question", true).map_err(CapabilityError::new)?;
     for option in &input.options {
-        check_text(option, "option", MAX_OPTION_BYTES, false).map_err(CapabilityError::new)?;
+        check_text(option, "option", false).map_err(CapabilityError::new)?;
     }
     Ok(())
 }
-fn check_text(value: &str, field: &str, maximum: usize, multiline: bool) -> Result<(), String> {
-    if value.trim().is_empty() || value.len() > maximum {
-        return Err(format!("{field} must contain 1..{maximum} bytes"));
+fn check_text(value: &str, field: &str, multiline: bool) -> Result<(), String> {
+    if value.trim().is_empty() {
+        return Err(format!("{field} must not be empty"));
     }
     if value
         .chars()
@@ -611,30 +597,21 @@ fn check_identifier(value: &str, field: &str, maximum: usize) -> Result<(), Stri
     Ok(())
 }
 fn check_steps(steps: &[PlanStep]) -> Result<(), String> {
-    if steps.len() > MAX_STEPS {
-        return Err(format!("plan may contain at most {MAX_STEPS} steps"));
-    }
-    let encoded = serde_json::to_vec(steps).map_err(|error| error.to_string())?;
-    if encoded.len() > MAX_STEPS_BYTES {
-        return Err(format!(
-            "plan steps exceed {MAX_STEPS_BYTES} serialized bytes"
-        ));
-    }
     let mut ids = BTreeSet::new();
     for step in steps {
         check_identifier(&step.id, "plan step id", MAX_STEP_ID_BYTES)?;
         if !ids.insert(step.id.as_str()) {
             return Err(format!("plan step id {} is duplicated", step.id));
         }
-        check_text(&step.text, "plan step text", MAX_STEP_TEXT_BYTES, true)?;
+        check_text(&step.text, "plan step text", true)?;
     }
     Ok(())
 }
 fn validate_actor(actor: &str) -> Result<(), RuntimeError> {
-    check_text(actor, "actor", MAX_ACTOR_BYTES, false).map_err(RuntimeError::InvalidInput)
+    check_text(actor, "actor", false).map_err(RuntimeError::InvalidInput)
 }
 fn validate_answer(answer: &str) -> Result<(), RuntimeError> {
-    check_text(answer, "answer", MAX_ANSWER_BYTES, true).map_err(RuntimeError::InvalidInput)
+    check_text(answer, "answer", true).map_err(RuntimeError::InvalidInput)
 }
 fn validate_request(request: &str) -> Result<(), RuntimeError> {
     check_identifier(request, "question id", MAX_IDENTIFIER_BYTES)
@@ -1051,5 +1028,41 @@ impl Runtime {
                 })
             })
             .transpose()
+    }
+}
+
+#[cfg(test)]
+mod content_size_tests {
+    use super::*;
+
+    #[test]
+    fn long_unicode_questions_answers_and_large_plans_are_valid() {
+        let question = "问".repeat(2000);
+        let input = AskInput {
+            question: question.clone(),
+            options: vec!["选项".repeat(1000); 20],
+        };
+        validate_ask(&input).unwrap();
+        validate_answer(&"答".repeat(2000)).unwrap();
+        let steps: Vec<_> = (0..100)
+            .map(|n| PlanStep {
+                id: format!("step-{n}"),
+                text: "说明".repeat(1000),
+                status: PlanStepStatus::Pending,
+            })
+            .collect();
+        check_steps(&steps).unwrap();
+        assert!(serde_json::to_vec(&steps).unwrap().len() > 64 * 1024);
+        let definitions = definitions();
+        assert!(
+            definitions[0].parameters["properties"]["question"]
+                .get("maxLength")
+                .is_none()
+        );
+        assert!(
+            definitions[1].parameters["properties"]["steps"]
+                .get("maxItems")
+                .is_none()
+        );
     }
 }

@@ -77,7 +77,9 @@ pub fn input_budget(
             "context window must be 1..=10000000".into(),
         ));
     }
-    let input_limit = window.saturating_sub(output_reserve).saturating_sub(margin);
+    let available = window.saturating_sub(output_reserve);
+    let margin = margin.min(available.saturating_sub(1));
+    let input_limit = available.saturating_sub(margin);
     if input_limit == 0 {
         return Err(ContextError::Invalid(
             "input budget is empty after output reserve and margin".into(),
@@ -499,19 +501,11 @@ fn assemble(input: &ContextInput<'_>, extra: &[SummaryRecord]) -> Result<Assembl
         });
     }
     check_cover(input.units, &pieces)?;
-    let mut input_tokens = pieces
+    let input_tokens = pieces
         .iter()
         .map(|piece| piece_tokens(input.units, piece))
         .fold(0_u64, u64::saturating_add);
-    let mut sendable = input_tokens <= input.budget.input_limit;
-    if !sendable {
-        excerpt_large_originals(&mut pieces);
-        input_tokens = pieces
-            .iter()
-            .map(|piece| piece_tokens(input.units, piece))
-            .fold(0_u64, u64::saturating_add);
-        sendable = input_tokens <= input.budget.input_limit;
-    }
+    let sendable = input_tokens <= input.budget.input_limit;
     let replaces_history = pieces.iter().any(|piece| match piece {
         Piece::Compression { .. } => true,
         Piece::Summary {
@@ -686,28 +680,6 @@ fn original_tokens(units: &[SourceUnit], start: u64, end: u64) -> u64 {
         .filter(|unit| unit.start_cursor >= start && unit.end_cursor <= end)
         .map(|unit| estimate_text(&unit.text).tokens)
         .fold(0_u64, u64::saturating_add)
-}
-
-fn excerpt_large_originals(pieces: &mut [Piece]) {
-    for piece in pieces {
-        let Piece::Original {
-            text,
-            outcome_unknown,
-            excerpt_allowed,
-            start_cursor,
-            end_cursor,
-        } = piece
-        else {
-            continue;
-        };
-        if !*excerpt_allowed || *outcome_unknown || text.len() <= 8 * 1024 {
-            continue;
-        }
-        let excerpt: String = text.chars().take(512).collect();
-        *text = format!(
-            "{excerpt}\n[bounded excerpt of cursors {start_cursor}-{end_cursor}; original history was not deleted]"
-        );
-    }
 }
 
 fn check_cover(units: &[SourceUnit], pieces: &[Piece]) -> Result<(), ContextError> {
@@ -1085,7 +1057,7 @@ mod tests {
     }
 
     #[test]
-    fn large_saved_tool_body_is_excerpted_without_deleting_the_source() {
+    fn large_saved_tool_body_is_not_excerpted_using_byte_estimates() {
         let body = "y".repeat(9_000);
         let units = vec![
             unit(1, 2, UnitKind::ToolExchange, &body, false, false),
@@ -1104,15 +1076,12 @@ mod tests {
         .unwrap()
         .assembly
         .unwrap();
-        assert!(assembly.sendable);
-        assert!(assembly.replaces_history);
         assert!(
-            assembly.pieces[0]
-                .range()
-                .2
-                .contains("original history was not deleted")
+            !assembly.sendable,
+            "the advisory byte estimate still reports pressure"
         );
-        assert!(assembly.pieces[0].range().2.len() < body.len());
+        assert!(!assembly.replaces_history);
+        assert_eq!(assembly.pieces[0].range().2, body);
         assert_eq!(assembly.pieces[1].range().2, "tail");
         assert_eq!(units, original);
     }
@@ -1177,7 +1146,7 @@ mod tests {
     }
 
     #[test]
-    fn mid_transcript_fixed_declarations_allow_later_compression_summary_and_excerpt() {
+    fn mid_transcript_fixed_declarations_allow_published_summaries_without_excerpts() {
         let large_tool = "t".repeat(9_000);
         let units = vec![
             unit(1, 1, UnitKind::Fixed, "system", false, false),
@@ -1233,7 +1202,7 @@ mod tests {
         .unwrap();
         assert_eq!(planned.compression_job.unwrap().covered_through, 7);
         let assembly = planned.assembly.expect("threshold reached");
-        assert!(assembly.sendable);
+        assert!(!assembly.sendable);
         assert!(assembly.replaces_history);
         assert!(matches!(
             &assembly.pieces[1],
@@ -1251,12 +1220,7 @@ mod tests {
                 ..
             }
         ));
-        assert!(
-            assembly.pieces[3]
-                .range()
-                .2
-                .contains("original history was not deleted")
-        );
+        assert_eq!(assembly.pieces[3].range().2, large_tool);
     }
 
     #[test]

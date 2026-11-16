@@ -352,13 +352,7 @@ impl PiCompatHost {
 
         match self
             .registry
-            .call_exact(
-                description,
-                tool,
-                arguments,
-                cancel,
-                Some(Duration::from_secs(5)),
-            )
+            .call_exact(description, tool, arguments, cancel, None)
             .await
         {
             Ok(value) => Ok(value),

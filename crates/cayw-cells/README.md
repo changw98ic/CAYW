@@ -29,6 +29,10 @@ instead of substituting a default ceiling. `SqliteJournal::records` reads every
 row for the session/task when `max_cells` is `None`; a configured value still
 bounds the query and reports overflow.
 
+`max_running` limits executing VMs, not accepted submissions. A cell waits in NotStarted when all VM slots are occupied; cancellation settles that queued cell before dispatch. Backends receive queued/dispatched hooks so a parent task can yield its own execution slot while waiting.
+
+Complete errors are retained in the journal. A page too small for the error returns `error_truncated: true`, `has_more: true` and `required_budget`; requesting that budget returns the complete error. Page summaries never replace the durable error.
+
 `CellManager::new` does not reject a large host capability catalog. The catalog
 is supplied by the host; it is not a model-controlled budget.
 

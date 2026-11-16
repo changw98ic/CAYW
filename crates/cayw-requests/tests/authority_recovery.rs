@@ -313,7 +313,7 @@ fn activation_commit_failure_retains_prepared_repair_and_retries_exactly() {
     let prepared_events = events(&database);
     let prepared_quota = quota(&database);
     assert_eq!(prepared_quota.0, original_quota.0);
-    assert!(prepared_quota.1 > original_quota.1);
+    assert_eq!(prepared_quota.1, original_quota.1);
     let prepared_record: Vec<u8> = database
         .query_row("SELECT data FROM request_authority_repairs", [], |row| {
             row.get(0)
@@ -327,7 +327,8 @@ fn activation_commit_failure_retains_prepared_repair_and_retries_exactly() {
     let result = RequestStore::repair_authority(&path, config(), &request, stopped).unwrap();
     assert_eq!(events(&database), prepared_events);
     assert_ne!(result.authority_id, result.previous_authority_id);
-    assert_eq!(quota(&database), original_quota);
+    let activated_quota = quota(&database);
+    assert!(activated_quota.1 > 0);
     let retained_record: Vec<u8> = database
         .query_row("SELECT data FROM request_authority_repairs", [], |row| {
             row.get(0)
@@ -335,21 +336,24 @@ fn activation_commit_failure_retains_prepared_repair_and_retries_exactly() {
         .unwrap();
     assert_eq!(retained_record, prepared_record);
     assert!(RequestStore::open(&path, config()).is_ok());
-    assert_eq!(quota(&database), original_quota);
+    assert_eq!(quota(&database), activated_quota);
 
     // Migrate an earlier successfully activated repair whose temporary
     // reservation was retained until reopen. Neither its original evidence nor
     // its activation receipt may be removed while the counters are rebuilt.
-    let old_repair_reservation = prepared_quota.1 - original_quota.1;
+    let old_repair_reservation = 4096;
     database
         .execute(
             "UPDATE request_meta SET reserved_bytes=reserved_bytes+?1 WHERE singleton=1",
             [old_repair_reservation],
         )
         .unwrap();
-    assert_eq!(quota(&database), prepared_quota);
+    assert_eq!(
+        quota(&database).1,
+        activated_quota.1 + old_repair_reservation
+    );
     let reopened = RequestStore::open(&path, config()).unwrap();
-    assert_eq!(quota(&database), original_quota);
+    assert_eq!(quota(&database), activated_quota);
     let migrated_record: Vec<u8> = database
         .query_row("SELECT data FROM request_authority_repairs", [], |row| {
             row.get(0)
@@ -360,7 +364,7 @@ fn activation_commit_failure_retains_prepared_repair_and_retries_exactly() {
         RequestStore::repair_authority(&path, config(), &request, stopped).unwrap(),
         result
     );
-    assert_eq!(quota(&database), original_quota);
+    assert_eq!(quota(&database), activated_quota);
     reopened
         .end_task(
             &identity(),
@@ -480,9 +484,9 @@ fn torn_marker_is_retained_for_trusted_inspection_after_reopen_is_refused() {
     assert!(open(&path).check_receipt(&receipt, &catalog).is_err());
 }
 
-// Catches unreserved administrative records silently escaping max_state_bytes.
+// Administrative recovery must remain possible when operational admission is full.
 #[test]
-fn repair_respects_the_original_persistent_storage_budget() {
+fn repair_remains_available_when_operational_admission_budget_is_full() {
     let temp = tempfile::tempdir().unwrap();
     let path = temp.path().join("requests.sqlite");
     let (store, _, _) = granted(&path);
@@ -495,9 +499,6 @@ fn repair_respects_the_original_persistent_storage_budget() {
         )
         .unwrap();
     let request = repair_request(&path, "budget-repair");
-    assert!(matches!(
-        RequestStore::repair_authority(&path, config(), &request, stopped),
-        Err(RequestError::Budget)
-    ));
-    assert!(RequestStore::open(&path, config()).is_err());
+    RequestStore::repair_authority(&path, config(), &request, stopped).unwrap();
+    assert!(RequestStore::open(&path, config()).is_ok());
 }

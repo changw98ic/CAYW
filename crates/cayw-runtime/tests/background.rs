@@ -164,7 +164,7 @@ async fn background_run_notifies_and_survives_reopen_on_same_session() {
     let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
     let view = loop {
         let view = rt.background_inspect(&started.id).unwrap().unwrap();
-        if view.status != BackgroundStatus::Running {
+        if view.status.is_terminal() {
             break view;
         }
         if tokio::time::Instant::now() > deadline {
@@ -384,15 +384,12 @@ async fn descendant_cancellation_terminates_process_group_and_reaps() {
     let identities = running_process_tree(&db, &started.id).await;
 
     let killed_view = rt.background_kill(&started.id).unwrap();
-    assert!(
-        killed_view.status == BackgroundStatus::Running
-            || killed_view.status == BackgroundStatus::Killed
-    );
+    assert!(!killed_view.status.is_terminal() || killed_view.status == BackgroundStatus::Killed);
 
     let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
     let view = loop {
         let view = rt.background_inspect(&started.id).unwrap().unwrap();
-        if view.status != BackgroundStatus::Running {
+        if view.status.is_terminal() {
             break view;
         }
         if tokio::time::Instant::now() > deadline {
@@ -574,7 +571,7 @@ async fn concurrent_runtime_instances_do_not_falsely_orphan_active_tasks() {
     let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
     loop {
         let view = rt1.background_inspect(&started.id).unwrap().unwrap();
-        if view.status != BackgroundStatus::Running {
+        if view.status.is_terminal() {
             assert_eq!(view.status, BackgroundStatus::Killed);
             break;
         }
@@ -641,7 +638,7 @@ async fn descendant_process_identities_terminate_and_reap() {
     let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
     loop {
         let view = rt.background_inspect(&started.id).unwrap().unwrap();
-        if view.status != BackgroundStatus::Running {
+        if view.status.is_terminal() {
             assert_eq!(view.status, BackgroundStatus::Killed);
             break;
         }

@@ -237,7 +237,7 @@ async fn rejected_wire_and_runtime_inputs_leave_every_observed_business_fact_unc
                     .unwrap(),
             )
             .unwrap();
-            assert_eq!(hello["result"]["version"], 1);
+            assert_eq!(hello["result"]["version"], cayw_ipc::PROTOCOL_VERSION);
             assert_eq!(hello["result"]["max_frame_bytes"], 1024);
         } else if record["wire"].is_object() {
             assert_eq!(record["wire"]["response"]["error"]["code"], code);
@@ -250,7 +250,11 @@ async fn rejected_wire_and_runtime_inputs_leave_every_observed_business_fact_unc
             assert_eq!(hello["method"], "hello");
             assert_eq!(
                 hello["version"],
-                if case == "wrong-version" { 2 } else { 1 }
+                if case == "wrong-version" {
+                    cayw_ipc::PROTOCOL_VERSION + 1
+                } else {
+                    cayw_ipc::PROTOCOL_VERSION
+                }
             );
             let prompt: Value =
                 serde_json::from_str(record["wire"]["sent"][1]["utf8"].as_str().unwrap()).unwrap();

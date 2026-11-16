@@ -165,11 +165,8 @@ fn mc05_no_duplicate_validation_and_streaming_persist() {
     for i in 0..5 {
         message.content = vec![cayw_ai::Content::text(format!("chunk {i}"))];
         let update_event = AgentEvent::MessageUpdate {
-            message: message.clone(),
-            event: Box::new(AssistantEvent::TextDelta {
-                index: 0,
-                delta: format!("chunk {i}"),
-                partial: message.clone(),
+            event: Box::new(AssistantEvent::Snapshot {
+                message: message.clone(),
             }),
         };
         let agent_rec = store.append_agent_event(&lease, &update_event).unwrap();

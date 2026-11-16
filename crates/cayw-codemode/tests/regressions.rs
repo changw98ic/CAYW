@@ -124,8 +124,8 @@ impl CapabilityHost for DeepHost {
     ) -> Result<Value, CapabilityError> {
         let mut value = Value::Null;
         let depth = match self.shape.as_str() {
-            "boundary" => 64,
-            "one_over" => 65,
+            "boundary" => 128,
+            "one_over" => 129,
             _ => 10_000,
         };
         for _ in 0..depth {
@@ -184,7 +184,7 @@ fn unchecked_deep_host_values_do_not_abort_the_process() {
             assert_eq!(report.calls[0].status, CallStatus::Succeeded);
             assert!(!report.calls[0].result_omitted);
             let mut leaf = &report.return_value;
-            for _ in 0..64 {
+            for _ in 0..128 {
                 let values = leaf.as_array().expect("nested array is preserved");
                 assert_eq!(values.len(), 1);
                 leaf = &values[0];

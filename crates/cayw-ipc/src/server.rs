@@ -18,7 +18,7 @@ use tokio::{
     net::{TcpListener, TcpStream, tcp::OwnedWriteHalf},
     sync::{mpsc, oneshot},
     task::JoinSet,
-    time::{Instant, timeout, timeout_at},
+    time::{Instant, timeout},
 };
 use tokio_util::sync::CancellationToken;
 
@@ -110,7 +110,7 @@ async fn handshake<R: tokio::io::AsyncRead + Unpin>(
     let result = if request.version != PROTOCOL_VERSION {
         Err(RpcError::new(
             "unsupported_version",
-            "unsupported IPC version; expected version 1",
+            "unsupported IPC version; expected version 2",
         ))
     } else if request.method != "hello" {
         Err(RpcError::new(
@@ -157,9 +157,15 @@ fn protocol_error() -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, "invalid IPC protocol frame")
 }
 
+enum ResponseBody {
+    Frame(Vec<u8>),
+    Stream(Response),
+}
+
 struct Outbound {
-    bytes: Vec<u8>,
-    deadline: Instant,
+    response: ResponseBody,
+    max_frame_bytes: usize,
+    write_timeout: std::time::Duration,
     written: Option<oneshot::Sender<()>>,
 }
 
@@ -168,34 +174,18 @@ fn queue_response(
     response: Response,
     config: &ServerConfig,
     written: Option<oneshot::Sender<()>>,
-    read_only: bool,
+    _read_only: bool,
 ) -> bool {
-    let bytes = wire::encode(&response, config.max_frame_bytes).or_else(|_| {
-        // A pure read did not change runtime state, so its oversized
-        // response is a known transport failure rather than an unknown
-        // effect. Side-effecting calls keep the conservative code.
-        let error = if read_only {
-            RpcError::new(
-                "response_too_large",
-                "response exceeded the frame limit; the read did not change runtime state",
-            )
-        } else {
-            RpcError::new(
-                "response_too_large_outcome_unknown",
-                "response exceeded the frame limit; reconcile runtime state",
-            )
-        };
-        wire::encode(
-            &Response::new(response.id, Err(error)),
-            config.max_frame_bytes,
-        )
-    });
-    let Ok(bytes) = bytes else {
-        return false;
+    // encode is bounded by one frame; oversized responses are then serialized
+    // incrementally, never first copied into one unbounded JSON allocation.
+    let response = match wire::encode(&response, config.max_frame_bytes) {
+        Ok(frame) => ResponseBody::Frame(frame),
+        Err(_) => ResponseBody::Stream(response),
     };
     tx.try_send(Outbound {
-        bytes,
-        deadline: Instant::now() + config.write_timeout,
+        response,
+        max_frame_bytes: config.max_frame_bytes,
+        write_timeout: config.write_timeout,
         written,
     })
     .is_ok()
@@ -207,20 +197,59 @@ async fn write_responses(
     stop: &CancellationToken,
 ) {
     loop {
-        let frame = tokio::select! {
+        let message = tokio::select! {
             biased;
             _ = stop.cancelled() => return,
-            frame = rx.recv() => match frame { Some(frame) => frame, None => return },
+            message = rx.recv() => match message { Some(message) => message, None => return },
         };
-        let result = tokio::select! {
-            biased;
-            _ = stop.cancelled() => return,
-            result = timeout_at(frame.deadline, writer.write_all(&frame.bytes)) => result,
+        let response = match message.response {
+            ResponseBody::Frame(frame) => {
+                let written = tokio::select! {
+                    biased;
+                    _ = stop.cancelled() => return,
+                    result = timeout(message.write_timeout, writer.write_all(&frame)) => result,
+                };
+                if !matches!(written, Ok(Ok(()))) {
+                    return;
+                }
+                if let Some(written) = message.written {
+                    let _ = written.send(());
+                }
+                continue;
+            }
+            ResponseBody::Stream(response) => response,
         };
-        if !matches!(result, Ok(Ok(()))) {
+        let (tx, mut parts) = mpsc::channel(1);
+        let encode = tokio::task::spawn_blocking(move || {
+            wire::stream_response(response, message.max_frame_bytes, tx)
+        });
+        let mut success = true;
+        loop {
+            let part = tokio::select! {
+                biased;
+                _ = stop.cancelled() => { success = false; None },
+                part = parts.recv() => part,
+            };
+            let Some(part) = part else {
+                break;
+            };
+            let result = tokio::select! {
+                biased;
+                _ = stop.cancelled() => { success = false; break; },
+                result = timeout(message.write_timeout, writer.write_all(&part)) => result,
+            };
+            if !matches!(result, Ok(Ok(()))) {
+                success = false;
+                break;
+            }
+        }
+        // Dropping the receiver wakes any blocked serializer. Join it before
+        // leaving this connection; no serialization worker outlives cleanup.
+        drop(parts);
+        if !matches!(encode.await, Ok(Ok(()))) || !success {
             return;
         }
-        if let Some(written) = frame.written {
+        if let Some(written) = message.written {
             let _ = written.send(());
         }
     }
@@ -327,7 +356,7 @@ async fn dispatch<R: tokio::io::AsyncRead + Unpin>(
                 if request.version != PROTOCOL_VERSION {
                     for token in active.values() { token.cancel(); }
                     let (written, wait) = oneshot::channel();
-                    if queue_response(&tx, Response::new(request.id, Err(RpcError::new("unsupported_version", "unsupported IPC version; expected version 1"))), config, Some(written), false) {
+                    if queue_response(&tx, Response::new(request.id, Err(RpcError::new("unsupported_version", "unsupported IPC version; expected version 2"))), config, Some(written), false) {
                         let _ = timeout(config.write_timeout, wait).await;
                     }
                     break;

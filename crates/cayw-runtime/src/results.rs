@@ -1743,11 +1743,8 @@ mod unit {
         for _ in 0..1024 {
             facts.push(CoreEvent::Agent {
                 event: Box::new(cayw_agent::AgentEvent::MessageUpdate {
-                    message: partial.clone(),
-                    event: Box::new(cayw_ai::AssistantEvent::TextDelta {
-                        index: 0,
-                        delta: "x".into(),
-                        partial: partial.clone(),
+                    event: Box::new(cayw_ai::AssistantEvent::Snapshot {
+                        message: partial.clone(),
                     }),
                 }),
             });

@@ -10,15 +10,9 @@ use serde_json::{Value, json};
 
 const MAX_GLOB_BYTES: usize = 4096;
 const MAX_PATTERN_BYTES: usize = 16384;
-const MAX_IGNORE_BYTES: usize = 64 * 1024;
-const MAX_IGNORE_RULES: usize = 1024;
 const REGEX_COMPILED_BYTES: usize = 1024 * 1024;
 const REGEX_CACHE_BYTES: usize = 256 * 1024;
 const REGEX_NEST: u32 = 64;
-// Repeated regex search can rescan the suffix. Charge every suffix before search,
-// multiplied by pattern bytes, including failed searches. The compiled program
-// and its cache have separate hard bounds above.
-const MAX_REGEX_WORK: usize = 256 * 1024 * 1024;
 
 fn yes() -> bool {
     true
@@ -142,11 +136,7 @@ impl<'a> Scanner<'a> {
             .limits
             .max_batch_bytes
             .map(|limit| limit.saturating_sub(self.bytes));
-        let mut limit = crate::min_limit(self.workspace.limits.max_file_bytes, remaining);
-        if ignore {
-            let ignore_remaining = MAX_IGNORE_BYTES.saturating_sub(self.ignore_bytes);
-            limit = Some(limit.map_or(ignore_remaining, |limit| limit.min(ignore_remaining)));
-        }
+        let limit = crate::min_limit(self.workspace.limits.max_file_bytes, remaining);
         let bytes = filesystem::read(dir, name, limit, self.context)?;
         self.bytes += bytes.len();
         if ignore {
@@ -175,14 +165,6 @@ impl<'a> Scanner<'a> {
             for line in text.lines() {
                 self.context.check()?;
                 self.ignore_rules += 1;
-                let rule_ceiling = self
-                    .workspace
-                    .limits
-                    .max_tree_entries
-                    .map_or(MAX_IGNORE_RULES, |max| MAX_IGNORE_RULES.min(max));
-                if self.ignore_rules > rule_ceiling || line.len() > MAX_GLOB_BYTES {
-                    return Err(failure("gitignore rule complexity limit exceeded"));
-                }
                 builder
                     .add_line(None, line)
                     .map_err(|error| failure(format!("gitignore rule: {error}")))?;
@@ -459,7 +441,6 @@ struct GrepVisitor {
     max: usize,
     context_lines: usize,
     matches: Vec<Value>,
-    work: usize,
 }
 impl Visitor for GrepVisitor {
     fn visit(
@@ -480,43 +461,19 @@ impl Visitor for GrepVisitor {
         };
         let sha256 = filesystem::hash(&bytes);
         let lines = Lines::new(text, scan.context)?;
-        let mut at = 0;
-        let mut previous_end = None;
-        while at <= text.len() {
+        let mut found_matches = self.regex.find_iter(text);
+        loop {
             scan.context.check()?;
-            // Enforce a deterministic finite amount of suffix searching, including
-            // pathological patterns whose individual search has no interruption API.
-            let cost = (text.len() - at + 1).saturating_mul(self.regex.as_str().len().max(1));
-            self.work = self.work.saturating_add(cost);
-            if self.work > MAX_REGEX_WORK {
-                return Err(failure("regex search work limit exceeded"));
-            }
-            let Some(found) = self.regex.find_at(text, at) else {
+            let Some(found) = found_matches.next() else {
                 break;
             };
             scan.context.check()?;
-            if found.is_empty() && previous_end == Some(found.end()) {
-                let Some(next) = text[found.end()..].chars().next() else {
-                    break;
-                };
-                at = found.end() + next.len_utf8();
-                continue;
-            }
             if self.matches.len() == self.max {
                 return Ok(false);
             }
             let value = json!({"path":path,"sha256":sha256,"byte_start":found.start(),"byte_end":found.end(),"start_line":lines.line(found.start()),"end_line":lines.last_line(found.start(),found.end()),"text":found.as_str(),"context":lines.context(text,found.start(),found.end(),self.context_lines)});
             scan.output.add(&value)?;
             self.matches.push(value);
-            previous_end = Some(found.end());
-            if found.start() == found.end() {
-                let Some(next) = text[found.end()..].chars().next() else {
-                    break;
-                };
-                at = found.end() + next.len_utf8();
-            } else {
-                at = found.end();
-            }
         }
         Ok(true)
     }
@@ -593,7 +550,6 @@ pub(crate) fn execute(
                 max,
                 context_lines: args.context_lines,
                 matches: vec![],
-                work: 0,
             };
             let complete = scan.run(&args.path, true, &mut visitor)?;
             context.check()?;

@@ -487,7 +487,7 @@ async fn source_budgets_apply_to_metadata_operations_and_never_reset_on_reconnec
 }
 
 #[tokio::test]
-async fn concurrent_calls_and_json_depth_are_bounded_before_execution() {
+async fn concurrent_calls_wait_for_capacity_and_preserve_validation() {
     let registry = registry(Limits {
         max_in_flight: 1,
         ..Limits::default()
@@ -500,16 +500,19 @@ async fn concurrent_calls_and_json_depth_are_bounded_before_execution() {
     let bridge = support::consumer(&registry);
     let mut pending = Box::pin(call(&bridge));
     tokio::select! { result = &mut pending => panic!("unexpected {result:?}"), _ = state.entered.notified() => {} }
-    assert!(!call(&bridge).await.unwrap_err().outcome_unknown);
+    let mut second = Box::pin(call(&bridge));
+    tokio::select! { biased; result = &mut second => panic!("second call should wait: {result:?}"), _ = tokio::task::yield_now() => {} }
     assert_eq!(state.calls.load(Ordering::Relaxed), 1);
+    state.wait.store(false, Ordering::Relaxed);
     state.release.notify_one();
     pending.await.unwrap();
+    second.await.unwrap();
     let mut nested = json!("leaf");
     for _ in 0..60 {
         nested = json!({"nested":nested});
     }
     assert!(bridge.call("mcp.call", json!({"server":"source","tool":"echo","arguments":{"text":"hello","nested":nested}}), CancellationToken::new()).await.is_err());
-    assert_eq!(state.calls.load(Ordering::Relaxed), 1);
+    assert_eq!(state.calls.load(Ordering::Relaxed), 2);
 }
 
 #[tokio::test]
@@ -620,4 +623,67 @@ fn registry_validates_only_configured_limits_and_has_no_artificial_ceiling() {
         Arc::new(Policy),
     )
     .unwrap();
+}
+
+#[tokio::test]
+async fn waiting_for_source_capacity_is_cancelled_or_woken_by_disconnect() {
+    for disconnect in [false, true] {
+        let registry = registry(Limits {
+            max_in_flight: 1,
+            ..Limits::default()
+        });
+        let state = Arc::new(State::default());
+        state.wait.store(true, Ordering::Relaxed);
+        registry
+            .register(identity("1"), manifest(), handle("capacity", state.clone()))
+            .unwrap();
+        let bridge = support::consumer(&registry);
+        let mut first = Box::pin(call(&bridge));
+        tokio::select! {result=&mut first=>panic!("unexpected {result:?}"),_=state.entered.notified()=>{}}
+        let cancel = CancellationToken::new();
+        let mut waiting = Box::pin(bridge.call(
+            "mcp.call",
+            json!({"server":"source","tool":"echo","arguments":{"text":"queued"}}),
+            cancel.clone(),
+        ));
+        tokio::select! {biased; result=&mut waiting=>panic!("must wait {result:?}"),_=tokio::task::yield_now()=>{}}
+        if disconnect {
+            registry.disconnect("source").unwrap();
+        } else {
+            cancel.cancel();
+        }
+        let error = waiting.await.unwrap_err();
+        assert!(!error.outcome_unknown);
+        assert_eq!(state.calls.load(Ordering::Relaxed), 1);
+        drop(first);
+    }
+}
+
+#[tokio::test]
+async fn ten_requests_wait_for_two_execution_slots_without_rejection() {
+    let registry = registry(Limits {
+        max_in_flight: 2,
+        ..Limits::default()
+    });
+    let state = Arc::new(State::default());
+    state.wait.store(true, Ordering::Relaxed);
+    registry
+        .register(
+            identity("1"),
+            manifest(),
+            handle("queued-batch", state.clone()),
+        )
+        .unwrap();
+    let bridge = support::consumer(&registry);
+    let mut requests: Vec<_> = (0..10).map(|_| Box::pin(call(&bridge))).collect();
+    for request in &mut requests {
+        tokio::select! {biased; result=request.as_mut()=>panic!("should be waiting: {result:?}"),_=tokio::task::yield_now()=>{}}
+    }
+    assert_eq!(state.calls.load(Ordering::Relaxed), 2);
+    state.wait.store(false, Ordering::Relaxed);
+    state.release.notify_waiters();
+    for request in requests {
+        request.await.unwrap();
+    }
+    assert_eq!(state.calls.load(Ordering::Relaxed), 10);
 }

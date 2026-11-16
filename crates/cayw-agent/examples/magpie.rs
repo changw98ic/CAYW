@@ -70,7 +70,7 @@ async fn text_stream(provider: &dyn Provider, model: &Model) -> TestResult {
                 _ => {}
             }
             if event.is_terminal() {
-                terminals.push(event.message().clone());
+                terminals.push(event.snapshot().expect("terminal snapshot").clone());
             }
         }
     })

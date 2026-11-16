@@ -269,3 +269,76 @@ fn process_cas_worker() {
         Err(error) => panic!("unexpected CAS result: {error}"),
     }
 }
+
+#[test]
+fn default_content_and_history_cross_previous_quotas_without_removing_objects() {
+    let root = TempDir::new_in(std::env::temp_dir().canonicalize().unwrap()).unwrap();
+    let db = store(&root);
+    let name = id("large");
+    let mut bytes = vec![b'x'; 17 * 1024 * 1024];
+    let mut expected = ExpectedRevision::Absent;
+    let mut first = None;
+    for version in 0..16 {
+        bytes[0] = version;
+        let record = db.put(&name, expected, &bytes).unwrap();
+        if first.is_none() {
+            first = Some(record.clone());
+        }
+        expected = record.expected();
+    }
+    // 272 MiB of distinct historical objects remain, including the first version.
+    let first = first.unwrap();
+    assert_eq!(
+        std::fs::metadata(
+            root.path()
+                .join("objects")
+                .join(first.content_hash.to_string())
+        )
+        .unwrap()
+        .len(),
+        bytes.len() as u64
+    );
+    assert_eq!(db.read(&name).unwrap().unwrap().1, bytes);
+    drop(db);
+    let reopened = store(&root);
+    assert_eq!(reopened.read(&name).unwrap().unwrap().0.version, 16);
+    let records_root = TempDir::new_in(std::env::temp_dir().canonicalize().unwrap()).unwrap();
+    let db = store(&records_root);
+    for n in 0..1025 {
+        db.put(
+            &id(&format!("record_{n}")),
+            ExpectedRevision::Absent,
+            b"shared",
+        )
+        .unwrap();
+    }
+    drop(db);
+    let db = store(&records_root);
+    assert_eq!(db.read(&id("record_1024")).unwrap().unwrap().1, b"shared");
+}
+
+#[test]
+fn large_valid_state_reopens_and_limits_accept_representable_explicit_quotas() {
+    let root = TempDir::new_in(std::env::temp_dir().canonicalize().unwrap()).unwrap();
+    let db = store(&root);
+    db.put(&id("kept"), ExpectedRevision::Absent, b"still here")
+        .unwrap();
+    drop(db);
+    let state = root.path().join("state.json");
+    let original = std::fs::read(&state).unwrap();
+    let mut large = vec![b' '; 33 * 1024 * 1024];
+    large.extend(original);
+    std::fs::write(&state, large).unwrap();
+    let db = store(&root);
+    assert_eq!(db.read(&id("kept")).unwrap().unwrap().1, b"still here");
+    assert!(
+        Limits {
+            max_content_bytes: 2 * 1024 * 1024 * 1024,
+            max_records: 10001,
+            max_security_entries: 65537,
+            ..Limits::default()
+        }
+        .validate()
+        .is_ok()
+    );
+}

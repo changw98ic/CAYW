@@ -147,6 +147,17 @@ pub(crate) struct Response {
 pub(crate) enum Payload {
     Result { result: Value },
     Error { error: RpcError },
+    Chunk { chunk: ResponseChunk },
+}
+
+/// One byte-contiguous part of a serialized terminal Response. Each part still
+/// fits the negotiated frame size. Only the last part can complete the call.
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct ResponseChunk {
+    pub offset: usize,
+    pub data: Vec<u8>,
+    pub done: bool,
 }
 
 impl Response {
@@ -165,6 +176,10 @@ impl Response {
         match self.payload {
             Payload::Result { result } => Ok(result),
             Payload::Error { error } => Err(error),
+            Payload::Chunk { .. } => Err(RpcError::new(
+                "protocol_error",
+                "incomplete chunked response",
+            )),
         }
     }
 }
@@ -189,6 +204,11 @@ impl<'de> Deserialize<'de> for Response {
                         "result" if payload.is_none() => {
                             payload = Some(Payload::Result {
                                 result: map.next_value()?,
+                            })
+                        }
+                        "chunk" if payload.is_none() => {
+                            payload = Some(Payload::Chunk {
+                                chunk: map.next_value()?,
                             })
                         }
                         "error" if payload.is_none() => {
@@ -398,5 +418,134 @@ mod tests {
             Poll::Ready(Err(error)) => assert_eq!(error.kind(), io::ErrorKind::TimedOut),
             other => panic!("partial frame did not retain its deadline: {other:?}"),
         }
+    }
+}
+
+/// Serialize without materializing a second complete JSON copy. The bounded
+/// channel blocks this worker at one queued frame when the socket is slower.
+pub(crate) fn stream_response(
+    response: Response,
+    max: usize,
+    sender: tokio::sync::mpsc::Sender<Vec<u8>>,
+) -> io::Result<()> {
+    struct Writer {
+        id: String,
+        max: usize,
+        capacity: usize,
+        offset: usize,
+        data: Vec<u8>,
+        sender: tokio::sync::mpsc::Sender<Vec<u8>>,
+    }
+    impl Writer {
+        fn part(&mut self, done: bool) -> io::Result<()> {
+            let data = std::mem::take(&mut self.data);
+            let len = data.len();
+            let part = Response {
+                version: PROTOCOL_VERSION,
+                id: self.id.clone(),
+                payload: Payload::Chunk {
+                    chunk: ResponseChunk {
+                        offset: self.offset,
+                        data,
+                        done,
+                    },
+                },
+            };
+            let encoded = encode(&part, self.max)?;
+            self.sender
+                .blocking_send(encoded)
+                .map_err(|_| io::Error::new(io::ErrorKind::BrokenPipe, "response stream closed"))?;
+            self.offset = self
+                .offset
+                .checked_add(len)
+                .ok_or_else(|| io::Error::other("response offset overflow"))?;
+            Ok(())
+        }
+    }
+    impl io::Write for Writer {
+        fn write(&mut self, mut bytes: &[u8]) -> io::Result<usize> {
+            let original = bytes.len();
+            while !bytes.is_empty() {
+                let take = (self.capacity - self.data.len()).min(bytes.len());
+                self.data.extend_from_slice(&bytes[..take]);
+                bytes = &bytes[take..];
+                if self.data.len() == self.capacity {
+                    self.part(false)?;
+                }
+            }
+            Ok(original)
+        }
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+    let empty = Response {
+        version: PROTOCOL_VERSION,
+        id: response.id.clone(),
+        payload: Payload::Chunk {
+            chunk: ResponseChunk {
+                offset: usize::MAX,
+                data: vec![],
+                done: false,
+            },
+        },
+    };
+    // A JSON byte array costs at most four ASCII bytes per source byte. Include
+    // worst-case offset and envelope size rather than a separate message quota.
+    let overhead = encode(&empty, max)?.len();
+    let capacity = max.saturating_sub(overhead) / 4;
+    if capacity == 0 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "frame has no response payload room",
+        ));
+    }
+    let mut writer = Writer {
+        id: response.id.clone(),
+        max,
+        capacity,
+        offset: 0,
+        data: Vec::new(),
+        sender,
+    };
+    serde_json::to_writer(&mut writer, &response).map_err(io::Error::other)?;
+    writer.part(true)
+}
+
+#[cfg(test)]
+mod streaming_tests {
+    use super::*;
+    #[tokio::test]
+    async fn chunks_keep_frame_bound_and_round_trip_utf8_and_offsets() {
+        let value = json!({"text":"你好\\\"\n".repeat(20_000)});
+        let response = Response::new("request".into(), Ok(value.clone()));
+        let (tx, mut rx) = tokio::sync::mpsc::channel(1);
+        let worker = tokio::task::spawn_blocking(move || stream_response(response, 512, tx));
+        let mut full = Vec::new();
+        let mut done = false;
+        while let Some(frame) = rx.recv().await {
+            assert!(frame.len() <= 513); // one LF is outside the JSON frame bound
+            assert!(!done);
+            let response: Response = decode(&frame[..frame.len() - 1], 512).unwrap();
+            let Payload::Chunk { chunk } = response.payload else {
+                panic!("expected chunk");
+            };
+            assert_eq!(chunk.offset, full.len());
+            full.extend(chunk.data);
+            done = chunk.done;
+        }
+        worker.await.unwrap().unwrap();
+        assert!(done);
+        let response: Response = decode(&full, full.len()).unwrap();
+        assert_eq!(response.into_result().unwrap(), value);
+    }
+    #[tokio::test]
+    async fn dropping_receiver_unblocks_serializer() {
+        let response = Response::new("request".into(), Ok(json!("x".repeat(1024 * 1024))));
+        let (tx, mut rx) = tokio::sync::mpsc::channel(1);
+        let worker = tokio::task::spawn_blocking(move || stream_response(response, 512, tx));
+        rx.recv().await.unwrap();
+        drop(rx);
+        assert!(worker.await.unwrap().is_err());
     }
 }

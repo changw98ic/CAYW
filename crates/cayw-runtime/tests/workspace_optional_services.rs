@@ -178,7 +178,8 @@ async fn model_server() -> (String, tokio::task::JoinHandle<Vec<Value>>) {
     let base_url = format!("http://{}/v1", listener.local_addr().unwrap());
     let task = tokio::spawn(async move {
         let mut requests = Vec::new();
-        for index in 0..4 {
+        let mut foreground_requests = 0;
+        while foreground_requests < 4 {
             let (mut socket, _) = listener.accept().await.unwrap();
             let request = read_request(&mut socket).await;
             let continuation = request["messages"]
@@ -186,7 +187,12 @@ async fn model_server() -> (String, tokio::task::JoinHandle<Vec<Value>>) {
                 .unwrap()
                 .iter()
                 .any(|message| message["role"] == "tool");
-            let body = response(index, continuation);
+            let foreground = request["tools"]
+                .as_array()
+                .is_some_and(|tools| !tools.is_empty());
+            // Background summaries share this Provider but must not consume a
+            // foreground turn or receive an execute_code call.
+            let body = response(requests.len(), continuation || !foreground);
             let headers = format!(
                 "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
                 body.len()
@@ -195,6 +201,7 @@ async fn model_server() -> (String, tokio::task::JoinHandle<Vec<Value>>) {
             socket.write_all(body.as_bytes()).await.unwrap();
             socket.shutdown().await.unwrap();
             requests.push(request);
+            foreground_requests += usize::from(foreground);
         }
         requests
     });
@@ -307,7 +314,7 @@ async fn one_client_keeps_mcp_and_pi_instances_isolated_per_workspace() {
     )
     .unwrap();
     let model = json!({
-        "selected":"fixture",
+        "default":"fixture",
         "models":{
             "fixture":{
                 "service":"openai",
@@ -319,14 +326,17 @@ async fn one_client_keeps_mcp_and_pi_instances_isolated_per_workspace() {
             }
         }
     });
-    // Per-workspace model selection is still the path the current Client reads;
-    // the device-wide migration is tracked separately.
+    // Workspaces select a profile from the shared device catalog.
+    write_private_json(&cayw_home.path().join("models.json"), &model);
     for workspace in [&first_workspace, &second_workspace] {
         let state = cayw_home
             .path()
             .join("workspaces")
             .join(workspace_key(workspace.path()));
-        write_private_json(&state.join("models.json"), &model);
+        write_private_json(
+            &state.join("model-selection.json"),
+            &json!({"name":"fixture"}),
+        );
     }
 
     let mut serve = command(
@@ -374,6 +384,10 @@ async fn one_client_keeps_mcp_and_pi_instances_isolated_per_workspace() {
         .await
         .unwrap();
     assert_eq!(first["state"], "idle");
+    assert_eq!(
+        first["messages"].as_array().unwrap().last().unwrap()["stop_reason"],
+        "stop"
+    );
 
     let second_session = workspace_call(
         &client,
@@ -390,6 +404,10 @@ async fn one_client_keeps_mcp_and_pi_instances_isolated_per_workspace() {
     )
     .await;
     assert_eq!(second["state"], "idle");
+    assert_eq!(
+        second["messages"].as_array().unwrap().last().unwrap()["stop_reason"],
+        "stop"
+    );
 
     let requests = tokio::time::timeout(WATCHDOG, model_task)
         .await
@@ -406,7 +424,7 @@ async fn one_client_keeps_mcp_and_pi_instances_isolated_per_workspace() {
         })
         .map(execution_value)
         .collect::<Vec<_>>();
-    assert_eq!(values.len(), 2);
+    assert_eq!(values.len(), 2, "requests: {requests:#?}");
     for value in &values {
         assert_eq!(value["sum"], 42);
         assert_eq!(value["echo"], "workspace-isolation");

@@ -240,7 +240,7 @@ fn plan_validation_rejects_broken_graphs_and_unsafe_values() {
 
     let mut too_deep = good.clone();
     too_deep.input = deep_value(32);
-    assert!(validate_plan(&too_deep).is_err());
+    assert!(validate_plan(&too_deep).is_ok());
 
     let mut unsafe_integer = good.clone();
     unsafe_integer.input = json!(9_007_199_254_740_992_u64);
@@ -251,11 +251,11 @@ fn plan_validation_rejects_broken_graphs_and_unsafe_values() {
         "return {{output = input, state = state}} --{}",
         "x".repeat(16 * 1024)
     );
-    assert!(validate_plan(&oversized_source).is_err());
+    assert!(validate_plan(&oversized_source).is_ok());
 
     let mut oversized_plan = good.clone();
     oversized_plan.input = Value::String("x".repeat(300 * 1024));
-    assert!(validate_plan(&oversized_plan).is_err());
+    assert!(validate_plan(&oversized_plan).is_ok());
 }
 
 struct NoHost;
@@ -1004,25 +1004,25 @@ async fn replay_hides_discovery_instead_of_fabricating_a_catalog() {
 }
 
 #[tokio::test]
-async fn a_long_running_node_is_stopped_by_the_replay_timeout() {
+async fn a_long_running_node_is_stopped_by_cancellation() {
     let plan = plan(
         "a",
         vec![node("a", "while true do end", "")],
         vec![],
         json!({}),
     );
-    let evaluated = evaluate(&plan, None, None, &[], 1, CancellationToken::new())
-        .await
-        .unwrap();
-    assert_eq!(evaluated.status, Status::Failed, "{evaluated:#?}");
-    assert_eq!(evaluated.steps[0].status, Status::Failed);
+    let cancel = CancellationToken::new();
+    let (result, ()) = tokio::join!(evaluate(&plan, None, None, &[], 1, cancel.clone()), async {
+        tokio::task::yield_now().await;
+        cancel.cancel();
+    });
+    let evaluated = result.unwrap();
+    assert_ne!(evaluated.status, Status::Completed);
     assert!(
         evaluated
             .gaps
             .iter()
-            .any(|gap| gap.message.contains("Timeout")),
-        "{:?}",
-        evaluated.gaps
+            .any(|gap| gap.message.to_lowercase().contains("cancel"))
     );
 }
 
@@ -1070,21 +1070,13 @@ async fn real_script_emits_started_before_mapping_and_result_validation() {
 }
 
 #[tokio::test]
-async fn real_and_replay_reject_the_same_array_pointer_and_deep_output() {
-    for (source, pointer, input, expected) in [
-        (
-            "return {output=input,state=state}",
-            "/+1",
-            json!([10, 20]),
-            "input_pointer",
-        ),
-        (
-            "local v=1; for i=1,33 do v={v} end; return {output=v,state=state}",
-            "",
-            json!({}),
-            "nested deeper",
-        ),
-    ] {
+async fn real_and_replay_reject_the_same_invalid_array_pointer() {
+    for (source, pointer, input, expected) in [(
+        "return {output=input,state=state}",
+        "/+1",
+        json!([10, 20]),
+        "input_pointer",
+    )] {
         let plan = plan("a", vec![node("a", source, pointer)], vec![], input);
         let mode = CodeMode::new(Arc::new(NoHost), Limits::default()).unwrap();
         let original = mode
@@ -1457,4 +1449,61 @@ async fn local_recompute_rejects_seedless_historical_capture() {
     .unwrap();
     assert_eq!(entry_edit.status, Status::Completed, "{entry_edit:?}");
     assert_eq!(entry_edit.mode, "recompute");
+}
+
+#[tokio::test]
+async fn replay_accepts_large_outputs_deep_values_and_graphs_above_64_nodes() {
+    let nodes: Vec<_> = (0..65)
+        .map(|n| node(&format!("n{n}"), "return {output=input,state=state}", ""))
+        .collect();
+    let edges: Vec<_> = (0..64)
+        .map(|n| edge(&format!("n{n}"), &format!("n{}", n + 1), None))
+        .collect();
+    let many = plan("n0", nodes, edges, json!({"value":1}));
+    let result = evaluate(&many, None, None, &[], 1, CancellationToken::new())
+        .await
+        .unwrap();
+    assert_eq!(result.status, Status::Completed);
+    assert_eq!(result.steps.len(), 65);
+    let large = plan(
+        "a",
+        vec![node(
+            "a",
+            "return {output=string.rep('x', 2*1024*1024),state=state}",
+            "",
+        )],
+        vec![],
+        json!({}),
+    );
+    let result = evaluate(&large, None, None, &[], 1, CancellationToken::new())
+        .await
+        .unwrap();
+    assert_eq!(result.status, Status::Completed);
+    assert_eq!(
+        result.steps[0]
+            .output
+            .as_ref()
+            .unwrap()
+            .as_str()
+            .unwrap()
+            .len(),
+        2 * 1024 * 1024
+    );
+    let deep = plan(
+        "a",
+        vec![node(
+            "a",
+            "local v=1; for i=1,40 do v={v} end; return {output=v,state=state}",
+            "",
+        )],
+        vec![],
+        json!({}),
+    );
+    assert_eq!(
+        evaluate(&deep, None, None, &[], 1, CancellationToken::new())
+            .await
+            .unwrap()
+            .status,
+        Status::Completed
+    );
 }

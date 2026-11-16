@@ -145,20 +145,18 @@ async fn fusion_strict_schema_rejects_coercion_and_keeps_invalid_answer() {
     assert!(report.disagreements.is_empty());
 }
 #[tokio::test]
-async fn fusion_enforces_three_to_sixteen_distinct_providers_before_any_calls() {
+async fn fusion_rejects_empty_or_duplicate_sources_before_any_calls() {
     let seen = Arc::new(Mutex::new(Vec::new()));
-    for count in [0, 2, 17] {
-        assert!(
-            collect_fusion(
-                input(),
-                candidates(vec![answer(1); count], &seen),
-                Duration::from_secs(1),
-                CancellationToken::new()
-            )
-            .await
-            .is_err()
-        );
-    }
+    assert!(
+        collect_fusion(
+            input(),
+            candidates(vec![], &seen),
+            Duration::from_secs(1),
+            CancellationToken::new()
+        )
+        .await
+        .is_err()
+    );
     let candidate: Arc<dyn FusionCandidateSource> = Arc::new(Candidate {
         id: "duplicate".into(),
         response: answer(1),
@@ -225,4 +223,21 @@ fn canonical_digest_is_stable_under_object_key_order_and_changes_with_constraint
     second.constraints.push("changed constraint".into());
     assert_ne!(first.digest().unwrap(), second.digest().unwrap());
     assert_eq!(first.digest().unwrap().len(), 64);
+}
+
+#[tokio::test]
+async fn fusion_collects_small_and_large_provider_sets_without_truncation() {
+    for count in [1, 2, 17, 32] {
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let result = collect_fusion(
+            input(),
+            candidates(vec![answer(1); count], &seen),
+            Duration::from_secs(1),
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(result.candidates.len(), count);
+        assert_eq!(seen.lock().unwrap().len(), count);
+    }
 }

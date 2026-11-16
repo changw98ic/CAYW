@@ -3,7 +3,7 @@
 //! The sample was produced through the public `SessionStore` + `Agent` API from
 //! the frozen pre-move baseline and checked in as read-only evidence. This test
 //! copies it, opens the copy, reads the event log and calls the explicit
-//! recovery entry. Opening a v3 sample must not migrate or rewrite it.
+//! recovery entry. The copy migrates to the current contract and retains original records as evidence.
 //!
 //! `EventRecord.timestamp` (Unix milliseconds) is the persisted time field. Its
 //! monotonicity is not part of the protocol because the system clock can move
@@ -37,7 +37,11 @@ fn real_v3_sample_opens_reads_and_recovers() {
     assert_eq!(snapshot.state, SessionState::Idle);
     let events = store.events(&id, 0, 1000).unwrap();
     assert_eq!(events.len(), 22, "sample should contain its complete log");
-    assert!(events.iter().all(|record| record.protocol_version == 3));
+    assert!(
+        events
+            .iter()
+            .all(|record| record.protocol_version == cayw_core::PROTOCOL_VERSION)
+    );
     // The time field is present and positive; clock monotonicity is not promised.
     assert!(events.iter().all(|record| record.timestamp > 0));
     assert!(
@@ -66,7 +70,7 @@ fn real_v3_sample_opens_reads_and_recovers() {
             .any(|record| matches!(&record.event, CoreEvent::AttemptFinished { .. }))
     );
     // A settled idle session is unchanged by the explicit recovery entry: the v3
-    // sample is read, not migrated or rewritten. Unknown recovery has its own tests.
+    // sample keeps its business facts after migration. Unknown recovery has its own tests.
     let recovered = store.recover(&id).unwrap();
     assert_eq!(recovered, snapshot);
     assert_eq!(store.events(&id, 0, 1000).unwrap().len(), events.len());

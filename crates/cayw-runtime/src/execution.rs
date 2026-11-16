@@ -1136,7 +1136,7 @@ pub(crate) async fn resume_child(
     cancel: CancellationToken,
 ) -> Result<SessionView, RuntimeError> {
     let task = runtime.inner.queue.get(id)?;
-    if task.state != TaskState::Running || task.attempt_id.is_some() {
+    if task.state != TaskState::Queued || task.attempt_id.is_some() {
         return Err(RuntimeError::InvalidInput(
             "child task is not newly admitted".into(),
         ));
@@ -1226,8 +1226,9 @@ async fn run_worker(
     flags: RunFlags,
     scope: Option<Arc<crate::children::RunScope>>,
 ) -> Result<SessionView, RuntimeError> {
-    if scope.is_none() {
-        admit(&inner, worker, &cancel).await?;
+    admit(&inner, worker, &cancel).await?;
+    if scope.is_some() {
+        inner.fleet.mark_running(&task.id);
     }
     if cancel.is_cancelled() {
         return Err(RuntimeError::Cancelled);

@@ -314,7 +314,7 @@ async fn actual_running_snapshot_hides_stream_until_catchup_consumes_every_unsee
                 .as_array()
                 .unwrap()
                 .iter()
-                .any(|record| record["event"]["event"]["type"] == "message_update")
+                .any(|record| record["event"]["event"]["event"]["type"] == "text_delta")
             {
                 break page;
             }

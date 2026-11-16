@@ -26,39 +26,27 @@ pub trait ImageSink: Send + Sync {
 }
 
 /// Host-selected vision budgets. Catalog membership never grants permission.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Limits {
     /// Complete JSON-encoded argument envelope.
-    pub input_bytes: usize,
+    pub input_bytes: Option<usize>,
     /// Complete JSON-encoded result envelope.
-    pub output_bytes: usize,
+    pub output_bytes: Option<usize>,
     /// Max raw RGBA byte length (`width * height * 4`).
-    pub max_image_bytes: usize,
-}
-
-impl Default for Limits {
-    fn default() -> Self {
-        Self {
-            input_bytes: 8 * 1024 * 1024,
-            output_bytes: 8 * 1024 * 1024,
-            max_image_bytes: 16 * 1024 * 1024,
-        }
-    }
+    pub max_image_bytes: Option<usize>,
 }
 
 impl Limits {
     pub fn validate(self) -> Result<(), CapabilityError> {
-        if self.input_bytes == 0
-            || self.input_bytes > 32 * 1024 * 1024
-            || self.output_bytes == 0
-            || self.output_bytes > 32 * 1024 * 1024
-            || self.max_image_bytes == 0
-            || self.max_image_bytes > 64 * 1024 * 1024
+        if [self.input_bytes, self.output_bytes, self.max_image_bytes]
+            .into_iter()
+            .flatten()
+            .any(|limit| limit == 0)
         {
             return Err(error(
                 "invalid_limits",
-                "vision limits must be nonzero and within documented hard ceilings",
+                "configured vision limits must be nonzero",
             ));
         }
         Ok(())
@@ -127,12 +115,14 @@ impl VisionService {
         if cancel.is_cancelled() {
             return Err(error("cancelled", "vision operation cancelled"));
         }
-        let encoded = serde_json::to_vec(args).map_err(|err| error("arguments", err))?;
-        if encoded.len() > self.limits.input_bytes {
-            return Err(error(
-                "arguments",
-                "vision arguments exceed input byte limit",
-            ));
+        if let Some(limit) = self.limits.input_bytes {
+            let encoded = serde_json::to_vec(args).map_err(|err| error("arguments", err))?;
+            if encoded.len() > limit {
+                return Err(error(
+                    "arguments",
+                    "vision arguments exceed input byte limit",
+                ));
+            }
         }
         let result = match name {
             "vision.crop" => self.crop(args),
@@ -145,20 +135,30 @@ impl VisionService {
             ))),
         }
         .map_err(vision_error)?;
-        let out = serde_json::to_vec(&result).map_err(|err| error("result", err))?;
-        if out.len() > self.limits.output_bytes {
-            return Err(error("result", "vision result exceeds output byte limit"));
+        if let Some(limit) = self.limits.output_bytes {
+            let out = serde_json::to_vec(&result).map_err(|err| error("result", err))?;
+            if out.len() > limit {
+                return Err(error("result", "vision result exceeds output byte limit"));
+            }
         }
         Ok(result)
     }
 
     fn decode_image(&self, value: &Value) -> Result<ImageBuffer, VisionError> {
-        let width = value["width"].as_u64().ok_or_else(|| {
-            VisionError::InvalidInput("image.width must be a positive integer".into())
-        })? as u32;
-        let height = value["height"].as_u64().ok_or_else(|| {
-            VisionError::InvalidInput("image.height must be a positive integer".into())
-        })? as u32;
+        let width = value["width"]
+            .as_u64()
+            .and_then(|value| u32::try_from(value).ok())
+            .filter(|value| *value > 0)
+            .ok_or_else(|| {
+                VisionError::InvalidInput("image.width must be a positive u32 integer".into())
+            })?;
+        let height = value["height"]
+            .as_u64()
+            .and_then(|value| u32::try_from(value).ok())
+            .filter(|value| *value > 0)
+            .ok_or_else(|| {
+                VisionError::InvalidInput("image.height must be a positive u32 integer".into())
+            })?;
         let has_rgba = value.get("rgba_base64").is_some();
         let has_handle = value.get("handle").is_some();
         if has_rgba && has_handle {
@@ -185,10 +185,11 @@ impl VisionService {
                 "image.rgba_base64 or image.handle must be present".into(),
             ));
         };
-        if rgba.len() > self.limits.max_image_bytes {
+        if let Some(limit) = self.limits.max_image_bytes
+            && rgba.len() > limit
+        {
             return Err(VisionError::InvalidInput(format!(
-                "image exceeds max_image_bytes ({})",
-                self.limits.max_image_bytes
+                "image exceeds max_image_bytes ({limit})"
             )));
         }
         ImageBuffer::from_rgba8(width, height, rgba)

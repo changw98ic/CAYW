@@ -333,9 +333,9 @@ pub(crate) async fn write_lock(
     }
 }
 
-struct Temporary<'a> {
+pub(crate) struct Temporary<'a> {
     dir: &'a Dir,
-    name: String,
+    pub(crate) name: String,
     present: bool,
 }
 impl Drop for Temporary<'_> {
@@ -345,7 +345,7 @@ impl Drop for Temporary<'_> {
         }
     }
 }
-fn temporary(dir: &Dir) -> Result<(Temporary<'_>, File), CapabilityError> {
+pub(crate) fn temporary(dir: &Dir) -> Result<(Temporary<'_>, File), CapabilityError> {
     let mut options = OpenOptions::new();
     options
         .write(true)
@@ -457,6 +457,18 @@ fn commit(
     }
     sync_directory(dir)?;
     Ok(json!({"bytes":bytes.len(), "sha256":hash(bytes)}))
+}
+
+/// Read complete source through the held root, honoring an explicit file budget.
+pub(crate) fn read_complete(
+    host: &Host,
+    path: &str,
+    cancel: &CancellationToken,
+    deadline: Option<Instant>,
+) -> Result<Vec<u8>, CapabilityError> {
+    let components = components(path, false)?;
+    let (dir, name) = parent(&host.root, &components)?;
+    read_bytes(&dir, name, host.config.max_file_bytes, cancel, deadline)
 }
 
 pub(crate) async fn execute(

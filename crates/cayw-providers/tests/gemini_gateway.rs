@@ -142,7 +142,11 @@ fn terminal(events: &[AssistantEvent]) -> &AssistantMessage {
     assert!(matches!(events.first(), Some(AssistantEvent::Start { .. })));
     assert_eq!(events.iter().filter(|event| event.is_terminal()).count(), 1);
     assert!(events.last().unwrap().is_terminal());
-    events.last().unwrap().message()
+    events
+        .last()
+        .unwrap()
+        .snapshot()
+        .expect("snapshot boundary")
 }
 
 fn answer() -> Value {

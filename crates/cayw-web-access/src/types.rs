@@ -212,6 +212,7 @@ pub enum FailureClass {
     Timeout,
     HttpStatus,
     InvalidUrl,
+    InvalidRequest,
     UnsupportedScheme,
     BodyTooLarge,
     ExtractFailed,

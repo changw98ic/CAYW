@@ -10,5 +10,5 @@ mod types;
 
 pub use error::CoreError;
 pub use protocol::*;
-pub use store::SessionStore;
+pub use store::{SessionStore, migration::migrate_v3_event_json};
 pub use types::*;

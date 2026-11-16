@@ -33,10 +33,16 @@ test('unknown events stay visible as records and never become assistant text', (
   assert.equal(view.events[0].cursor, 1);
 });
 
-test('agent partial text replaces the preview instead of duplicating deltas', () => {
-  let view = consumeEvents(createView('s1'), [{ cursor: 1, event: { type: 'message_update', message: { content: [{ type: 'text', text: '你好' }] }, event: { type: 'text_delta', delta: '好' } } }]);
-  assert.equal(view.liveText, '你好');
-  view = consumeEvents(view, [{ cursor: 2, event: { type: 'message_end', message: { role: 'assistant', content: [{ type: 'text', text: '你好' }] } } }]);
+test('agent deltas append every fragment and cancellation keeps its partial snapshot', () => {
+  const event = (cursor, update) => ({cursor, event:{type:'message_update',event:update}});
+  let view = consumeEvents(createView('s1'), [event(1, {type:'text_start',index:0,partial:{content:[{type:'text',text:''}]}})]);
+  const records = Array.from({length:200}, (_,i) => event(i+2, {type:'text_delta',index:0,delta:'你好'}));
+  view = consumeEvents(view, records);
+  assert.equal(view.liveText, '你好'.repeat(200));
+  const message = {role:'assistant',content:[{type:'text',text:view.liveText}],stop_reason:'cancelled'};
+  view = consumeEvents(view, [event(202, {type:'error',message})]);
+  assert.equal(view.liveText, message.content[0].text);
+  view = consumeEvents(view, [{cursor:203,event:{type:'message_end',message}}]);
   assert.equal(view.liveText, '');
 });
 
@@ -46,14 +52,14 @@ test('refreshing a snapshot does not skip events that have not been consumed', (
   assert.throws(() => applySnapshot(view, snapshot({ id: 'other' })));
 });
 
-test('history and event previews are bounded and preserve recent entries', () => {
+test('history and streamed text remain complete while event previews retain recent entries', () => {
   const records = Array.from({ length: 400 }, (_, i) => ({ cursor: i + 1, event: { type: 'text_delta', delta: 'x'.repeat(1000) } }));
   const view = consumeEvents(createView('s1'), records);
   assert.ok(view.events.length <= 120);
   assert.equal(view.events.at(-1).cursor, 400);
-  assert.ok(view.liveText.length <= 64000);
+  assert.equal(view.liveText.length, 400000);
   const populated = applySnapshot(view, snapshot({ messages: Array.from({ length: 300 }, (_, i) => ({ role: 'user', content: [{ type: 'text', text: String(i) }] })) }));
-  assert.ok(populated.snapshot.messages.length <= 120);
+  assert.equal(populated.snapshot.messages.length, 300);
   assert.equal(messageText(populated.snapshot.messages.at(-1)), '299');
 });
 

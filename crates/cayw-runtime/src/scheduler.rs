@@ -6,7 +6,7 @@ use crate::{Runtime, RuntimeError, TaskRecord, execution::RunContext, lock};
 use cayw_ai::CancellationToken;
 use serde::Serialize;
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     sync::{Arc, Mutex},
     time::Duration,
 };
@@ -55,6 +55,7 @@ struct State {
     model_active: bool,
     /// false means the VM may still be running; true is a pre-execution wait.
     cells: BTreeMap<String, bool>,
+    dependencies: BTreeSet<String>,
 }
 #[derive(Default)]
 pub(crate) struct Activity {
@@ -83,8 +84,16 @@ impl Activity {
                 return Ok(());
             }
             let record = context.inner.queue.get(&context.task.id)?;
-            if record.state == crate::TaskState::Running && !record.cancel_requested {
-                if let Err(error) = context.inner.queue.park(&context.task) {
+            if record.state == crate::TaskState::Running
+                && record.holds_slot
+                && !record.cancel_requested
+            {
+                let parked = if state.dependencies.is_empty() {
+                    context.inner.queue.park(&context.task)
+                } else {
+                    context.inner.queue.park_dependency(&context.task)
+                };
+                if let Err(error) = parked {
                     // A failed park retains the task's slot as a lifecycle
                     // obligation. It never proves that an external effect is
                     // unknown, so callers receive a known scheduler error.
@@ -127,6 +136,7 @@ impl Activity {
         let _coordinate = context.inner.coordination.enter()?;
         let mut state = lock(&self.state);
         state.cells.remove(id);
+        state.dependencies.remove(id);
         self.park_if_idle(context, &state)?;
         self.changed.notify_waiters();
         Ok(())
@@ -147,6 +157,23 @@ impl Activity {
         {
             manager.notify_permission_wait(id);
         }
+        self.changed.notify_waiters();
+        Ok(())
+    }
+    pub(crate) fn waiting_dependency(
+        &self,
+        context: &RunContext,
+        id: &str,
+    ) -> Result<(), RuntimeError> {
+        let _coordinate = context.inner.coordination.enter()?;
+        let mut state = lock(&self.state);
+        let waiting = state
+            .cells
+            .get_mut(id)
+            .ok_or_else(|| RuntimeError::Worker("dependency wait lost its cell".into()))?;
+        *waiting = true;
+        state.dependencies.insert(id.into());
+        self.park_if_idle(context, &state)?;
         self.changed.notify_waiters();
         Ok(())
     }
@@ -178,35 +205,31 @@ impl Activity {
                 let _coordinate = context.inner.coordination.enter()?;
                 let mut state = lock(&self.state);
                 context.inner.queue.check(&context.task)?;
-                // A following model turn and a newly created cell must acquire
-                // the same slot as an approved call. Existing cells can remain
-                // parked while the model prepares another independent cell.
+                let record = context.inner.queue.get(&context.task.id)?;
+                if record.state == crate::TaskState::WaitingApproval
+                    || (record.state == crate::TaskState::Running && !record.holds_slot)
                 {
-                    let record = context.inner.queue.get(&context.task.id)?;
-                    if record.state == crate::TaskState::WaitingApproval {
-                        context.inner.queue.ready(&context.task)?;
-                    }
-                    let admitted = context
-                        .inner
-                        .queue
-                        .admit(&context.task, context.inner.config.max_concurrent_runs)?;
-                    if admitted {
-                        if let Some(id) = cell {
-                            let waiting = state.cells.get_mut(id).ok_or_else(|| {
-                                RuntimeError::Worker("approval lost its original code cell".into())
-                            })?;
-                            *waiting = false;
-                        } else {
-                            if state.model_active {
-                                return Err(RuntimeError::Worker(
-                                    "model stream already active".into(),
-                                ));
-                            }
-                            state.model_active = true;
-                        }
-                    }
-                    admitted
+                    context.inner.queue.ready(&context.task)?;
                 }
+                let admitted = context
+                    .inner
+                    .queue
+                    .admit(&context.task, context.inner.config.max_concurrent_runs)?;
+                if admitted {
+                    if let Some(id) = cell {
+                        let waiting = state.cells.get_mut(id).ok_or_else(|| {
+                            RuntimeError::Worker("resume lost its original cell".into())
+                        })?;
+                        *waiting = false;
+                        state.dependencies.remove(id);
+                    } else {
+                        if state.model_active {
+                            return Err(RuntimeError::Worker("model stream already active".into()));
+                        }
+                        state.model_active = true;
+                    }
+                }
+                admitted
             };
             if admitted {
                 self.changed.notify_waiters();

@@ -77,7 +77,7 @@ async fn setup(root: &Path, fault: &str) -> (Registry, StdioControl, StdioConfig
         .insert("CAYW_MCP_FIXTURE_FAULT".into(), fault.into());
     config.max_frame_bytes = 4096;
     config.max_stderr_bytes = 64;
-    config.max_received_frames = 32;
+    config.max_received_frames = Some(32);
     let prepared = StdioSource::connect(config.clone(), CancellationToken::new())
         .await
         .unwrap();
@@ -320,4 +320,51 @@ async fn stderr_is_bounded_diagnostic_data_and_does_not_fail_successful_tool() {
         &config,
         json!({"expected_sum":42}),
     );
+}
+
+#[tokio::test]
+async fn full_stdio_capacity_waits_and_cancelled_owner_releases_next_request() {
+    let root = tempfile::tempdir().unwrap();
+    let mut config = StdioConfig::new(
+        env!("CARGO_BIN_EXE_cayw-sources-local-fixture"),
+        root.path(),
+    );
+    config.max_pending = 1;
+    config
+        .environment
+        .insert("CAYW_MCP_FIXTURE_FAULT".into(), "resource-wait".into());
+    let source = StdioSource::connect(config, CancellationToken::new())
+        .await
+        .unwrap();
+    let control = source.control();
+    let (_, handle) = source.into_parts();
+    let cancel = CancellationToken::new();
+    let mut first = Box::pin(handle.request(
+        direct_request(
+            cayw_bridge::SourceOperation::ReadResource {
+                uri: "fixture://local/addition".into(),
+            },
+            1,
+        ),
+        cancel.clone(),
+    ));
+    tokio::select! {result=&mut first=>panic!("early {result:?}"),_=async{while control.snapshot().resource_reads==0{tokio::task::yield_now().await;}}=>{}}
+    let mut second = Box::pin(handle.request(
+        direct_request(
+            cayw_bridge::SourceOperation::InvokeTool {
+                name: "add".into(),
+                arguments: json!({"a":17,"b":25}),
+            },
+            2,
+        ),
+        CancellationToken::new(),
+    ));
+    tokio::select! {biased; result=&mut second=>panic!("must wait {result:?}"),_=tokio::task::yield_now()=>{}}
+    assert_eq!(control.snapshot().tool_calls, 0);
+    cancel.cancel();
+    assert!(first.await.is_err());
+    assert_eq!(second.await.unwrap().value["sum"], 42);
+    handle.disconnect();
+    control.wait_closed().await;
+    assert!(control.snapshot().reaped);
 }

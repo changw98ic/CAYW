@@ -201,7 +201,7 @@ impl Default for Limits {
             queue_capacity: 32,
             max_inflight_per_device: 16,
             max_connections: 128,
-            max_records: 100_000,
+            max_records: usize::MAX,
             request_timeout: Duration::from_secs(60),
             handshake_timeout: Duration::from_secs(10),
             heartbeat_interval: Duration::from_secs(10),
@@ -217,7 +217,7 @@ impl Limits {
             || !(1..=4096).contains(&self.queue_capacity)
             || self.max_inflight_per_device == 0
             || !(1..=65_536).contains(&self.max_connections)
-            || !(1..=10_000_000).contains(&self.max_records)
+            || self.max_records == 0
             || self.max_inflight_per_device > 4096
             || [
                 self.request_timeout,

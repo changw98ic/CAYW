@@ -60,7 +60,7 @@ async fn regex_empty_matches_are_utf8_aligned_and_not_adjacent_to_nonempty_match
 }
 
 #[tokio::test]
-async fn gitignore_links_or_oversized_rules_fail_without_ambient_reads() {
+async fn gitignore_links_are_rejected_and_large_regular_rules_are_accepted() {
     use std::os::unix::fs::symlink;
     let temp = tempfile::tempdir().unwrap();
     let outside = tempfile::tempdir().unwrap();
@@ -84,12 +84,10 @@ async fn gitignore_links_or_oversized_rules_fail_without_ambient_reads() {
     assert_eq!(explicit["paths"], json!(["ok"]));
     fs::remove_file(temp.path().join(".gitignore")).unwrap();
     fs::write(temp.path().join(".gitignore"), "x".repeat(5000)).unwrap();
-    assert!(
-        !call(&ws, "fs.glob", json!({"path":".","pattern":"**/*"}))
-            .await
-            .unwrap_err()
-            .outcome_unknown
-    );
+    let result = call(&ws, "fs.glob", json!({"path":".","pattern":"**/*"}))
+        .await
+        .unwrap();
+    assert_eq!(result["paths"], json!([".gitignore", "ok"]));
 }
 
 #[tokio::test]

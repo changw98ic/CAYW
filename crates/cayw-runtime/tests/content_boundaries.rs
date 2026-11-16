@@ -664,7 +664,13 @@ fn content_and_workspace_directories_cannot_overlap_or_use_symlink_aliases() {
 #[tokio::test]
 async fn content_configuration_binding_rejects_silent_directory_device_or_disable_changes_and_allows_a_stopped_quota_change()
  {
-    let h = Harness::new(limits(), &[]);
+    let h = Harness::new(
+        Limits {
+            max_records: 1,
+            ..limits()
+        },
+        &[],
+    );
     let mut changed = Vec::new();
     let mut directory = h.cfg.clone();
     directory.content.as_mut().unwrap().directory = h.root.join("other-content");
@@ -702,10 +708,7 @@ async fn content_configuration_binding_rejects_silent_directory_device_or_disabl
     );
     drop(rt);
     let binding: Value = serde_json::from_str(&content_binding(&root)).unwrap();
-    assert_eq!(
-        binding["config"]["limits"]["max_records"],
-        json!(limits().max_records + 1)
-    );
+    assert_eq!(binding["config"]["limits"]["max_records"], json!(2));
     assert!(open(&root, provider, original).is_ok());
 }
 
@@ -1286,7 +1289,7 @@ async fn external_process_content_lock_wait_is_cancellable_without_detaching_a_w
 }
 
 #[test]
-fn content_quota_below_content_size_is_clamped_not_rejected() {
+fn explicit_total_content_quota_survives_default_object_limit_and_reopen() {
     let temp = tempfile::tempdir().unwrap();
     let root = temp.path().canonicalize().unwrap();
     std::fs::create_dir(root.join("workspace")).unwrap();
@@ -1294,17 +1297,17 @@ fn content_quota_below_content_size_is_clamped_not_rejected() {
     let cfg = config(
         &root,
         Limits {
-            max_content_bytes: 4096,
             max_total_bytes: 8,
             ..Limits::default()
         },
         &[],
     );
-    let runtime = open(&root, provider.clone(), cfg.clone()).expect("order is clamped");
+    let runtime = open(&root, provider.clone(), cfg.clone()).expect("independent quotas are valid");
     drop(runtime);
-    // The normalized values are stable, so the durable binding is unchanged
-    // across a reopen with the same configuration.
-    let runtime = open(&root, provider, cfg).expect("normalized binding is stable");
+    let binding: Value = serde_json::from_str(&content_binding(&root)).unwrap();
+    assert_eq!(binding["config"]["limits"]["max_total_bytes"], 8);
+    // Reopening preserves the explicit total budget.
+    let runtime = open(&root, provider, cfg).expect("explicit quota binding is stable");
     drop(runtime);
 
     // A genuinely invalid value is still a clear configuration error.
@@ -1337,7 +1340,7 @@ fn headless_config_still_rejects_hard_invalid_optional_values() {
         "directory":"/tmp/cayw-optional-content","device_id":"boundary-device",
         "limits":{"max_content_bytes":1024,"max_total_bytes":8,"max_records":1,"max_security_entries":1}
     }}))
-    .expect("total below content size is normalized, not rejected");
+    .expect("total and individual content quotas are independent");
 
     // Hard-invalid values are still clear configuration errors.
     for value in [

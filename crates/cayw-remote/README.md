@@ -35,6 +35,8 @@ impl DeviceHandler for Host {
 
 The Rust method signatures and `DeviceHandler` contract are unchanged. For direct protocol integrations, hello now requires `max_frame_bytes`, `max_inflight`, `max_records` and `queue_capacity`; welcome returns those four effective limits plus the server's heartbeat timings. This is the single canonical version 1 handshake; a hello missing the resource offer is rejected. A negotiated per-connection `max_records` exhaustion rejects new IDs with `Busy`; existing durable IDs remain queryable and never execute again. A deliberate fresh connection has an empty in-memory deduplication set and the server's durable deduplication still applies.
 
+`Limits::max_records` defaults to the integer representation limit (`usize::MAX`), so retained terminal history does not exhaust an arbitrary product quota. Explicit smaller record budgets still apply to durable deduplication records and negotiated connection IDs; active execution has the separate `max_inflight_per_device` limit. No history is deleted to admit new work.
+
 The operator token controls every Device in this single-operator store. There is no multi-tenant operator access model. Device credentials authenticate only the named Device: they cannot invoke operator routes or return results for another Device. The Server never returns a Device secret to the operator. The Device creates its own secret; a successful bind response contains only the assigned identity.
 
 ## Run locally

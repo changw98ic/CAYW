@@ -153,7 +153,11 @@ fn terminal(events: &[AssistantEvent]) -> &AssistantMessage {
     assert!(matches!(events.first(), Some(AssistantEvent::Start { .. })));
     assert_eq!(events.iter().filter(|e| e.is_terminal()).count(), 1);
     assert!(events.last().unwrap().is_terminal());
-    events.last().unwrap().message()
+    events
+        .last()
+        .unwrap()
+        .snapshot()
+        .expect("snapshot boundary")
 }
 
 fn assert_error(events: &[AssistantEvent]) {
@@ -385,7 +389,7 @@ async fn gemini_tool_prompt_tokens_are_included_once() {
 }
 
 #[tokio::test]
-async fn usage_reports_emit_snapshots_without_requiring_more_content() {
+async fn usage_reports_emit_metadata_without_requiring_more_content() {
     for kind in ["anthropic", "gemini", "gemini-json"] {
         let (body, mime, report) = if kind == "anthropic" {
             (
@@ -422,10 +426,13 @@ async fn usage_reports_emit_snapshots_without_requiring_more_content() {
             .unwrap_or_else(|| {
                 panic!("{kind}: usage was hidden until a later content or terminal event")
             });
+        let mut observed = AssistantMessage::new(&Model::new("fixture", "fixture"));
+        update.apply_to(&mut observed).unwrap();
+        assert!(update.snapshot().is_none());
         assert!(!update.is_terminal());
-        assert_eq!(update.message().usage_status, UsageStatus::Reported);
+        assert_eq!(observed.usage_status, UsageStatus::Reported);
         for (field, expected) in report.as_object().unwrap() {
-            assert_eq!(&update.message().usage_fields[field], expected);
+            assert_eq!(&observed.usage_fields[field], expected);
         }
         assert_eq!(terminal(&events).stop_reason, StopReason::Stop);
         server.await.unwrap();
@@ -1243,7 +1250,8 @@ async fn anthropic_tool_json_resource_limits_never_become_correctable_arguments(
             terminal(&events)
                 .tool_calls()
                 .iter()
-                .all(|call| call.arguments_error.is_none())
+                .all(|call| call.arguments == Value::String(raw.clone())
+                    && call.arguments_error.is_some())
         );
         server.await.unwrap();
     }
@@ -1487,7 +1495,11 @@ async fn anthropic_stop_sequence_and_token_limits_preserve_usage_and_identity() 
             .iter()
             .rev()
             .find_map(|event| match event {
-                AssistantEvent::UsageUpdate { partial } => Some(partial),
+                AssistantEvent::UsageUpdate { .. } => {
+                    let mut message = AssistantMessage::new(&Model::new("fixture", "fixture"));
+                    event.apply_to(&mut message).unwrap();
+                    Some(message)
+                }
                 _ => None,
             })
             .expect("received usage must be observable before the terminal");
@@ -1570,7 +1582,11 @@ async fn gemini_max_tokens_rejects_function_calls_and_preserves_usage_and_identi
                 .iter()
                 .rev()
                 .find_map(|event| match event {
-                    AssistantEvent::UsageUpdate { partial } => Some(partial),
+                    AssistantEvent::UsageUpdate { .. } => {
+                        let mut message = AssistantMessage::new(&Model::new("fixture", "fixture"));
+                        event.apply_to(&mut message).unwrap();
+                        Some(message)
+                    }
                     _ => None,
                 })
                 .expect("received usage must survive MAX_TOKENS processing");
@@ -1947,13 +1963,15 @@ async fn gemini_large_frame_preserves_all_text_and_tool_events() {
         let mut text_ends = 0;
         let mut tools = Vec::new();
         let mut terminal_count = 0;
+        let mut partial = AssistantMessage::new(&Model::new("gemini", "fixture"));
         while let Some(event) = timeout(Duration::from_secs(10), stream.next())
             .await
             .unwrap()
         {
+            event.apply_to(&mut partial).unwrap();
             match event {
                 AssistantEvent::TextStart { .. } => text_starts += 1,
-                AssistantEvent::TextDelta { delta, partial, .. } => {
+                AssistantEvent::TextDelta { delta, .. } => {
                     deltas += 1;
                     if deltas <= 2000 {
                         assert_eq!(delta, "fragment");
@@ -1973,11 +1991,7 @@ async fn gemini_large_frame_preserves_all_text_and_tool_events() {
                     assert_eq!(call.arguments, Value::Null);
                     tools.push((index, "start"));
                 }
-                AssistantEvent::ToolCallDelta {
-                    index,
-                    delta,
-                    partial,
-                } => {
+                AssistantEvent::ToolCallDelta { index, delta } => {
                     let expected = if index == 1 {
                         json!({"city":"Paris"})
                     } else {
@@ -1986,7 +2000,8 @@ async fn gemini_large_frame_preserves_all_text_and_tool_events() {
                     let Content::ToolCall(call) = &partial.content[index] else {
                         panic!("missing call")
                     };
-                    assert_eq!(call.arguments, expected);
+                    assert_eq!(call.arguments, Value::String(delta.clone()));
+                    assert!(call.arguments_error.is_some());
                     assert_eq!(serde_json::from_str::<Value>(&delta).unwrap(), expected);
                     tools.push((index, "delta"));
                 }
@@ -2089,8 +2104,15 @@ async fn gemini_same_thread_cancellation_interrupts_a_single_large_frame() {
             }
             if event.is_terminal() {
                 terminal_count += 1;
-                assert_eq!(event.message().stop_reason, StopReason::Aborted);
-                assert!(cayw_ai::content_text(&event.message().content).len() < 3000);
+                assert_eq!(
+                    event.snapshot().expect("snapshot boundary").stop_reason,
+                    StopReason::Aborted
+                );
+                assert!(
+                    cayw_ai::content_text(&event.snapshot().expect("snapshot boundary").content)
+                        .len()
+                        < 3000
+                );
             }
         }
         assert_eq!(terminal_count, 1);
@@ -2137,8 +2159,11 @@ async fn gemini_cancel_and_drop_between_tool_events_do_not_consume_remaining_par
                         .unwrap()
                         .unwrap();
                     assert!(matches!(event, AssistantEvent::Error { .. }));
-                    assert_eq!(event.message().stop_reason, StopReason::Aborted);
-                    let calls = event.message().tool_calls();
+                    assert_eq!(
+                        event.snapshot().expect("snapshot boundary").stop_reason,
+                        StopReason::Aborted
+                    );
+                    let calls = event.snapshot().expect("snapshot boundary").tool_calls();
                     assert_eq!(calls.len(), 1);
                     assert_eq!(calls[0].id, "first");
                     assert_eq!(
@@ -2173,7 +2198,7 @@ async fn gemini_rejects_role_only_finish_content_without_parts() {
 }
 
 #[tokio::test]
-async fn response_fragment_and_tool_limits_cover_both_gemini_modes() {
+async fn large_fragment_and_tool_counts_complete_in_both_gemini_modes() {
     for mode in [
         GeminiMode::StreamGenerateContent,
         GeminiMode::GenerateContent,
@@ -2189,25 +2214,25 @@ async fn response_fragment_and_tool_limits_cover_both_gemini_modes() {
             let (base, server) = bulk_server(mime, body).await;
             let provider = GeminiProvider::new(base, KEY).unwrap().with_mode(mode);
             let events = collect(&provider, tools_request("gemini")).await;
-            assert_error(&events);
-            assert!(
-                events
-                    .last()
-                    .unwrap()
-                    .message()
-                    .error_message
-                    .as_ref()
-                    .unwrap()
-                    .contains("limit")
+            assert_eq!(
+                terminal(&events).stop_reason,
+                if tool_calls {
+                    StopReason::ToolUse
+                } else {
+                    StopReason::Stop
+                }
             );
-            assert!(terminal(&events).tool_calls().len() <= 1024);
+            assert_eq!(
+                terminal(&events).tool_calls().len(),
+                if tool_calls { 1025 } else { 0 }
+            );
             server.await.unwrap();
         }
     }
 }
 
 #[tokio::test]
-async fn response_fragment_limits_accumulate_across_sse_frames() {
+async fn fragment_counts_do_not_abort_complete_streams() {
     for kind in ["anthropic", "gemini"] {
         let body = if kind == "gemini" {
             let chunk = json!({"candidates":[{"content":{"parts":[{"text":""}]}}]});
@@ -2226,13 +2251,16 @@ async fn response_fragment_limits_accumulate_across_sse_frames() {
             sse(values)
         };
         let (base, server) = bulk_server("text/event-stream", body).await;
-        assert_error(&collect(adapter(kind, &base).as_ref(), request(kind)).await);
+        assert_eq!(
+            terminal(&collect(adapter(kind, &base).as_ref(), request(kind)).await).stop_reason,
+            StopReason::Stop
+        );
         server.await.unwrap();
     }
 }
 
 #[tokio::test]
-async fn tool_call_limits_accumulate_across_sse_frames() {
+async fn tool_call_counts_do_not_abort_complete_streams() {
     for kind in ["anthropic", "gemini"] {
         let body = if kind == "gemini" {
             let values = (0..1025).map(|i| json!({"candidates":[{"content":{"parts":[{"functionCall":{"id":format!("call_{i}"),"name":"weather","args":{"city":"Paris"}}}]}}]})).collect();
@@ -2251,14 +2279,14 @@ async fn tool_call_limits_accumulate_across_sse_frames() {
         };
         let (base, server) = bulk_server("text/event-stream", body).await;
         let events = collect(adapter(kind, &base).as_ref(), tools_request(kind)).await;
-        assert_error(&events);
-        assert_eq!(terminal(&events).tool_calls().len(), 1024);
+        assert_eq!(terminal(&events).stop_reason, StopReason::ToolUse);
+        assert_eq!(terminal(&events).tool_calls().len(), 1025);
         assert_eq!(
             events
                 .iter()
                 .filter(|e| matches!(e, AssistantEvent::ToolCallEnd { .. }))
                 .count(),
-            1024
+            1025
         );
         server.await.unwrap();
     }
@@ -2299,62 +2327,42 @@ async fn gemini_accepts_complete_responses_at_fragment_and_tool_limits() {
 }
 
 #[tokio::test]
-async fn frame_limits_count_usage_and_ping_frames_without_content() {
+async fn many_heartbeat_frames_can_precede_a_complete_response() {
     for kind in ["anthropic", "gemini"] {
         let body = if kind == "gemini" {
-            sse(vec![json!({"usageMetadata":{}}); 131_073])
+            sse(vec![json!({"usageMetadata":{}}); 131_073]) + &gemini_text()
         } else {
-            sse(vec![json!({"type":"ping"}); 131_073])
+            sse(vec![json!({"type":"ping"}); 131_073]) + &anthropic_text()
         };
         let (base, server) = bulk_server("text/event-stream", body).await;
         let events = collect(adapter(kind, &base).as_ref(), request(kind)).await;
-        assert_error(&events);
-        assert!(
-            terminal(&events)
-                .error_message
-                .as_ref()
-                .unwrap()
-                .contains("frame limit")
-        );
+        assert_eq!(terminal(&events).stop_reason, StopReason::Stop);
         server.await.unwrap();
     }
 }
 
 #[tokio::test]
-async fn wire_size_limits_stop_oversized_frames_json_and_cumulative_sse_bytes() {
-    for (mode, body, expected) in [
-        (
-            GeminiMode::StreamGenerateContent,
-            format!(":{}\n\n", "x".repeat(8 * 1024 * 1024)),
-            "8 MiB limit",
-        ),
-        (
-            GeminiMode::StreamGenerateContent,
-            format!(":{}\n\n", "x".repeat(8192)).repeat(8192),
-            "size limit",
-        ),
-        (
-            GeminiMode::GenerateContent,
-            " ".repeat(16 * 1024 * 1024 + 1),
-            "size limit",
-        ),
+async fn wire_frame_protection_and_large_total_responses_are_distinct() {
+    let body = format!(":{}\n\n", "x".repeat(8 * 1024 * 1024));
+    let (base, server) = bulk_server("text/event-stream", body).await;
+    let events = collect(&GeminiProvider::new(base, KEY).unwrap(), request("gemini")).await;
+    assert_error(&events);
+    assert!(
+        terminal(&events)
+            .error_message
+            .as_ref()
+            .unwrap()
+            .contains("8 MiB")
+    );
+    server.await.unwrap();
+    for (mode, mime, body) in [
+        (GeminiMode::StreamGenerateContent, "text/event-stream", format!(":{}\n\n", "x".repeat(8192)).repeat(8192) + &gemini_text()),
+        (GeminiMode::GenerateContent, "application/json", " ".repeat(16 * 1024 * 1024 + 1) + &json!({"candidates":[{"content":{"parts":[{"text":"ok"}]},"finishReason":"STOP"}]}).to_string()),
     ] {
-        let mime = if mode == GeminiMode::GenerateContent {
-            "application/json"
-        } else {
-            "text/event-stream"
-        };
         let (base, server) = bulk_server(mime, body).await;
         let provider = GeminiProvider::new(base, KEY).unwrap().with_mode(mode);
         let events = collect(&provider, request("gemini")).await;
-        assert_error(&events);
-        assert!(
-            terminal(&events)
-                .error_message
-                .as_ref()
-                .unwrap()
-                .contains(expected)
-        );
+        assert_eq!(terminal(&events).stop_reason, StopReason::Stop);
         server.await.unwrap();
     }
 }
@@ -2601,6 +2609,47 @@ async fn registry_routes_exactly_and_unknown_provider_errors_without_fallback() 
             .unwrap()
             .head
             .contains("gemini-requested:streamGenerateContent")
+    );
+    server.await.unwrap();
+}
+
+#[tokio::test]
+async fn gemini_usage_on_every_chunk_does_not_repeat_growing_content() {
+    let values = (0..101).map(|i| {
+        let text = if i == 0 { "x".repeat(1024 * 1024) } else { "y".into() };
+        let mut value = json!({
+            "candidates":[{"content":{"role":"model","parts":[{"text":text}]}}],
+            "usageMetadata":{"promptTokenCount":1,"candidatesTokenCount":i+1,"totalTokenCount":i+2}
+        });
+        if i == 100 { value["candidates"][0]["finishReason"] = json!("STOP"); }
+        value
+    }).collect();
+    let (base, server) = bulk_server("text/event-stream", sse(values)).await;
+    let provider = GeminiProvider::new(base, KEY).unwrap();
+    let req = request("gemini");
+    let mut state = AssistantMessage::new(&req.model);
+    let events = collect(&provider, req).await;
+    let mut usage_events = 0;
+    let mut delta_bytes = 0;
+    for event in &events {
+        event.apply_to(&mut state).unwrap();
+        if matches!(event, AssistantEvent::UsageUpdate { .. }) {
+            usage_events += 1;
+            assert!(event.snapshot().is_none());
+            assert!(serde_json::to_vec(event).unwrap().len() < 1024);
+        }
+        if matches!(event, AssistantEvent::TextDelta { .. }) {
+            assert!(event.snapshot().is_none());
+            delta_bytes += serde_json::to_vec(event).unwrap().len();
+        }
+    }
+    assert_eq!(usage_events, 101);
+    assert!(delta_bytes < 1024 * 1024 + 20_000);
+    assert_eq!(state.stop_reason, StopReason::Stop);
+    assert_eq!(state.usage.output, 101);
+    assert_eq!(
+        cayw_ai::content_text(&state.content),
+        "x".repeat(1024 * 1024) + &"y".repeat(100)
     );
     server.await.unwrap();
 }

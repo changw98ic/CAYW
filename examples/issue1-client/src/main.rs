@@ -662,9 +662,11 @@ async fn transport(root: &Path) -> Result<Value> {
     config.max_in_flight = 1;
     let server = Server::start(rt.clone(), config).await?;
     let mut raw = BufReader::new(TcpStream::connect(server.address).await?);
-    raw.get_mut()
-        .write_all(b"{\"version\":2,\"id\":\"incompatible\",\"method\":\"hello\",\"params\":{}}\n")
-        .await?;
+    let mut incompatible = serde_json::to_vec(&json!({
+        "version":cayw_ipc::PROTOCOL_VERSION + 1,"id":"incompatible","method":"hello","params":{}
+    }))?;
+    incompatible.push(b'\n');
+    raw.get_mut().write_all(&incompatible).await?;
     let mut version_line = String::new();
     tokio::time::timeout(WATCHDOG, raw.read_line(&mut version_line)).await??;
     let version: Value = serde_json::from_str(&version_line)?;
@@ -775,7 +777,7 @@ async fn transport(root: &Path) -> Result<Value> {
         busy.code == "client_busy" && !busy.outcome_unknown,
         "backpressure not rejected before dispatch",
     )?;
-    let over_frame = control
+    let large_request = control
         .request(
             "session.prompt",
             json!({"session_id":session.id,"text":"x".repeat(1024*1024+1)}),
@@ -783,8 +785,8 @@ async fn transport(root: &Path) -> Result<Value> {
         .await
         .unwrap_err();
     require(
-        !over_frame.outcome_unknown,
-        "oversize local frame was dispatched",
+        large_request.code == "busy" && !large_request.outcome_unknown,
+        "large request did not reach the Runtime session admission check",
     )?;
     let during = api.get(&session.id).await?;
     require(during.attempt.is_some(), "held request not active")?;
@@ -811,7 +813,7 @@ async fn transport(root: &Path) -> Result<Value> {
     )?;
     let wire_pairing = runtime_wire_pairing(root, server.address, &api).await?;
     let result = json!({"passed":true,"wire_version":cayw_ipc::PROTOCOL_VERSION,"core_version":cayw_core::PROTOCOL_VERSION,
-        "real_runtime_wire_pairing":wire_pairing,"backpressure":busy,"oversize":over_frame,"original_disconnect_error":original,"task":tasks[0],"no_automatic_replay":true});
+        "real_runtime_wire_pairing":wire_pairing,"backpressure":busy,"large_request_busy":large_request,"original_disconnect_error":original,"task":tasks[0],"no_automatic_replay":true});
     save(&root.join("result.json"), &result)?;
     save(&root.join("events.json"), &rt.events(&session.id, 0, 1000)?)?;
     control.close().await;
@@ -1003,12 +1005,11 @@ async fn process_recovery(root: &Path, unknown: bool) -> Result<Value> {
             .is_err(),
         "recovery revived old approval",
     )?;
-    let mut replacement = Value::Null;
+    let replacement;
     if unknown {
         require(
-            recovered.state == SessionState::NeedsReconciliation
-                && recovered.unresolved_capabilities.len() == 1,
-            "started effect not retained as blocking unknown",
+            recovered.state == SessionState::Idle && recovered.unresolved_capabilities.len() == 1,
+            "recovery did not retain unknown while releasing the session",
         )?;
         let call = &recovered.unresolved_capabilities[0];
         require(
@@ -1019,42 +1020,39 @@ async fn process_recovery(root: &Path, unknown: bool) -> Result<Value> {
             matches!(call.outcome, Some(CapabilityOutcome::OutcomeUnknown { .. })),
             "incomplete started effect was made known",
         )?;
-        let tasks_before_rejection = api.tasks(&session.id).await?;
-        let error = reopened
-            .client
-            .request(
-                "session.prompt",
-                json!({"session_id":session.id,"text":"must not replay unknown"}),
-            )
-            .await
-            .unwrap_err();
-        save(&root.join("blocked-new-work.json"), &error)?;
-        let blocked_session = api.get(&session.id).await?;
-        let blocked_tasks = api.tasks(&session.id).await?;
+        // A recovered unknown keeps its original identity. New work receives a
+        // fresh attempt; deny its proposed effect so this fixture cannot issue it twice.
+        let run_api = api.clone();
+        let id = session.id.clone();
+        let next = tokio::spawn(async move { run_api.prompt(&id).await });
+        let mut after = recovered.cursor;
+        let pending = pending(&api, &session.id, &mut after).await?;
+        let running = api.get(&session.id).await?;
+        let new_lease = running
+            .attempt
+            .as_ref()
+            .ok_or("new work has no execution identity")?;
+        require(
+            new_lease.session_id == old_lease.session_id
+                && new_lease.attempt_id != old_lease.attempt_id
+                && new_lease.worker_id != old_lease.worker_id
+                && new_lease.fence > old_lease.fence,
+            "new work reused the interrupted execution identity",
+        )?;
+        api.approve(&session.id, &pending.id, ApprovalChoice::Deny)
+            .await?;
+        joined(next).await?;
+        replacement = serde_json::to_value(new_lease)?;
+        let continued = api.get(&session.id).await?;
+        require(
+            continued.unresolved_capabilities == recovered.unresolved_capabilities,
+            "new work changed the original unknown effect",
+        )?;
         save(
-            &root.join("blocked-new-work-state.json"),
-            &json!({"session":blocked_session,"tasks":blocked_tasks}),
-        )?;
-        require(
-            error.code == "needs_reconciliation_outcome_unknown"
-                && error.outcome_unknown
-                && blocked_session == recovered
-                && blocked_tasks == tasks_before_rejection,
-            &format!(
-                "unknown prompt returned an unexpected rejection or changed original records: {}",
-                error.code
-            ),
-        )?;
-        require(
-            reopened
-                .client
-                .request(
-                    "session.fork",
-                    json!({"session_id":session.id,"label":"bypass","confirm":true,"mode":"chat"}),
-                )
-                .await
-                .is_err(),
-            "fork bypassed unknown",
+            &root.join("accepted-new-work-state.json"),
+            &json!({
+                "session":continued,"tasks":api.tasks(&session.id).await?,"replacement_lease":new_lease
+            }),
         )?;
         require(
             !root.join("synthetic-effect-1.json").exists(),
@@ -1146,12 +1144,10 @@ async fn process_recovery(root: &Path, unknown: bool) -> Result<Value> {
             && after_tasks[0].attempt_id == old_task.attempt_id,
         "recovery rewrote original task ownership",
     )?;
-    if !unknown {
-        require(
-            after_tasks.len() == 2 && after_tasks[1].id != old_task.id,
-            "replacement reused original task",
-        )?;
-    }
+    require(
+        after_tasks.len() == 2 && after_tasks[1].id != old_task.id,
+        "replacement reused original task",
+    )?;
     save(&root.join("after-tasks.json"), &after_tasks)?;
     save(&root.join("after-recovery.json"), &recovered)?;
     save(&root.join("after-events.json"), &full)?;
@@ -1162,17 +1158,10 @@ async fn process_recovery(root: &Path, unknown: bool) -> Result<Value> {
         stopped["service_calls"] == 0,
         "replacement host replayed service effect",
     )?;
-    if unknown {
-        require(
-            stopped["provider_requests"] == 0,
-            "unknown recovery called the Provider",
-        )?;
-    } else {
-        require(
-            stopped["provider_requests"].as_u64().is_some_and(|n| n > 0),
-            "explicit replacement task did not call Provider",
-        )?;
-    }
+    require(
+        stopped["provider_requests"].as_u64().is_some_and(|n| n > 0),
+        "explicit replacement task did not call Provider",
+    )?;
     let result = json!({"passed":true,"unknown_scenario":unknown,"same_session_id":session.id,"old_lease":old_lease,
         "replacement_lease":replacement,"original_pid":original.pid,"reopened_pid":reopened_pid,
         "original_exit_confirmed_before_reopen":true,"tasks_before_recovery":tasks_before_recovery,

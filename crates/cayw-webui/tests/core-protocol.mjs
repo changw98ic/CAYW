@@ -23,26 +23,26 @@ function finishedCancel(protocol, eventLease = lease, envelopeLease = lease, rec
   return applySnapshot(view, snapshot, false, 5, view.proofEpoch);
 }
 
-test('the original Core v3 terminal settles a successful cancel receipt', () => {
-  assert.equal(finishedCancel(3).writes.length, 0);
+test('the original Core v4 terminal settles a successful cancel receipt', () => {
+  assert.equal(finishedCancel(4).writes.length, 0);
 });
 
 test('an obsolete Core terminal cannot settle the current cancel receipt', () => {
-  assert.equal(finishedCancel(1).writes.length, 1);
+  assert.equal(finishedCancel(3).writes.length, 1);
 });
 
 test('a terminal must retain the original worker and fence', () => {
   const otherWorker = { ...lease, worker_id: 'worker-2', fence: 2 };
-  assert.equal(finishedCancel(3, otherWorker, otherWorker).writes.length, 1);
+  assert.equal(finishedCancel(4, otherWorker, otherWorker).writes.length, 1);
 });
 
 test('a terminal lease must match its original event envelope', () => {
-  assert.equal(finishedCancel(3, lease, { ...lease, fence: 2 }).writes.length, 1);
+  assert.equal(finishedCancel(4, lease, { ...lease, fence: 2 }).writes.length, 1);
 });
 
 test('a terminal does not settle an uncertain cancel request', () => {
   const error = { code: 'transport_error', message: 'receipt lost', outcome_unknown: true };
-  const view = finishedCancel(3, lease, lease, error);
+  const view = finishedCancel(4, lease, lease, error);
   assert.equal(view.writes.length, 1);
   assert.equal(view.writes[0].phase, 'uncertain');
 });

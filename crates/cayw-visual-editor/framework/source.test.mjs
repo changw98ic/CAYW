@@ -1133,3 +1133,25 @@ test('selection after insert resolves the inserted node start in UTF-8 bytes', (
   assert.equal(buffer.subarray(result.selection.start).toString('utf8').startsWith('<p>new</p>'), true);
   assert.equal(result.selection.path, 'A.jsx');
 });
+
+for (const framework of ['react','vue']) {
+  test(`${framework} edits accept large text, attributes and style sets`, () => {
+    const path = framework === 'react' ? 'App.jsx' : 'App.vue';
+    let files = [{path, source:framework === 'react' ? 'export const App=()=> <div><p>text</p><img src="a.png" /></div>;' : '<template><div><p>text</p><img src="a.png" /></div></template>'}];
+    const apply = operation => {
+      const result=editDocuments({framework,files,revision:REVISION,operation});
+      files=[{path,source:applyPatches(files,result.patches).get(path)}];
+    };
+    let mapped=mapDocuments({framework,files,revision:REVISION});
+    const text='字'.repeat(100000);
+    apply({kind:'text',id:nodeByTag(mapped.nodes,'p').id,text});
+    assert(files[0].source.includes(text));
+    mapped=mapDocuments({framework,files,revision:REVISION});
+    const value='data:image/png;base64,'+'A'.repeat(70000);
+    apply({kind:'attribute',id:nodeByTag(mapped.nodes,'img').id,name:'src',value});
+    assert(files[0].source.includes(value));
+    mapped=mapDocuments({framework,files,revision:REVISION});
+    apply({kind:'style',id:nodeByTag(mapped.nodes,'p').id,properties:Object.fromEntries(Array.from({length:40},(_,i)=>[`--property-${i}`,'x'.repeat(600)]))});
+    assert(files[0].source.includes('--property-39'));
+  });
+}

@@ -432,7 +432,7 @@ async fn et08_audit_store_open_exclusive_lock_conflict() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn et08_audit_store_open_refuses_oversized_audit_file() {
+async fn et08_audit_store_open_refuses_corrupt_large_audit_file() {
     let (_, state_dir) = setup_fixture();
     let audit_file = state_dir.path().join(AUDIT_FILE);
     let marker_path = state_dir.path().join(UNKNOWN_MARKER);
@@ -445,13 +445,13 @@ async fn et08_audit_store_open_refuses_oversized_audit_file() {
     let result = AuditStore::open(state_dir.path());
     assert!(
         result.is_err(),
-        "oversized audit file must fail AuditStore::open"
+        "NUL-filled corrupt audit file must fail AuditStore::open"
     );
     let err = result.err().expect("error");
     assert_eq!(err.code, "reconciliation_required");
     assert!(err.outcome_unknown);
     assert!(
         marker_path.exists(),
-        "unknown.json marker must be written on oversized audit file"
+        "unknown.json marker must be written on a corrupt audit file"
     );
 }

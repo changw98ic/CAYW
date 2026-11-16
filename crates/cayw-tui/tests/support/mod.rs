@@ -61,8 +61,10 @@ impl Provider for OfflineProvider {
         let stream_gate = self.stream_gate.clone();
         Box::pin(async_stream::stream! {
             yield AssistantEvent::Start { message: message.clone() };
+            message.content = vec![Content::text("")];
+            yield AssistantEvent::TextStart { index: 0, partial: message.clone() };
             message.content = vec![Content::text("streamed fixture 你好")];
-            yield AssistantEvent::TextDelta { index: 0, delta: "streamed fixture 你好".into(), partial: message.clone() };
+            yield AssistantEvent::TextDelta { index: 0, delta: "streamed fixture 你好".into() };
             tokio::select! {
                 _ = cancel.cancelled() => {
                     yield AssistantEvent::Error { message: message.failure(StopReason::Aborted, "fixture cancelled") };

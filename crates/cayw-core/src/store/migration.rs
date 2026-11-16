@@ -146,6 +146,7 @@ pub(super) fn migrate_v1(connection: &Connection) -> Result<(), CoreError> {
                 }
                 _ => {}
             }
+            normalize_stream_event(&mut raw)?;
             raw["protocol_version"] = Value::from(PROTOCOL_VERSION);
             let record: EventRecord = serde_json::from_value(raw)?;
             cursor = increment(cursor)?;
@@ -309,6 +310,7 @@ pub(super) fn migrate_v2(connection: &Connection) -> Result<(), CoreError> {
                     "v2 log contains unversioned wait bindings".into(),
                 ));
             }
+            normalize_stream_event(&mut raw)?;
             raw["protocol_version"] = Value::from(PROTOCOL_VERSION);
             let record: EventRecord = serde_json::from_value(raw)?;
             cursor = increment(cursor)?;
@@ -941,4 +943,114 @@ fn validate_approval(session: &StoredSession, approval: &ApprovalRequest) -> Res
         ));
     }
     Ok(())
+}
+
+/// Preserve original bytes before any canonical rewrite, in the same transaction.
+pub(super) fn archive_original(connection: &Connection, version: u32) -> Result<(), CoreError> {
+    connection.execute_batch("CREATE TABLE core_migration_events (source_version INTEGER NOT NULL, session_id TEXT NOT NULL, cursor INTEGER NOT NULL, record TEXT NOT NULL, PRIMARY KEY(source_version,session_id,cursor));
+        CREATE TABLE core_migration_projections (source_version INTEGER NOT NULL, session_id TEXT NOT NULL, projection TEXT NOT NULL, PRIMARY KEY(source_version,session_id));
+        CREATE TRIGGER core_migration_events_no_replace BEFORE INSERT ON core_migration_events WHEN EXISTS(SELECT 1 FROM core_migration_events WHERE source_version=NEW.source_version AND session_id=NEW.session_id AND cursor=NEW.cursor) BEGIN SELECT RAISE(ABORT,'migration evidence is immutable'); END;
+        CREATE TRIGGER core_migration_projections_no_replace BEFORE INSERT ON core_migration_projections WHEN EXISTS(SELECT 1 FROM core_migration_projections WHERE source_version=NEW.source_version AND session_id=NEW.session_id) BEGIN SELECT RAISE(ABORT,'migration evidence is immutable'); END;
+        CREATE TRIGGER core_migration_events_no_update BEFORE UPDATE ON core_migration_events BEGIN SELECT RAISE(ABORT,'migration evidence is immutable'); END;
+        CREATE TRIGGER core_migration_events_no_delete BEFORE DELETE ON core_migration_events BEGIN SELECT RAISE(ABORT,'migration evidence is immutable'); END;
+        CREATE TRIGGER core_migration_projections_no_update BEFORE UPDATE ON core_migration_projections BEGIN SELECT RAISE(ABORT,'migration evidence is immutable'); END;
+        CREATE TRIGGER core_migration_projections_no_delete BEFORE DELETE ON core_migration_projections BEGIN SELECT RAISE(ABORT,'migration evidence is immutable'); END;")?;
+    connection.execute(
+        "INSERT INTO core_migration_events SELECT ?1,session_id,cursor,record FROM core_events",
+        [version],
+    )?;
+    connection.execute(
+        "INSERT INTO core_migration_projections SELECT ?1,id,projection FROM core_sessions",
+        [version],
+    )?;
+    Ok(())
+}
+
+fn normalize_stream_event(raw: &mut Value) -> Result<(), CoreError> {
+    if raw["event"]["type"].as_str() != Some("agent")
+        || raw["event"]["event"]["type"].as_str() != Some("message_update")
+    {
+        return Ok(());
+    }
+    let update = raw["event"]["event"]
+        .as_object_mut()
+        .ok_or_else(|| invalid("invalid legacy update"))?;
+    let message = update
+        .remove("message")
+        .ok_or_else(|| invalid("legacy update lacks message"))?;
+    let event = update
+        .get_mut("event")
+        .and_then(Value::as_object_mut)
+        .ok_or_else(|| invalid("legacy update lacks event"))?;
+    if !matches!(
+        event.get("type").and_then(Value::as_str),
+        Some(
+            "start"
+                | "usage_update"
+                | "text_start"
+                | "text_delta"
+                | "text_end"
+                | "thinking_start"
+                | "thinking_delta"
+                | "thinking_end"
+                | "tool_call_start"
+                | "tool_call_delta"
+                | "tool_call_end"
+        )
+    ) {
+        return Err(invalid("legacy update is not a nonterminal stream event"));
+    }
+    let snapshot = event
+        .get("partial")
+        .or_else(|| event.get("message"))
+        .ok_or_else(|| invalid("legacy update lacks snapshot"))?;
+    if snapshot != &message {
+        return Err(invalid("legacy update snapshot differs from message"));
+    }
+    // Older producers could establish a block through a delta's full partial.
+    // Preserve the complete observation as an explicit checkpoint.
+    update.insert(
+        "event".into(),
+        serde_json::json!({"type":"snapshot","message":message}),
+    );
+    Ok(())
+}
+
+pub(super) fn migrate_v3(connection: &Connection) -> Result<(), CoreError> {
+    let mut statement = connection
+        .prepare("SELECT session_id,cursor,record FROM core_events ORDER BY session_id,cursor")?;
+    let mut rows = statement.query([])?;
+    connection.execute_batch("DROP TRIGGER core_events_no_update;")?;
+    while let Some(row) = rows.next()? {
+        let id: String = row.get(0)?;
+        let cursor: i64 = row.get(1)?;
+        let original: String = row.get(2)?;
+        let record = migrate_v3_event_json(&original)?;
+        if record.session_id != id || record.cursor != cursor as u64 {
+            return Err(invalid("v3 event identity mismatch"));
+        }
+        connection.execute(
+            "UPDATE core_events SET record=?3 WHERE session_id=?1 AND cursor=?2",
+            params![id, cursor, encode_readable(&record)?],
+        )?;
+    }
+    drop(rows);
+    drop(statement);
+    connection.execute_batch("CREATE TRIGGER core_events_no_update BEFORE UPDATE ON core_events BEGIN SELECT RAISE(ABORT,'core events are append-only'); END;")?;
+    connection.execute("UPDATE core_metadata SET format=?1", [STORAGE_FORMAT])?;
+    connection.pragma_update(None, "user_version", SCHEMA_VERSION)?;
+    Ok(())
+}
+
+/// Canonicalize one explicitly imported Core v3 event. The importing store must
+/// retain the original bytes as immutable evidence before replacing its live
+/// representation. This is an offline migration, not an older wire protocol.
+pub fn migrate_v3_event_json(original: &str) -> Result<EventRecord, CoreError> {
+    let mut raw: Value = serde_json::from_str(original)?;
+    if raw["protocol_version"].as_u64() != Some(3) {
+        return Err(invalid("v3 event has incompatible envelope"));
+    }
+    normalize_stream_event(&mut raw)?;
+    raw["protocol_version"] = Value::from(PROTOCOL_VERSION);
+    Ok(serde_json::from_value(raw)?)
 }

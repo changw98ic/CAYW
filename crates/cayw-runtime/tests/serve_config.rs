@@ -222,7 +222,7 @@ fn headless_config_loads_optional_web_access_and_vision_options() {
 
     assert!(config.host.vision.is_some());
     let vision_limits = config.host.vision.unwrap();
-    assert_eq!(vision_limits.max_image_bytes, 8388608);
+    assert_eq!(vision_limits.max_image_bytes, Some(8388608));
 }
 
 #[cfg(feature = "pi-compat")]
@@ -1153,6 +1153,7 @@ async fn sigterm_stops_serve_cleanly_instead_of_leaving_the_process_running() {
     );
 }
 
+#[cfg(feature = "plugins")]
 #[cfg(feature = "plugins")]
 #[tokio::test]
 async fn sigterm_waits_for_external_plugin_process_cleanup() {

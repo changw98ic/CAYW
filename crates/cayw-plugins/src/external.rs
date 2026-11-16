@@ -24,9 +24,9 @@ pub struct ExternalConfig {
     pub call_timeout: Duration,
     /// Maximum time to confirm that the process leader exited after termination.
     pub shutdown_timeout: Duration,
-    pub max_line_bytes: usize,
+    pub max_line_bytes: Option<usize>,
     /// Lifetime stdout + stderr bytes, including handshake and line delimiters.
-    pub max_output_bytes: usize,
+    pub max_output_bytes: Option<usize>,
 }
 
 impl ExternalConfig {
@@ -40,8 +40,8 @@ impl ExternalConfig {
             handshake_timeout: Duration::from_secs(10),
             call_timeout: Duration::from_secs(30),
             shutdown_timeout: Duration::from_secs(10),
-            max_line_bytes: 64 * 1024,
-            max_output_bytes: 4 * 1024 * 1024,
+            max_line_bytes: None,
+            max_output_bytes: None,
         }
     }
 
@@ -54,8 +54,8 @@ impl ExternalConfig {
             || self.handshake_timeout.is_zero()
             || self.call_timeout.is_zero()
             || self.shutdown_timeout.is_zero()
-            || self.max_line_bytes == 0
-            || self.max_output_bytes < self.max_line_bytes
+            || self.max_line_bytes == Some(0)
+            || self.max_output_bytes == Some(0)
         {
             return Err(PluginError::InvalidManifest(
                 "invalid process configuration or limits".into(),
@@ -813,33 +813,35 @@ impl Drop for AbortOnDrop {
 
 struct OutputBudget {
     bytes: AtomicUsize,
-    limit: usize,
+    limit: Option<usize>,
     exceeded: CancellationToken,
 }
 impl OutputBudget {
     fn add(&self, count: usize) -> bool {
-        if self
+        let Some(limit) = self.limit else {
+            return true;
+        };
+        let accepted = self
             .bytes
-            .fetch_add(count, Ordering::Relaxed)
-            .saturating_add(count)
-            > self.limit
-        {
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |used| {
+                used.checked_add(count).filter(|next| *next <= limit)
+            })
+            .is_ok();
+        if !accepted {
             self.exceeded.cancel();
-            false
-        } else {
-            true
         }
+        accepted
     }
 }
 
 async fn write_message(
     stdin: &mut ChildStdin,
     message: &HostMessage,
-    limit: usize,
+    limit: Option<usize>,
 ) -> Result<(), PluginError> {
     let mut bytes =
         serde_json::to_vec(message).map_err(|error| PluginError::Protocol(error.to_string()))?;
-    if bytes.len() > limit {
+    if limit.is_some_and(|limit| bytes.len() > limit) {
         return Err(PluginError::Protocol("request exceeds line limit".into()));
     }
     bytes.push(b'\n');
@@ -850,7 +852,7 @@ async fn write_message(
 async fn read_message(
     stdout: &mut BufReader<ChildStdout>,
     budget: &OutputBudget,
-    limit: usize,
+    limit: Option<usize>,
 ) -> Result<ExternalMessage, PluginError> {
     let mut line = Vec::new();
     loop {
@@ -864,7 +866,7 @@ async fn read_message(
             return Err(output_limit());
         }
         let content_count = count - usize::from(end.is_some());
-        if line.len().saturating_add(content_count) > limit {
+        if limit.is_some_and(|limit| line.len().saturating_add(content_count) > limit) {
             return Err(PluginError::Protocol("response exceeds line limit".into()));
         }
         line.extend_from_slice(&available[..content_count]);

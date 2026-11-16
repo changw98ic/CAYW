@@ -107,6 +107,20 @@ pub struct AuditStore {
     counter: AtomicU64,
 }
 
+/// Identifies only the erroneous marker emitted by the removed size check.
+/// Malformed or unrelated markers are never treated as repairable.
+pub(crate) fn legacy_size_marker(state_dir: &Path) -> std::io::Result<bool> {
+    let file = match File::open(state_dir.join(UNKNOWN_MARKER)) {
+        Ok(file) => file,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => return Err(error),
+    };
+    let value: Value = serde_json::from_reader(BufReader::new(file))
+        .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
+    Ok(value["code"] == "reconciliation_required"
+        && value["message"] == "audit file exceeds the bounded size; reconcile it before editing")
+}
+
 impl AuditStore {
     /// Opens the state directory, takes its writer lock, and refuses to start
     /// when any previous call was not durably settled or is marked unknown.
@@ -125,7 +139,18 @@ impl AuditStore {
         })?;
         let path = state_dir.join(AUDIT_FILE);
         let marker = state_dir.join(UNKNOWN_MARKER);
+        let original_log_exists = path
+            .try_exists()
+            .map_err(|error| AuditOpenError::new("invalid_state_dir", error.to_string()))?;
+        let repair_size_marker = legacy_size_marker(&state_dir).map_err(|error| {
+            AuditOpenError::reconciliation(format!("cannot read unknown marker: {error}"))
+        })?;
 
+        if repair_size_marker && !original_log_exists {
+            return Err(AuditOpenError::reconciliation(
+                "original audit evidence is missing",
+            ));
+        }
         let mut options = OpenOptions::new();
         options.read(true).append(true).create(true);
         #[cfg(unix)]
@@ -161,7 +186,7 @@ impl AuditStore {
             )
         })?;
 
-        if marker.exists() {
+        if marker.exists() && !repair_size_marker {
             return Err(AuditOpenError::reconciliation(
                 "state directory contains an unresolved unknown operation; reconcile it before editing",
             ));
@@ -177,6 +202,27 @@ impl AuditStore {
                 let _ = write_marker(&marker, &reason);
                 return Err(AuditOpenError::reconciliation(reason));
             }
+        }
+        if repair_size_marker {
+            if !original_log_exists
+                || !legacy_size_marker(&state_dir).map_err(|error| {
+                    AuditOpenError::reconciliation(format!(
+                        "cannot recheck unknown marker: {error}"
+                    ))
+                })?
+            {
+                return Err(AuditOpenError::reconciliation(
+                    "original audit evidence or marker changed",
+                ));
+            }
+            // The original call log has been completely replayed under its writer lock.
+            fs::remove_file(&marker)
+                .and_then(|()| sync_directory(&state_dir))
+                .map_err(|error| {
+                    AuditOpenError::reconciliation(format!(
+                        "cannot persist repaired marker: {error}"
+                    ))
+                })?;
         }
         Ok(Self {
             path,

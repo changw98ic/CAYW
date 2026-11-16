@@ -193,7 +193,11 @@ fn terminal(events: &[AssistantEvent]) -> &AssistantMessage {
     assert!(matches!(events.first(), Some(AssistantEvent::Start { .. })));
     assert_eq!(events.iter().filter(|event| event.is_terminal()).count(), 1);
     assert!(events.last().unwrap().is_terminal());
-    events.last().unwrap().message()
+    events
+        .last()
+        .unwrap()
+        .snapshot()
+        .expect("snapshot boundary")
 }
 fn assert_error(events: &[AssistantEvent]) {
     assert_eq!(
@@ -251,13 +255,17 @@ async fn empty_signed_thinking_precedes_visible_text_without_becoming_an_answer(
             {"type":"text","text":"你好"}
         ]})
     );
-    assert!(events.iter().all(|event| {
-        !event
-            .message()
-            .content
+    assert!(
+        events
             .iter()
-            .any(|part| matches!(part, Content::Thinking { .. }))
-    }));
+            .filter_map(AssistantEvent::snapshot)
+            .all(|message| {
+                !message
+                    .content
+                    .iter()
+                    .any(|part| matches!(part, Content::Thinking { .. }))
+            })
+    );
     assert!(events.iter().any(|event| matches!(event, AssistantEvent::TextDelta { index: 0, delta, .. } if delta == "你好")));
     assert!(
         rx.await.unwrap()["head"]
@@ -665,7 +673,12 @@ async fn cancellation_and_drop_after_signed_blocks_release_the_socket() {
             }
         }
         assert_eq!(
-            observed.last().unwrap().message().provider_metadata["anthropic"]["content"][0]["signature"],
+            observed
+                .last()
+                .unwrap()
+                .snapshot()
+                .expect("snapshot boundary")
+                .provider_metadata["anthropic"]["content"][0]["signature"],
             "opaque-synthetic-signature+/="
         );
         save(case, "prefix-events.json", &observed);
@@ -677,7 +690,10 @@ async fn cancellation_and_drop_after_signed_blocks_release_the_socket() {
             let events: Vec<_> = timeout(WATCHDOG, stream.collect()).await.unwrap();
             save(case, "events.json", &events);
             assert_eq!(events.len(), 1);
-            assert_eq!(events[0].message().stop_reason, StopReason::Aborted);
+            assert_eq!(
+                events[0].snapshot().expect("snapshot boundary").stop_reason,
+                StopReason::Aborted
+            );
             assert!(!matches!(events[0], AssistantEvent::Done { .. }));
         }
         timeout(WATCHDOG, task).await.unwrap().unwrap();
@@ -774,13 +790,17 @@ async fn signed_thinking_survives_invalid_tool_arguments_and_round_trips_an_erro
         metadata.contains(raw) || metadata.contains(&serde_json::to_string(raw).unwrap()),
         "original invalid input must stay in provider metadata: {metadata}"
     );
-    assert!(events.iter().all(|event| {
-        !event
-            .message()
-            .content
+    assert!(
+        events
             .iter()
-            .any(|part| matches!(part, Content::Thinking { .. }))
-    }));
+            .filter_map(AssistantEvent::snapshot)
+            .all(|message| {
+                !message
+                    .content
+                    .iter()
+                    .any(|part| matches!(part, Content::Thinking { .. }))
+            })
+    );
     let restored: AssistantMessage =
         serde_json::from_slice(&serde_json::to_vec(message).unwrap()).unwrap();
     rx.await.unwrap();
@@ -824,23 +844,24 @@ async fn signed_thinking_survives_invalid_tool_arguments_and_round_trips_an_erro
 }
 
 #[tokio::test]
-async fn empty_thinking_deltas_still_obey_the_shared_fragment_limit() {
+async fn empty_thinking_fragments_do_not_abort_a_signed_response() {
     let mut wire = vec![
         start(),
         block_start(0, json!({"type":"thinking","thinking":"","signature":""})),
     ];
     wire.extend((0..65_536).map(|_| delta(0, json!({"type":"thinking_delta","thinking":""}))));
+    wire.push(delta(
+        0,
+        json!({"type":"signature_delta","signature":"signature"}),
+    ));
+    wire.push(block_stop(0));
+    wire.push(block_start(1, json!({"type":"text", "text":"ok"})));
+    wire.push(block_stop(1));
+    wire.extend(finish("end_turn"));
     let (base, rx, task) = server_with_chunk("thinking-fragment-limit", wire, 8192).await;
     let events = collect(&AnthropicProvider::new(base, KEY).unwrap(), request()).await;
     save("thinking-fragment-limit", "events.json", &events);
-    assert_error(&events);
-    assert!(
-        terminal(&events)
-            .error_message
-            .as_deref()
-            .unwrap()
-            .contains("fragment limit")
-    );
+    assert_eq!(terminal(&events).stop_reason, StopReason::Stop);
     rx.await.unwrap();
     task.await.unwrap();
 }

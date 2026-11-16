@@ -89,3 +89,5 @@ cargo test -p cayw-pi-compat --locked
 cargo clippy -p cayw-pi-compat --all-targets --locked -- -D warnings
 cargo run -p cayw-pi-compat --example offline_pi_compat --locked
 ```
+
+Pi 调用将取消信号传给插件注册表，不再在桥接中间层额外设置固定 5 秒时限；External 插件继续使用宿主配置的单次外部调用时限。

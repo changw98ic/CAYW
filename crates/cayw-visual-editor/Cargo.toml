@@ -26,10 +26,10 @@ serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
 thiserror.workspace = true
-tokio = { workspace = true, features = ["io-util", "net", "process", "rt-multi-thread", "signal", "time"] }
-tokio-util.workspace = true
+tokio = { workspace = true, features = ["fs", "io-util", "net", "process", "rt-multi-thread", "signal", "time"] }
+tokio-util = { workspace = true, features = ["io"] }
 
 [dev-dependencies]
 reqwest.workspace = true
 tempfile.workspace = true
-tokio = { workspace = true, features = ["io-util", "net", "process", "rt-multi-thread", "signal", "time"] }
+tokio = { workspace = true, features = ["fs", "io-util", "net", "process", "rt-multi-thread", "signal", "time"] }

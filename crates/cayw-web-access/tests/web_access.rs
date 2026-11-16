@@ -424,7 +424,7 @@ fn default_search_limit_above_max_is_clamped() {
 }
 
 #[tokio::test]
-async fn request_limit_zero_still_clamps_to_one() {
+async fn request_limit_zero_is_rejected_without_rewriting_request() {
     let search = FixtureSearch::new().insert(
         "example",
         vec![
@@ -439,9 +439,15 @@ async fn request_limit_zero_still_clamps_to_one() {
         ContentStore::new(),
         Limits::default(),
     );
-    let result = access.search("example", Some(0)).await.unwrap();
-    assert_eq!(result.hits.len(), 1);
-    assert!(result.truncated);
+    assert_eq!(
+        access
+            .search("example", Some(0))
+            .await
+            .unwrap_err()
+            .diagnostic
+            .class,
+        FailureClass::InvalidRequest
+    );
 }
 
 #[tokio::test]
@@ -476,4 +482,48 @@ async fn invalid_limits_on_direct_service_are_known_errors() {
         )
         .expect_err("extract must reject invalid configured limits");
     assert_eq!(error.diagnostic().class, FailureClass::Configuration);
+}
+
+#[tokio::test]
+async fn configured_search_limit_and_long_urls_pass_the_tool_catalog() {
+    let definitions = definitions();
+    let search_definition = definitions.iter().find(|d| d.name == "web.search").unwrap();
+    cayw_ai::ArgumentValidator::new(&search_definition.parameters)
+        .unwrap()
+        .validate(&json!({"query":"example","limit":30}))
+        .unwrap();
+    let long_url = format!("https://example.com/{}", "a".repeat(3000));
+    for name in ["web.fetch", "web.extract"] {
+        let definition = definitions.iter().find(|d| d.name == name).unwrap();
+        cayw_ai::ArgumentValidator::new(&definition.parameters)
+            .unwrap()
+            .validate(&json!({"url":long_url}))
+            .unwrap();
+    }
+    let hits = (1..=30)
+        .map(|n| hit(n, &format!("https://example.com/{n}"), "title", "snippet"))
+        .collect();
+    let access = WebAccess::new(
+        std::sync::Arc::new(FixtureTransport::new().insert_html(&long_url, demo_html())),
+        std::sync::Arc::new(FixtureSearch::new().insert("example", hits)),
+        ContentStore::new(),
+        Limits {
+            max_search_limit: 50,
+            ..Limits::default()
+        },
+    );
+    assert_eq!(
+        access.search("example", Some(30)).await.unwrap().hits.len(),
+        30
+    );
+    assert!(access.fetch(&long_url).await.is_ok());
+    assert_eq!(
+        access
+            .search("example", Some(51))
+            .await
+            .unwrap_err()
+            .diagnostic
+            .class,
+        FailureClass::InvalidRequest
+    );
 }

@@ -190,6 +190,9 @@ impl Provider for Fixture {
             }
         }
         let script = match prompt.as_str() {
+            "spawn background batch" => {
+                "local a=cayw.call('agent.run',{prompt='long child',label='First',mode='background'}); local b=cayw.call('agent.run',{prompt='bg child work',label='Second',mode='background'}); return {a,b}"
+            }
             "spawn child" => "return cayw.call('agent.run', {prompt='child work', label='Child'})",
             "spawn background concurrent" => {
                 "return cayw.call('agent.run', {prompt='bg child work', label='Bg', mode='background'})"
@@ -206,7 +209,7 @@ impl Provider for Fixture {
                 self.requests.lock().unwrap().push(request);
                 return Box::pin(stream::iter([AssistantEvent::Done { message: response }]));
             }
-            "child work" => "return 'child result'",
+            "child work" | "grandchild" => "return 'child result'",
             "child write and read" => {
                 "cayw.call('fs.write', {path='child-only.txt', content='child-yield0'})\nlocal read = cayw.call('fs.read', {path='child-only.txt'})\nreturn read.content"
             }
@@ -449,7 +452,7 @@ async fn agent_run_starts_a_real_child_session_and_task_and_records_identity() {
 }
 
 #[tokio::test]
-async fn concurrency_one_rejects_the_child_immediately_and_never_deadlocks() {
+async fn concurrency_one_parks_parent_and_completes_child_without_deadlock() {
     let temp = tempfile::tempdir().unwrap();
     let provider = Arc::new(Fixture::default());
     let mut settings = config(
@@ -467,29 +470,28 @@ async fn concurrency_one_rejects_the_child_immediately_and_never_deadlocks() {
         runtime.prompt(&parent.id, "spawn child", CancellationToken::new()),
     )
     .await
-    .expect("a full slot must fail fast instead of waiting for a child")
+    .expect("the parent must release its slot while its child runs")
     .unwrap();
 
     assert_eq!(
         parent_task(&runtime, &parent.id).state,
         TaskState::Completed
     );
+    assert_eq!(runtime.list().unwrap().len(), 2);
     assert_eq!(
-        runtime.list().unwrap().len(),
-        1,
-        "a preflight capacity refusal must not create an orphan child session"
+        host_events(&runtime, &parent.id, "agent_child_started").len(),
+        1
     );
     assert!(
-        result
+        !result
             .messages
             .last()
             .unwrap()
             .text()
-            .contains("queue is full"),
-        "the model must receive a known refusal: {}",
-        result.messages.last().unwrap().text()
+            .contains("queue is full")
     );
-    assert!(host_events(&runtime, &parent.id, "agent_child_started").is_empty());
+    let child = child_session(&runtime, &parent.id).await;
+    assert_eq!(parent_task(&runtime, &child).state, TaskState::Completed);
 }
 
 #[tokio::test]
@@ -1457,4 +1459,106 @@ async fn child_subagent_waits_for_parent_turn_via_exec_yield_zero_tool_call() {
     assert!(!child_ledger.usage_unknown);
     assert_eq!(child_ledger.reserved_tokens, 0);
     assert_eq!(child_ledger.settled_tokens, ledger.settled_tokens);
+}
+
+#[tokio::test]
+async fn nested_children_complete_with_one_global_and_one_tree_slot() {
+    let temp = tempfile::tempdir().unwrap();
+    let provider = Arc::new(Fixture::default());
+    let mut agents = local(vec![ScopedPermission::exact(
+        "agent.run",
+        json!({"prompt":"grandchild"}),
+    )]);
+    agents.max_depth = 2;
+    agents.max_children = 1;
+    let mut settings = config(
+        Some(agents),
+        vec![ScopedPermission::exact(
+            "agent.run",
+            json!({"prompt":"nested child"}),
+        )],
+    );
+    settings.max_concurrent_runs = 1;
+    let runtime = runtime(&temp, provider, settings);
+    let parent = runtime.create(None).unwrap();
+    run_prompt(&runtime, &parent.id, "spawn nested")
+        .await
+        .unwrap();
+    assert_eq!(runtime.list().unwrap().len(), 3);
+    for session in runtime.list().unwrap() {
+        assert_eq!(
+            parent_task(&runtime, &session.id).state,
+            TaskState::Completed
+        );
+    }
+}
+
+#[tokio::test]
+async fn background_submission_queues_when_tree_full_and_queued_child_can_cancel() {
+    let temp = tempfile::tempdir().unwrap();
+    let provider = Arc::new(Fixture::default());
+    let mut agents = local(vec![]);
+    agents.max_children = 1;
+    let mut settings = config(
+        Some(agents),
+        vec![
+            ScopedPermission::exact(
+                "agent.run",
+                json!({"prompt":"long child","label":"First","mode":"background"}),
+            ),
+            ScopedPermission::exact(
+                "agent.run",
+                json!({"prompt":"bg child work","label":"Second","mode":"background"}),
+            ),
+        ],
+    );
+    settings.max_concurrent_runs = 2;
+    let runtime = runtime(&temp, provider, settings);
+    let parent = runtime.create(None).unwrap();
+    run_prompt(&runtime, &parent.id, "spawn background batch")
+        .await
+        .unwrap();
+    let fleet = runtime.fleet(Some(&parent.id), None, 10).unwrap();
+    assert_eq!(fleet.members.len(), 2);
+    let first = fleet
+        .members
+        .iter()
+        .find(|row| row.label == "First")
+        .unwrap();
+    let second = fleet
+        .members
+        .iter()
+        .find(|row| row.label == "Second")
+        .unwrap();
+    let queued = runtime.task(&second.child_task_id).unwrap();
+    assert_eq!(queued.state, TaskState::Queued);
+    assert!(!queued.holds_slot);
+    assert!(queued.attempt_id.is_none());
+    assert_eq!(
+        runtime.fleet_stop(&second.child_task_id).unwrap()["stopped"],
+        true
+    );
+    tokio::time::timeout(WATCHDOG, async {
+        while runtime.task(&second.child_task_id).unwrap().state == TaskState::Queued {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(
+        runtime.task(&second.child_task_id).unwrap().state,
+        TaskState::Cancelled
+    );
+    runtime.fleet_stop(&first.child_task_id).unwrap();
+    tokio::time::timeout(WATCHDOG, async {
+        while runtime.task(&first.child_task_id).unwrap().state == TaskState::Running {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(
+        runtime.task(&first.child_task_id).unwrap().state,
+        TaskState::Cancelled
+    );
 }

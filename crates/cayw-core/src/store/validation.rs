@@ -231,20 +231,19 @@ json_variants!(Message,
 );
 json_variants!(AssistantEvent,
     AssistantEvent::Start { message } | AssistantEvent::Done { message }
-        | AssistantEvent::Error { message } => [message],
-    AssistantEvent::UsageUpdate { partial }
-        | AssistantEvent::TextStart { partial, .. } | AssistantEvent::TextDelta { partial, .. }
-        | AssistantEvent::TextEnd { partial, .. } | AssistantEvent::ThinkingStart { partial, .. }
-        | AssistantEvent::ThinkingDelta { partial, .. } | AssistantEvent::ThinkingEnd { partial, .. }
-        | AssistantEvent::ToolCallStart { partial, .. } | AssistantEvent::ToolCallDelta { partial, .. }
-        | AssistantEvent::ToolCallEnd { partial, .. } => [partial],
+        | AssistantEvent::Error { message } | AssistantEvent::Snapshot { message } => [message],
+    AssistantEvent::UsageUpdate { usage_fields, .. } => [usage_fields],
+    AssistantEvent::TextStart { partial, .. } | AssistantEvent::TextEnd { partial, .. }
+        | AssistantEvent::ThinkingStart { partial, .. } | AssistantEvent::ThinkingEnd { partial, .. }
+        | AssistantEvent::ToolCallStart { partial, .. } | AssistantEvent::ToolCallEnd { partial, .. } => [partial],
+    AssistantEvent::TextDelta { .. } | AssistantEvent::ThinkingDelta { .. } | AssistantEvent::ToolCallDelta { .. } => [],
 );
 json_variants!(AgentEvent,
     AgentEvent::AgentStart | AgentEvent::TurnStart => [],
     AgentEvent::AgentEnd { messages } => [messages],
     AgentEvent::TurnEnd { message, tool_results } => [message, tool_results],
     AgentEvent::MessageStart { message } | AgentEvent::MessageEnd { message } => [message],
-    AgentEvent::MessageUpdate { message, event } => [message, event],
+    AgentEvent::MessageUpdate { event } => [event],
     AgentEvent::ToolExecutionStart { call } => [call],
     AgentEvent::ToolExecutionUpdate { call, result }
         | AgentEvent::ToolExecutionEnd { call, result, .. } => [call, result],

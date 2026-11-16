@@ -6,13 +6,6 @@ use std::{
 };
 
 pub(crate) const ID_BYTES: usize = 128;
-pub(crate) const TEXT_BYTES: usize = 2048;
-pub(crate) const ARG_BYTES: usize = 64 * 1024;
-pub(crate) const CATALOG_BYTES: usize = 512 * 1024;
-pub(crate) const RECORD_BYTES: usize = ARG_BYTES + 32 * 1024;
-// Covers 64 retained attempt IDs plus maximally escaped intent/end reasons.
-pub(crate) const TASK_BYTES: usize = CATALOG_BYTES + 32 * 1024;
-
 #[derive(Debug, thiserror::Error)]
 pub enum RequestError {
     #[error("invalid request input: {0}")]
@@ -476,13 +469,12 @@ pub(crate) fn identifier(value: &str) -> Result<()> {
 }
 pub(crate) fn text(value: &str) -> Result<()> {
     if value.trim().is_empty()
-        || value.len() > TEXT_BYTES
         || value
             .chars()
             .any(|c| c.is_control() && c != '\n' && c != '\t')
     {
         return Err(RequestError::InvalidInput(
-            "reason or instruction must contain 1..2048 bytes without control characters".into(),
+            "reason or instruction must be non-empty without control characters".into(),
         ));
     }
     Ok(())
@@ -527,30 +519,6 @@ pub(crate) fn bounded_json_optional<T: Serialize>(
     }
 }
 pub(crate) fn argument_bounds(value: &Value) -> Result<()> {
-    fn walk(value: &Value, depth: usize, left: &mut usize) -> Result<()> {
-        if depth > 32 || *left == 0 {
-            return Err(RequestError::InvalidInput(
-                "JSON depth or node limit exceeded".into(),
-            ));
-        }
-        *left -= 1;
-        match value {
-            Value::Array(values) => {
-                for child in values {
-                    walk(child, depth + 1, left)?;
-                }
-            }
-            Value::Object(values) => {
-                for child in values.values() {
-                    walk(child, depth + 1, left)?;
-                }
-            }
-            _ => {}
-        }
-        Ok(())
-    }
-    walk(value, 0, &mut 4096)?;
-    bounded_json(value, ARG_BYTES)?;
     if !value.is_object() {
         return Err(RequestError::InvalidInput(
             "arguments must be an object".into(),

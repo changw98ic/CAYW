@@ -8,7 +8,7 @@
 use crate::types::{ErrorEvidenceLink, GraphPlan, Node, NodeSymbolHang, Status, Step};
 use cayw_codeintel::{
     CodeIntelError, DefinitionQuery, DiagnosticInput, DiagnosticSeverity, SymbolVersionBridge,
-    content_sha256, language_for_path, publish_under_workspace,
+    content_sha256, language_for_path, normalize_path, publish_bytes,
 };
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
@@ -158,33 +158,24 @@ pub fn feed_plan_from_workspace(
         let Some((path, _)) = parse_implementation(&node.implementation) else {
             continue;
         };
+        let path = normalize_path(&path)?;
         if !seen.insert(path.clone()) {
             continue;
         }
+        let existing = bridge.file_version(&path).map_err(map_codeintel)?;
         let abs = workspace.join(&path);
-        if !abs.is_file() {
+        let bytes = match std::fs::read(&abs) {
+            Ok(bytes) => bytes,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound && existing.is_none() => {
+                continue;
+            }
+            Err(error) => return Err(format!("{path}: {error}")),
+        };
+        if existing.is_some_and(|file| file.content_sha256 == content_sha256(&bytes)) {
             continue;
         }
-        match bridge.file_version(&path) {
-            Ok(Some(existing)) => {
-                // Digest check: refresh only when workspace bytes moved on.
-                match std::fs::read(&abs) {
-                    Ok(bytes) if content_sha256(&bytes) == existing.content_sha256 => continue,
-                    Ok(_) => {}
-                    Err(_) => continue, // unreadable: keep prior index
-                }
-            }
-            Ok(None) => {}
-            Err(err) => return Err(map_codeintel(err)),
-        }
-        let language = language_for_path(&path);
-        match publish_under_workspace(bridge, workspace, &path, language) {
-            Ok(_) => published += 1,
-            Err(err) => {
-                // Unreadable / non-UTF-8 Rust: skip; hang stays absent / prior.
-                let _ = err;
-            }
-        }
+        publish_bytes(bridge, &path, &bytes, language_for_path(&path)).map_err(map_codeintel)?;
+        published += 1;
     }
     Ok(published)
 }

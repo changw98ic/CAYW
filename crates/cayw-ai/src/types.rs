@@ -349,12 +349,20 @@ pub struct ModelRequest {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum AssistantEvent {
+    /// A canonical historical checkpoint. Live providers emit deltas between boundaries.
+    Snapshot {
+        message: AssistantMessage,
+    },
     Start {
         message: AssistantMessage,
     },
     /// A usage report was received, even when the wire frame has no content.
     UsageUpdate {
-        partial: AssistantMessage,
+        usage: Usage,
+        usage_status: UsageStatus,
+        usage_fields: BTreeMap<String, Value>,
+        response_id: Option<String>,
+        response_model: Option<String>,
     },
     TextStart {
         index: usize,
@@ -363,7 +371,6 @@ pub enum AssistantEvent {
     TextDelta {
         index: usize,
         delta: String,
-        partial: AssistantMessage,
     },
     TextEnd {
         index: usize,
@@ -376,7 +383,6 @@ pub enum AssistantEvent {
     ThinkingDelta {
         index: usize,
         delta: String,
-        partial: AssistantMessage,
     },
     ThinkingEnd {
         index: usize,
@@ -389,7 +395,6 @@ pub enum AssistantEvent {
     ToolCallDelta {
         index: usize,
         delta: String,
-        partial: AssistantMessage,
     },
     ToolCallEnd {
         index: usize,
@@ -404,21 +409,83 @@ pub enum AssistantEvent {
 }
 
 impl AssistantEvent {
-    pub fn message(&self) -> &AssistantMessage {
+    /// Full snapshots occur at message and block boundaries, not per delta.
+    pub fn snapshot(&self) -> Option<&AssistantMessage> {
         match self {
-            Self::Start { message } | Self::Done { message } | Self::Error { message } => message,
-            Self::UsageUpdate { partial }
-            | Self::TextStart { partial, .. }
-            | Self::TextDelta { partial, .. }
+            Self::Snapshot { message }
+            | Self::Start { message }
+            | Self::Done { message }
+            | Self::Error { message } => Some(message),
+            Self::TextStart { partial, .. }
             | Self::TextEnd { partial, .. }
             | Self::ThinkingStart { partial, .. }
-            | Self::ThinkingDelta { partial, .. }
             | Self::ThinkingEnd { partial, .. }
             | Self::ToolCallStart { partial, .. }
-            | Self::ToolCallDelta { partial, .. }
-            | Self::ToolCallEnd { partial, .. } => partial,
+            | Self::ToolCallEnd { partial, .. } => Some(partial),
+            Self::UsageUpdate { .. }
+            | Self::TextDelta { .. }
+            | Self::ThinkingDelta { .. }
+            | Self::ToolCallDelta { .. } => None,
         }
     }
+
+    pub fn usage_update(message: &AssistantMessage) -> Self {
+        Self::UsageUpdate {
+            usage: message.usage.clone(),
+            usage_status: message.usage_status,
+            usage_fields: message.usage_fields.clone(),
+            response_id: message.response_id.clone(),
+            response_model: message.response_model.clone(),
+        }
+    }
+
+    /// Fold an ordered Provider event into the current view without cloning the
+    /// growing message for each text fragment. Tool argument fragments accumulate
+    /// as an incomplete raw string until a block-end or terminal snapshot confirms the call.
+    pub fn apply_to(&self, message: &mut AssistantMessage) -> Result<(), String> {
+        if let Some(snapshot) = self.snapshot() {
+            *message = snapshot.clone();
+            return Ok(());
+        }
+        if let Self::UsageUpdate {
+            usage,
+            usage_status,
+            usage_fields,
+            response_id,
+            response_model,
+        } = self
+        {
+            message.usage = usage.clone();
+            message.usage_status = *usage_status;
+            message.usage_fields = usage_fields.clone();
+            message.response_id = response_id.clone();
+            message.response_model = response_model.clone();
+            return Ok(());
+        }
+        let (index, delta, kind) = match self {
+            Self::TextDelta { index, delta } => (*index, delta, "text"),
+            Self::ThinkingDelta { index, delta } => (*index, delta, "thinking"),
+            Self::ToolCallDelta { index, delta } => (*index, delta, "tool call"),
+            _ => unreachable!("snapshot handled above"),
+        };
+        match (kind, message.content.get_mut(index)) {
+            ("text", Some(Content::Text { text })) => text.push_str(delta),
+            ("thinking", Some(Content::Thinking { thinking, .. })) => thinking.push_str(delta),
+            ("tool call", Some(Content::ToolCall(call))) => {
+                if !call.arguments.is_string() {
+                    call.arguments = Value::String(String::new());
+                }
+                let Value::String(raw) = &mut call.arguments else {
+                    unreachable!()
+                };
+                raw.push_str(delta);
+                call.arguments_error = Some("tool argument stream is incomplete".into());
+            }
+            _ => return Err(format!("{kind} delta does not match content block {index}")),
+        }
+        Ok(())
+    }
+
     pub fn is_terminal(&self) -> bool {
         matches!(self, Self::Done { .. } | Self::Error { .. })
     }

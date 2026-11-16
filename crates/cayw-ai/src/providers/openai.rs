@@ -12,15 +12,6 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::time::Instant;
 use thiserror::Error;
 
-// The supported response range is finite across the entire HTTP response, even
-// when comments, empty content or deferred tool deltas produce no output events.
-const MAX_RESPONSE_BYTES: usize = 64 * 1024 * 1024;
-const MAX_RESPONSE_FRAMES: usize = 131_072;
-const MAX_FRAGMENTS: usize = 65_536;
-const MAX_TOOL_CALLS: usize = 1024;
-const MAX_CONTENT_BYTES: usize = 8 * 1024 * 1024;
-const MAX_SNAPSHOT_WORK: usize = 64 * 1024 * 1024;
-const TOOL_ARGUMENT_BATCH_BYTES: usize = 256;
 const DECODE_BATCH_BYTES: usize = 4096;
 
 #[derive(Debug, Error)]
@@ -129,15 +120,10 @@ impl Provider for OpenAiProvider {
             let mut body = response.bytes_stream();
             let mut decoder = SseDecoder::new();
             let mut failure = None;
-            let mut received = 0usize;
-            let mut frames = 0usize;
             'body: loop {
                 let next = tokio::select! {
                     biased;
-                    _ = cancel.cancelled() => {
-                        failure = Some("Request cancelled".to_owned());
-                        break;
-                    }
+                    _ = cancel.cancelled() => { failure = Some("Request cancelled".to_owned()); break; }
                     next = body.next() => next,
                 };
                 match next {
@@ -153,14 +139,7 @@ impl Provider for OpenAiProvider {
                             // Count only bytes consumed before [DONE]. Never
                             // inspect a later frame just because it shares the
                             // same network chunk with the terminal frame.
-                            let allowance = MAX_RESPONSE_BYTES.saturating_sub(received);
-                            if allowance == 0 {
-                                if failure.is_none() {
-                                    failure = Some("Provider response exceeds the 64 MiB limit".into());
-                                }
-                                break 'body;
-                            }
-                            let end = bytes.len().min(offset + DECODE_BATCH_BYTES.min(allowance));
+                            let end = bytes.len().min(offset + DECODE_BATCH_BYTES);
                             let (used, frame) = match decoder.push_frame(&bytes[offset..end], &cancel).await {
                                 Ok(decoded) => decoded,
                                 Err(error) => {
@@ -171,15 +150,7 @@ impl Provider for OpenAiProvider {
                                 }
                             };
                             offset += used;
-                            received += used;
                             if let Some(frame) = frame {
-                                frames += 1;
-                                if frames > MAX_RESPONSE_FRAMES {
-                                    if failure.is_none() {
-                                        failure = Some("Provider response exceeds the frame limit".into());
-                                    }
-                                    break 'body;
-                                }
                                 if let Err(error) = checkpoint(&cancel).await {
                                     if failure.is_none() {
                                         failure = Some(error.to_string());
@@ -236,13 +207,6 @@ impl Provider for OpenAiProvider {
                             }
                         };
                         if let Some(frame) = frame {
-                            frames += 1;
-                            if frames > MAX_RESPONSE_FRAMES {
-                                if failure.is_none() {
-                                    failure = Some("Provider response exceeds the frame limit".into());
-                                }
-                                break;
-                            }
                             if let Err(error) = checkpoint(&cancel).await {
                                 if failure.is_none() {
                                     failure = Some(error.to_string());
@@ -526,12 +490,9 @@ struct ResponseState {
     calls: BTreeMap<u64, PendingCall>,
     deferred_calls: BTreeMap<u64, Vec<DeferredCall>>,
     deferred_bytes: usize,
-    fragments: usize,
-    content_bytes: usize,
     message_content_bytes: usize,
     retained_weight: usize,
     arguments_weight: usize,
-    snapshot_work: usize,
     prompt_tokens: Option<u64>,
     completion_tokens: Option<u64>,
     total_tokens: Option<u64>,
@@ -549,14 +510,11 @@ impl ResponseState {
             calls: BTreeMap::new(),
             deferred_calls: BTreeMap::new(),
             deferred_bytes: 0,
-            fragments: 0,
-            content_bytes: 0,
             message_content_bytes: 0,
             retained_weight: std::mem::size_of::<AssistantMessage>()
                 .saturating_add(request.model.provider.len())
                 .saturating_add(request.model.id.len()),
             arguments_weight: 0,
-            snapshot_work: 0,
             prompt_tokens: None,
             completion_tokens: None,
             total_tokens: None,
@@ -583,9 +541,6 @@ impl ResponseState {
             } else {
                 0
             };
-            if self.retained_weight.saturating_add(weight) > MAX_RESPONSE_BYTES {
-                return Err("Provider response exceeds the byte limit".into());
-            }
             self.retained_weight += weight;
             stable_identity(&mut self.message.response_id, id, "id")?;
         }
@@ -595,17 +550,11 @@ impl ResponseState {
             } else {
                 0
             };
-            if self.retained_weight.saturating_add(weight) > MAX_RESPONSE_BYTES {
-                return Err("Provider response exceeds the byte limit".into());
-            }
             self.retained_weight += weight;
             stable_identity(&mut self.message.response_model, model, "model")?;
         }
         if let Some(usage) = object.get("usage").filter(|value| !value.is_null()) {
             let weight = value_weight(usage, cancel).await?;
-            if self.retained_weight.saturating_add(weight) > MAX_RESPONSE_BYTES {
-                return Err("Provider response exceeds the byte limit".into());
-            }
             self.retained_weight += weight;
             self.usage(usage)?;
             Ok(true)
@@ -645,8 +594,7 @@ impl ResponseState {
                 let chunk = parse_response(data, cancel).await?;
                 let object = chunk.as_object().ok_or("Stream JSON must be an object")?;
                 if self.accept_header(object, cancel).await? {
-                    let partial = self.snapshot(0, cancel).await?;
-                    yield AssistantEvent::UsageUpdate { partial };
+                    yield AssistantEvent::usage_update(&self.message);
                 }
                 let choices = object.get("choices").and_then(Value::as_array)
                     .ok_or("Stream chunk is missing choices array")?;
@@ -673,8 +621,7 @@ impl ResponseState {
                     if optional_string(delta, "role")?.is_some_and(|role| role != "assistant") {
                         Err("Stream role must be assistant")?;
                     }
-                    // Reject oversized frames before creating content, deferred
-                    // copies, or any batch of full-message snapshots.
+                    // Validate wire fields before mutating retained content.
                     self.preflight(delta, cancel).await?;
                     if let Some(text) = optional_string(delta, "content")?.filter(|text| !text.is_empty()) {
                         let mut updates = self.text(text, false, cancel);
@@ -731,74 +678,36 @@ impl ResponseState {
         delta: &Map<String, Value>,
         cancel: &CancellationToken,
     ) -> Result<(), String> {
-        let mut fragments = self.fragments;
-        let mut bytes = self.content_bytes;
         for key in [
             "content",
             "reasoning_content",
             "reasoning",
             "reasoning_text",
         ] {
-            if let Some(text) = optional_string(delta, key)? {
-                fragments = fragments.saturating_add(1);
-                bytes = bytes.saturating_add(text.len());
-            }
+            optional_string(delta, key)?;
         }
-        let mut indices = self
-            .calls
-            .keys()
-            .chain(self.deferred_calls.keys())
-            .copied()
-            .collect::<BTreeSet<_>>();
         if let Some(calls) = delta.get("tool_calls").filter(|value| !value.is_null()) {
-            let calls = calls
+            for call in calls
                 .as_array()
-                .ok_or("tool_calls delta must be an array")?;
-            fragments = fragments.saturating_add(calls.len());
-            if fragments > MAX_FRAGMENTS {
-                return Err("Provider response exceeds the content fragment limit".into());
-            }
-            for (step, call) in calls.iter().enumerate() {
-                if step.is_multiple_of(64) {
-                    checkpoint(cancel).await?;
-                }
+                .ok_or("tool_calls delta must be an array")?
+            {
+                checkpoint(cancel).await?;
                 let call = call
                     .as_object()
                     .ok_or("Tool call delta must be an object")?;
-                let index = call
-                    .get("index")
+                call.get("index")
                     .and_then(Value::as_u64)
                     .ok_or("Tool call delta needs an index")?;
-                if index >= MAX_TOOL_CALLS as u64 {
-                    return Err("Provider response exceeds the tool call limit".into());
-                }
-                indices.insert(index);
-                if indices.len() > MAX_TOOL_CALLS {
-                    return Err("Provider response exceeds the tool call limit".into());
-                }
-                if let Some(id) = optional_string(call, "id")? {
-                    bytes = bytes.saturating_add(id.len());
-                }
+                optional_string(call, "id")?;
                 if let Some(function) = call.get("function").filter(|value| !value.is_null()) {
                     let function = function
                         .as_object()
                         .ok_or("Tool call function must be an object")?;
-                    for key in ["name", "arguments"] {
-                        if let Some(value) = optional_string(function, key)? {
-                            bytes = bytes.saturating_add(value.len());
-                        }
-                    }
+                    optional_string(function, "name")?;
+                    optional_string(function, "arguments")?;
                 }
             }
         }
-        if fragments > MAX_FRAGMENTS {
-            return Err("Provider response exceeds the content fragment limit".into());
-        }
-        if bytes > MAX_CONTENT_BYTES {
-            return Err("Provider content exceeds the 8 MiB limit".into());
-        }
-        self.fragments = fragments;
-        self.content_bytes = bytes;
         Ok(())
     }
 
@@ -808,15 +717,7 @@ impl ResponseState {
         cancel: &CancellationToken,
     ) -> Result<AssistantMessage, String> {
         checkpoint(cancel).await?;
-        let weight = self
-            .retained_weight
-            .saturating_add(self.message_content_bytes)
-            .saturating_add(self.arguments_weight)
-            .saturating_add(extra_bytes);
-        if weight > MAX_SNAPSHOT_WORK.saturating_sub(self.snapshot_work) {
-            return Err("Provider response exceeds the snapshot work limit".into());
-        }
-        self.snapshot_work += weight;
+        let _ = extra_bytes;
         Ok(self.message.clone())
     }
 
@@ -851,10 +752,8 @@ impl ResponseState {
                 _ => unreachable!(),
             }
             self.message_content_bytes = self.message_content_bytes.saturating_add(delta.len());
-            let partial = self.snapshot(delta.len(), cancel).await?;
-            yield if thinking {
-                AssistantEvent::ThinkingDelta { index, delta: delta.to_owned(), partial }
-            } else { AssistantEvent::TextDelta { index, delta: delta.to_owned(), partial } };
+            yield if thinking { AssistantEvent::ThinkingDelta { index, delta: delta.to_owned() } }
+                else { AssistantEvent::TextDelta { index, delta: delta.to_owned() } };
         }
         .boxed()
     }
@@ -869,9 +768,6 @@ impl ResponseState {
             let index = value.get("index").and_then(Value::as_u64).ok_or("Tool call delta needs an index")?;
             if index > self.calls.len() as u64 {
                 let weight = value_weight(value, cancel).await?;
-                if weight > MAX_CONTENT_BYTES.saturating_sub(self.deferred_bytes) {
-                    Err("Deferred tool deltas exceed 8 MiB limit")?;
-                }
                 self.deferred_bytes += weight;
                 self.deferred_calls.entry(index).or_default().push(DeferredCall { value: value.clone(), weight });
             } else {
@@ -936,9 +832,7 @@ impl ResponseState {
                 checkpoint(cancel).await?;
                 let pending = self.calls.get_mut(&source_index).expect("call exists");
                 pending.arguments.push_str(arguments);
-                if pending.arguments.len().saturating_sub(pending.emitted_bytes) >= TOOL_ARGUMENT_BATCH_BYTES {
-                    yield self.argument_delta(source_index, cancel).await?;
-                }
+                yield self.argument_delta(source_index, cancel).await?;
             }
         }.boxed()
     }
@@ -948,22 +842,14 @@ impl ResponseState {
         source_index: u64,
         cancel: &CancellationToken,
     ) -> Result<AssistantEvent, String> {
-        self.replace_arguments(source_index, false, cancel).await?;
-        let pending = self.calls.get(&source_index).expect("call exists");
-        let index = pending.content_index;
-        let emitted_bytes = pending.arguments.len();
-        let delta_len = emitted_bytes - pending.emitted_bytes;
-        // Pending wire arguments are not part of AssistantMessage. Batch small
-        // fragments so a retained thinking block is not cloned for each byte.
-        let partial = self.snapshot(delta_len, cancel).await?;
+        checkpoint(cancel).await?;
         let pending = self.calls.get_mut(&source_index).expect("call exists");
+        let index = pending.content_index;
         let delta = pending.arguments[pending.emitted_bytes..].to_owned();
-        pending.emitted_bytes = emitted_bytes;
-        Ok(AssistantEvent::ToolCallDelta {
-            index,
-            delta,
-            partial,
-        })
+        pending.emitted_bytes = pending.arguments.len();
+        let event = AssistantEvent::ToolCallDelta { index, delta };
+        event.apply_to(&mut self.message)?;
+        Ok(event)
     }
 
     async fn replace_arguments(
@@ -991,7 +877,7 @@ impl ResponseState {
         crate::json::check_cancel(cancel)?;
         let (arguments, error) = match parsed {
             Ok(arguments) => (arguments, None),
-            Err(error) => (json!({}), Some(error)),
+            Err(error) => (Value::String(pending.arguments.clone()), Some(error)),
         };
         let weight = value_weight(&arguments, cancel).await?;
         let pending = self.calls.get_mut(&source_index).expect("call exists");
@@ -1018,7 +904,7 @@ impl ResponseState {
         async_stream::try_stream! {
             if !self.deferred_calls.is_empty() { Err("Tool call indices are missing preceding calls")?; }
             let mut ids = BTreeSet::new();
-            // At most 1,024 scalar indices; no message or JSON tree snapshots.
+            // Scalar indices only; no message or JSON tree snapshots.
             let indices = self.calls.keys().copied().collect::<Vec<_>>();
             for source_index in indices {
                 checkpoint(cancel).await?;

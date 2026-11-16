@@ -114,9 +114,8 @@ async fn gemini_large_frames_keep_bounded_memory_and_cancel_before_remaining_par
                 loop {
                     let event = stream.next().await.expect("missing first text delta");
                     match event {
-                        AssistantEvent::TextDelta { delta, partial, .. } => {
+                        AssistantEvent::TextDelta { delta, .. } => {
                             assert_eq!(delta, "x".repeat(32));
-                            assert_eq!(partial.content, vec![Content::text("x".repeat(32))]);
                             return;
                         }
                         event => assert!(!event.is_terminal(), "{event:?}"),
@@ -139,9 +138,12 @@ async fn gemini_large_frames_keep_bounded_memory_and_cancel_before_remaining_par
                 .unwrap()
                 .unwrap();
             assert!(matches!(terminal, AssistantEvent::Error { .. }));
-            assert_eq!(terminal.message().stop_reason, StopReason::Aborted);
             assert_eq!(
-                terminal.message().content,
+                terminal.snapshot().expect("snapshot boundary").stop_reason,
+                StopReason::Aborted
+            );
+            assert_eq!(
+                terminal.snapshot().expect("snapshot boundary").content,
                 vec![Content::text("x".repeat(32))]
             );
             assert!(stream.next().await.is_none());
@@ -233,8 +235,17 @@ async fn gemini_large_frames_keep_bounded_memory_and_cancel_before_remaining_par
             checkpoints, 80,
             "decoder did not yield during frame parsing"
         );
-        assert_eq!(terminal.message().stop_reason, StopReason::Aborted);
-        assert!(terminal.message().content.is_empty());
+        assert_eq!(
+            terminal.snapshot().expect("snapshot boundary").stop_reason,
+            StopReason::Aborted
+        );
+        assert!(
+            terminal
+                .snapshot()
+                .expect("snapshot boundary")
+                .content
+                .is_empty()
+        );
         drop(next);
         assert!(stream.next().await.is_none());
         eprintln!(

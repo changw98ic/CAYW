@@ -9,13 +9,7 @@ use cayw_agent::AgentControl;
 use cayw_ai::{CancellationToken, Message};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use std::{
-    collections::BTreeMap,
-    sync::{
-        Arc, Mutex,
-        atomic::{AtomicUsize, Ordering},
-    },
-};
+use std::{collections::BTreeMap, sync::Mutex};
 
 /// How `agent.run` binds the child to the parent capability call.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -47,6 +41,7 @@ impl AgentRunMode {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum FleetMemberState {
+    Queued,
     Running,
     Completed,
     Failed,
@@ -57,6 +52,7 @@ pub enum FleetMemberState {
 impl FleetMemberState {
     pub(crate) fn from_task(state: TaskState) -> Self {
         match state {
+            TaskState::Queued => Self::Queued,
             TaskState::Completed => Self::Completed,
             TaskState::Failed => Self::Failed,
             TaskState::Cancelled => Self::Cancelled,
@@ -102,9 +98,6 @@ pub(crate) struct FleetEntry {
     pub cancel: CancellationToken,
     pub state: FleetMemberState,
     pub error: Option<String>,
-    /// Live-slot release target shared with the root RunScope tree.
-    pub live: Arc<AtomicUsize>,
-    pub slot_held: bool,
     pub control: Mutex<Option<AgentControl>>,
 }
 
@@ -115,6 +108,22 @@ pub(crate) struct FleetRegistry {
 }
 
 impl FleetRegistry {
+    /// Foreground ancestors wait on this task; a detached edge ends that chain.
+    /// The boolean marks children, which also consume the tree execution quota.
+    pub(crate) fn foreground_chain(&self, task: &str) -> Vec<(String, bool)> {
+        let members = lock(&self.members);
+        let mut chain = Vec::new();
+        let mut current = task;
+        loop {
+            let member = members.get(current);
+            chain.push((current.to_owned(), member.is_some()));
+            match member {
+                Some(member) if !member.detached => current = &member.parent_task_id,
+                _ => break,
+            }
+        }
+        chain
+    }
     pub(crate) fn register(
         &self,
         child_task_id: String,
@@ -156,12 +165,16 @@ impl FleetRegistry {
             .map(|entry| entry.cancel.clone())
     }
 
+    pub(crate) fn mark_running(&self, task: &str) {
+        if let Some(entry) = lock(&self.members).get_mut(task) {
+            entry.state = FleetMemberState::Running;
+        }
+    }
     pub(crate) fn mark_terminal(
         &self,
         child_task_id: &str,
         state: FleetMemberState,
         error: Option<String>,
-        release_slot: bool,
     ) {
         let mut members = lock(&self.members);
         let Some(entry) = members.get_mut(child_task_id) else {
@@ -170,10 +183,6 @@ impl FleetRegistry {
         entry.state = state;
         entry.error = error;
         *lock(&entry.control) = None;
-        if release_slot && entry.slot_held {
-            entry.live.fetch_sub(1, Ordering::AcqRel);
-            entry.slot_held = false;
-        }
     }
 
     pub(crate) fn snapshot(
@@ -238,7 +247,10 @@ impl FleetRegistry {
                 "caller session {caller} is not authorized to control child task {child_task_id}"
             )));
         }
-        if !matches!(entry.state, FleetMemberState::Running) {
+        if !matches!(
+            entry.state,
+            FleetMemberState::Running | FleetMemberState::Queued
+        ) {
             return Ok(json!({
                 "child_task_id": child_task_id,
                 "state": entry.state,
@@ -252,7 +264,7 @@ impl FleetRegistry {
         }
         Ok(json!({
             "child_task_id": child_task_id,
-            "state": FleetMemberState::Running,
+            "state": entry.state,
             "stopped": true,
         }))
     }
@@ -279,7 +291,10 @@ impl FleetRegistry {
                 "caller session {caller} is not authorized to control child task {child_task_id}"
             )));
         }
-        if !matches!(entry.state, FleetMemberState::Running) {
+        if !matches!(
+            entry.state,
+            FleetMemberState::Running | FleetMemberState::Queued
+        ) {
             return Err(RuntimeError::InvalidInput(
                 "fleet steer requires a running child".into(),
             ));

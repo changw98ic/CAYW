@@ -235,6 +235,16 @@ impl CellBackend for AuthorizedCellBackend {
         self.inner.created(execution)
     }
 
+    fn queued(&self, execution: &CellExecution) -> Result<(), CellError> {
+        self.inner.queued(execution)
+    }
+    async fn dispatched(
+        &self,
+        execution: &CellExecution,
+        cancel: CancellationToken,
+    ) -> Result<(), CellError> {
+        self.inner.dispatched(execution, cancel).await
+    }
     async fn call(
         &self,
         execution: &CellExecution,

@@ -20,6 +20,7 @@ impl Provider for FragmentedProvider {
         Box::pin(async_stream::stream! {
             let mut message = AssistantMessage::new(&request.model);
             message.content.push(Content::text(""));
+            yield AssistantEvent::TextStart { index: 0, partial: message.clone() };
             for _ in 0..512 {
                 if cancel.is_cancelled() {
                     return;
@@ -31,7 +32,6 @@ impl Provider for FragmentedProvider {
                 yield AssistantEvent::TextDelta {
                     index: 0,
                     delta: "0123456789abcdef".into(),
-                    partial: message.clone(),
                 };
             }
             message.stop_reason = StopReason::Stop;
@@ -74,6 +74,7 @@ async fn coalesced_usage_retains_all_original_text_events_and_reopened_history()
     let mut observed = 0;
     let mut lifecycle = Vec::new();
     let mut lease = None;
+    let mut current_message = None;
     loop {
         let page = runtime.events(&id, after, 100).unwrap();
         if page.is_empty() {
@@ -84,25 +85,26 @@ async fn coalesced_usage_retains_all_original_text_events_and_reopened_history()
             after = record.cursor;
             match record.event {
                 CoreEvent::AttemptStarted { lease: original } => lease = Some(original),
-                CoreEvent::Agent { event } => {
-                    if let AgentEvent::MessageUpdate { message, event } = *event
-                        && let AssistantEvent::TextDelta {
-                            index,
-                            delta,
-                            partial,
-                        } = *event
-                    {
-                        deltas += 1;
-                        assert_eq!(index, 0);
-                        assert_eq!(delta, "0123456789abcdef");
-                        assert_eq!(partial, message);
-                        assert_eq!(
-                            message.content,
-                            vec![Content::text("0123456789abcdef".repeat(deltas))]
-                        );
-                        assert_eq!(message.usage_status, UsageStatus::Unknown);
+                CoreEvent::Agent { event } => match *event {
+                    AgentEvent::MessageStart {
+                        message: Message::Assistant(message),
+                    } => current_message = Some(message),
+                    AgentEvent::MessageUpdate { event } => {
+                        let message = current_message.as_mut().expect("started message");
+                        event.apply_to(message).expect("valid incremental event");
+                        if let AssistantEvent::TextDelta { index, delta } = *event {
+                            deltas += 1;
+                            assert_eq!(index, 0);
+                            assert_eq!(delta, "0123456789abcdef");
+                            assert_eq!(
+                                message.content,
+                                vec![Content::text("0123456789abcdef".repeat(deltas))]
+                            );
+                            assert_eq!(message.usage_status, UsageStatus::Unknown);
+                        }
                     }
-                }
+                    _ => {}
+                },
                 CoreEvent::Host { kind, data } if kind == "model_request" => {
                     let kind = data["record"].as_str().unwrap();
                     lifecycle.push(kind.to_string());
@@ -134,7 +136,7 @@ async fn coalesced_usage_retains_all_original_text_events_and_reopened_history()
     assert_eq!(Some(request.identity.lease.clone()), lease);
     assert_eq!(request.terminal, Some(ModelRequestTerminal::Completed));
     assert_eq!(request.observations.len(), 2);
-    assert_eq!(request.observations[0].observation.event, "text_delta");
+    assert_eq!(request.observations[0].observation.event, "text_start");
     assert_eq!(request.observations[1].observation.event, "done");
     assert_eq!(
         request.observations[1].observation.stop_reason,

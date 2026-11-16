@@ -9,8 +9,6 @@ use std::{
     path::{Component, Path, PathBuf},
 };
 
-const STATE_LIMIT: u64 = 32 * 1024 * 1024;
-
 #[cfg(feature = "fault-injection")]
 thread_local! {
     static STATE_SYNC_FAILURE: std::cell::Cell<Option<bool>> = const { std::cell::Cell::new(None) };
@@ -211,7 +209,7 @@ impl ContentStore {
         if !initialized.is_empty() && initialized != b"cayw-content-initialized-v1\n" {
             return Err(Error::Integrity);
         }
-        match read_file(&store.root, "state.json", STATE_LIMIT) {
+        match read_file(&store.root, "state.json", u64::MAX) {
             Ok(bytes) => {
                 let mut state = store.parse_state_with(&bytes, amend_limits)?;
                 if amend_limits && state.limits != limits {
@@ -368,7 +366,7 @@ impl ContentStore {
             objects,
             _lock: lock,
         };
-        let mut state = self.parse_state(&read_file(&self.root, "state.json", STATE_LIMIT)?)?;
+        let mut state = self.parse_state(&read_file(&self.root, "state.json", u64::MAX)?)?;
         f(&mut state, &dirs)
     }
     fn lock(&self) -> Result<TransactionLock> {
@@ -491,9 +489,6 @@ impl ContentStore {
     }
     fn save_state_inner(&self, state: &State, changed: Option<&Record>) -> Result<()> {
         let bytes = serde_json::to_vec(state)?;
-        if bytes.len() as u64 > STATE_LIMIT {
-            return Err(Error::QuotaExceeded);
-        }
         write_stage(&self.root, ".state-stage", &bytes)?;
         content_checkpoint("content_state_staged", changed);
         self.root.rename(".state-stage", &self.root, "state.json")?;
@@ -637,7 +632,7 @@ fn read_open_file(file: &mut File, limit: u64) -> Result<Vec<u8>> {
         return Err(Error::ContentTooLarge);
     }
     let mut bytes = Vec::new();
-    file.take(limit + 1).read_to_end(&mut bytes)?;
+    file.take(limit.saturating_add(1)).read_to_end(&mut bytes)?;
     if bytes.len() as u64 > limit {
         return Err(Error::ContentTooLarge);
     }

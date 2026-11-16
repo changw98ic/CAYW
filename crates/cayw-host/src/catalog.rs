@@ -24,17 +24,16 @@ fn path() -> Value {
     string(4096)
 }
 fn codeintel_path() -> Value {
-    // Length is UTF-8 bytes, which JSON Schema maxLength cannot express.
-    // The bridge is the only length check.
+    // The bridge validates workspace-relative paths and protected segments.
     json!({"type":"string","minLength":1})
 }
 fn codeintel_description(summary: &str) -> String {
     format!(
-        "{summary} The path is workspace-relative, at most 512 UTF-8 bytes after trim, with no NUL and no parent segment. The bridge checks that once."
+        "{summary} The path is workspace-relative, with no NUL and no parent segment. The bridge checks that once."
     )
 }
 fn codeintel_name() -> Value {
-    json!({"type":"string","minLength":1,"maxLength":64,"pattern":"^[A-Za-z0-9_-]+$"})
+    json!({"type":"string","minLength":1,"pattern":"^[A-Za-z0-9_-]+$"})
 }
 fn hash() -> Value {
     json!({"type":"string", "pattern":"^[0-9a-fA-F]{64}$"})

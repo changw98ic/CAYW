@@ -358,6 +358,7 @@ pub struct Limits {
     pub max_source_operations: Option<usize>,
     /// Arguments and replies over all generations of one source.
     pub max_source_bytes: Option<usize>,
+    /// Per-source execution capacity. Further operations wait cancellably.
     pub max_in_flight: usize,
     /// Validation, policy callbacks, journal waits and handle execution share one
     /// absolute deadline, starting when the scoped ExternalHost::call is created.

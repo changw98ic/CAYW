@@ -30,9 +30,6 @@ use std::{
 
 const KIND: &str = "model_request";
 const RECONCILIATION_KIND: &str = "model_request_reconciliation";
-const MAX_REQUESTS: usize = 4096;
-const MAX_OBSERVATIONS: usize = 65_536;
-const MAX_LEDGER_EVENTS: usize = 262_144;
 const MAX_LABEL_BYTES: usize = 256;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -260,7 +257,7 @@ fn lineage(id: &str, links: &BTreeMap<String, String>) -> Result<String, Runtime
     let mut seen = BTreeSet::new();
     let mut current = id;
     while let Some(parent) = links.get(current) {
-        if !seen.insert(current) || seen.len() > MAX_REQUESTS {
+        if !seen.insert(current) {
             return Err(corrupt());
         }
         current = parent;
@@ -376,9 +373,7 @@ fn apply(
                     }
                 }
                 Entry::Observed { observation, .. } => {
-                    if record.started_cursor.is_none()
-                        || record.observations.len() >= MAX_OBSERVATIONS
-                    {
+                    if record.started_cursor.is_none() {
                         return Err(corrupt());
                     }
                     record.observations.push(ModelRequestObservation {
@@ -417,9 +412,6 @@ fn apply(
                                 .last()
                                 .is_none_or(|last| last.observation != observation)
                         {
-                            if record.observations.len() >= MAX_OBSERVATIONS {
-                                return Err(corrupt());
-                            }
                             record.observations.push(ModelRequestObservation {
                                 cursor: event.cursor,
                                 sequence: record.observations.len() as u64 + 1,
@@ -468,9 +460,6 @@ fn apply(
             record.last_cursor = event.cursor;
         }
     }
-    if records.len() > MAX_REQUESTS {
-        return Err(corrupt());
-    }
     Ok(())
 }
 
@@ -492,18 +481,6 @@ fn validate_identity(
 
 struct Projection {
     ledger: ModelRequestLedger,
-    events: usize,
-    /// Unfinished reservations own a terminal slot even while another branch is
-    /// refused. This slot cannot be consumed by observations or Rejected rows.
-    pending_terminals: usize,
-}
-impl Projection {
-    fn room_with_limit(&self, additional: usize, event_limit: usize) -> bool {
-        self.events
-            .checked_add(self.pending_terminals)
-            .and_then(|used| used.checked_add(additional))
-            .is_some_and(|used| used <= event_limit)
-    }
 }
 
 fn lineage_links(store: &SessionStore) -> Result<BTreeMap<String, String>, RuntimeError> {
@@ -560,7 +537,6 @@ fn project(
     let links = lineage_links(store)?;
     let root = lineage(session, &links)?;
     let mut records = BTreeMap::new();
-    let mut ledger_events = 0;
     for snapshot in &sessions {
         if lineage(&snapshot.id, &links)? != root {
             continue;
@@ -569,10 +545,6 @@ fn project(
             if let CoreEvent::Host { kind, data } = &event.event
                 && kind == KIND
             {
-                ledger_events += 1;
-                if ledger_events > MAX_LEDGER_EVENTS {
-                    return Err(corrupt());
-                }
                 apply(
                     &mut records,
                     event,
@@ -594,23 +566,9 @@ fn project(
             snapshot,
             "host",
             Some(RECONCILIATION_KIND),
-            |event| {
-                ledger_events += 1;
-                if ledger_events > MAX_LEDGER_EVENTS {
-                    return Err(corrupt());
-                }
-                apply_reconciliation(store, &mut records, event)
-            },
+            |event| apply_reconciliation(store, &mut records, event),
         )?;
     }
-    let pending_terminals = records
-        .values()
-        .filter(|record| {
-            record.reservation_cursor.is_some()
-                && record.terminal.is_none()
-                && record.reconciliation.is_none()
-        })
-        .count();
     let mut requests = Vec::new();
     // The effective cap is the current trusted host configuration for this
     // session tree. Historical records keep their own `token_limit` as audit
@@ -687,8 +645,6 @@ fn project(
             cost_amount: None,
             cost_currency: None,
         },
-        events: ledger_events,
-        pending_terminals,
     })
 }
 
@@ -1034,8 +990,8 @@ fn verify_no_response(
                 next_request = true;
                 None
             }
-            AgentEvent::MessageUpdate { message, .. }
-            | AgentEvent::TurnEnd { message, .. }
+            AgentEvent::MessageUpdate { event } => event.snapshot(),
+            AgentEvent::TurnEnd { message, .. }
             | AgentEvent::MessageEnd {
                 message: cayw_ai::Message::Assistant(message),
             } => Some(message),
@@ -1139,11 +1095,15 @@ fn verify_reported_response(
                 next_request = true;
                 return Ok(());
             }
-            AgentEvent::MessageUpdate { message, event } => {
-                if message != event.message() {
-                    return Err(invalid_report());
+            AgentEvent::MessageUpdate { event } => {
+                if let Some(message) = event.snapshot() {
+                    message
+                } else {
+                    if let Some(observed) = observation(event) {
+                        verify_reported_observation(&observed, report)?;
+                    }
+                    return Ok(());
                 }
-                message
             }
             AgentEvent::TurnEnd { message, .. }
             | AgentEvent::MessageEnd {
@@ -1296,9 +1256,6 @@ impl Runtime {
             ));
         }
         reconciliation_tokens(&self.inner.store, record, &input.outcome)?;
-        if !projection.room_with_limit(1, MAX_LEDGER_EVENTS) {
-            return Err(RuntimeError::Budget("model accounting event capacity"));
-        }
         let verifier = self
             .inner
             .config
@@ -1504,8 +1461,9 @@ fn counter_value(value: &Value, depth: usize, redacted: &mut bool) -> Value {
     }
 }
 
-fn observation(event: &AssistantEvent) -> ModelUsageObservation {
+fn observation(event: &AssistantEvent) -> Option<ModelUsageObservation> {
     let name = match event {
+        AssistantEvent::Snapshot { .. } => "snapshot",
         AssistantEvent::Start { .. } => "start",
         AssistantEvent::TextStart { .. } => "text_start",
         AssistantEvent::TextDelta { .. } => "text_delta",
@@ -1520,7 +1478,35 @@ fn observation(event: &AssistantEvent) -> ModelUsageObservation {
         AssistantEvent::Done { .. } => "done",
         AssistantEvent::Error { .. } => "error",
     };
-    message_observation(name, event.message())
+    if let Some(message) = event.snapshot() {
+        return Some(message_observation(name, message));
+    }
+    if let AssistantEvent::UsageUpdate {
+        usage,
+        usage_status,
+        usage_fields,
+        response_id,
+        response_model,
+    } = event
+    {
+        let message = AssistantMessage {
+            usage: usage.clone(),
+            usage_status: *usage_status,
+            usage_fields: usage_fields.clone(),
+            response_id: response_id.clone(),
+            response_model: response_model.clone(),
+            content: vec![],
+            provider: String::new(),
+            model: String::new(),
+            provider_metadata: BTreeMap::new(),
+            stop_reason: StopReason::Pending,
+            error_message: None,
+            timestamp: 0,
+            duration_ms: None,
+        };
+        return Some(message_observation(name, &message));
+    }
+    None
 }
 
 fn message_observation(event: &str, message: &AssistantMessage) -> ModelUsageObservation {
@@ -1573,7 +1559,6 @@ struct RequestGuard {
     reservation: u64,
     cursor: u64,
     tokens: u64,
-    event_limit: usize,
     observations: usize,
     started: bool,
     finished: bool,
@@ -1621,23 +1606,7 @@ impl RequestGuard {
         {
             return Err(RuntimeError::Cancelled);
         }
-        Self::reserve_with_permit(context, request, id, turn, MAX_LEDGER_EVENTS, permit)
-    }
-
-    #[cfg(test)]
-    fn reserve_with_limit(
-        context: Arc<RunContext>,
-        request: &mut ModelRequest,
-        id: String,
-        turn: u64,
-        event_limit: usize,
-    ) -> Result<Self, RuntimeError> {
-        let budget_session_id = lineage_root(&context.inner.store, &context.lease.session_id)?;
-        let budget_lock = context.inner.budget_lock(&budget_session_id);
-        let permit = budget_lock
-            .try_lock_owned()
-            .map_err(|_| RuntimeError::Busy)?;
-        Self::reserve_with_permit(context, request, id, turn, event_limit, permit)
+        Self::reserve_with_permit(context, request, id, turn, permit)
     }
 
     #[cfg(test)]
@@ -1647,7 +1616,12 @@ impl RequestGuard {
         id: String,
         turn: u64,
     ) -> Result<Self, RuntimeError> {
-        Self::reserve_with_limit(context, request, id, turn, MAX_LEDGER_EVENTS)
+        let budget_session_id = lineage_root(&context.inner.store, &context.lease.session_id)?;
+        let budget_lock = context.inner.budget_lock(&budget_session_id);
+        let permit = budget_lock
+            .try_lock_owned()
+            .map_err(|_| RuntimeError::Busy)?;
+        Self::reserve_with_permit(context, request, id, turn, permit)
     }
 
     fn reserve_with_permit(
@@ -1655,7 +1629,6 @@ impl RequestGuard {
         request: &mut ModelRequest,
         id: String,
         turn: u64,
-        event_limit: usize,
         permit: tokio::sync::OwnedMutexGuard<()>,
     ) -> Result<Self, RuntimeError> {
         context.check(&context.cancel)?;
@@ -1681,12 +1654,6 @@ impl RequestGuard {
             context.scope.token_limit(),
             &live,
         )?;
-        if projection.ledger.requests.len() >= MAX_REQUESTS {
-            return Err(RuntimeError::Budget("model request history capacity"));
-        }
-        let has_rejection_room = projection.room_with_limit(1, event_limit);
-        // Reserved + Started + at least one observation + a protected Finished.
-        let has_request_room = projection.room_with_limit(4, event_limit);
         let ledger = projection.ledger;
         let limit = context.scope.token_limit();
         let used = ledger
@@ -1706,22 +1673,15 @@ impl RequestGuard {
         };
         let invalid_identity = [&identity.provider, &identity.model]
             .into_iter()
-            .any(|text| {
-                text.is_empty()
-                    || text.len() > MAX_LABEL_BYTES
-                    || text.chars().any(|c| c.is_control())
-            });
+            .any(|text| text.is_empty() || text.chars().any(|c| c.is_control()));
         if invalid_identity {
             return Err(RuntimeError::InvalidInput(
-                "model identity exceeds accounting bounds".into(),
+                "model identity must be nonempty and contain no control characters".into(),
             ));
         }
         if let Some(limit) = limit
             && (ledger.overflowed || used >= limit)
         {
-            if !has_rejection_room {
-                return Err(RuntimeError::Budget("model accounting event capacity"));
-            }
             append(
                 &context.inner,
                 &context.lease,
@@ -1732,9 +1692,6 @@ impl RequestGuard {
                 },
             )?;
             return Err(RuntimeError::Budget("model token reservation"));
-        }
-        if !has_request_room {
-            return Err(RuntimeError::Budget("model accounting event capacity"));
         }
         let runtime = Runtime {
             inner: context.inner.clone(),
@@ -1786,7 +1743,6 @@ impl RequestGuard {
             reservation: cursor,
             cursor,
             tokens: reservation_tokens,
-            event_limit,
             observations: 0,
             started: false,
             finished: false,
@@ -1862,21 +1818,8 @@ impl RequestGuard {
                 }
                 _ => None,
             };
-            let live = self.context.inner.in_flight_requests();
-            let projection = project(
-                &self.context.inner.store,
-                &self.context.lease.session_id,
-                self.context.scope.token_limit(),
-                &live,
-            )?;
-            // Finished consumes its already-protected slot. Every other event
-            // must leave all outstanding terminal slots available.
-            if !projection.room_with_limit(
-                usize::from(!matches!(entry, Entry::Finished { .. })),
-                self.event_limit,
-            ) {
-                return Err(RuntimeError::Budget("model accounting event capacity"));
-            }
+            // This request owns its cursor chain. Append only the new fact;
+            // projecting all earlier usage on each delta makes long streams quadratic.
             let cursor = append(&self.context.inner, &self.context.lease, &entry)?;
             self.cursor = cursor;
             if let Entry::Observed { observation, .. } = entry {
@@ -1916,7 +1859,24 @@ impl RequestGuard {
     /// Record one accounting observation. Invalid usage stays visible as
     /// invalid metadata; it never aborts the response or claims a terminal.
     fn observe(&mut self, event: &AssistantEvent) -> Result<(), RuntimeError> {
-        let mut value = observation(event);
+        let Some(mut value) = observation(event) else {
+            // Content-only deltas need no usage row, but keep the same durable
+            // cancellation and ownership checks as coalesced observations.
+            let _coordinate = self.context.inner.coordination.enter()?;
+            if self
+                .context
+                .inner
+                .queue
+                .model_cancelled(&self.context.task, &self.context.lease)?
+            {
+                self.context.cancel.cancel();
+            }
+            self.context
+                .inner
+                .store
+                .validate_lease(&self.context.lease)?;
+            return Ok(());
+        };
         if value.usage_status == UsageStatus::Invalid
             || (value.usage_status == UsageStatus::Reported
                 && checked_tokens(&value.usage).is_none())
@@ -1924,11 +1884,6 @@ impl RequestGuard {
             value.usage_status = UsageStatus::Invalid;
         }
         self.last_received = Some(value.clone());
-        // Keep the latest received snapshot for the reserved terminal slot even
-        // when another observation cannot be committed within the fixed bound.
-        if self.observations >= MAX_OBSERVATIONS - 1 {
-            return Err(RuntimeError::Budget("model accounting observation"));
-        }
         self.record(Entry::Observed {
             request_id: self.id.clone(),
             reservation_cursor: self.reservation,
@@ -2079,7 +2034,13 @@ impl Provider for AccountedProvider {
             let _cancel_on_drop=provider_cancel.clone().drop_guard();
             let mut upstream=context.selection.provider.stream(request.clone(),provider_cancel.clone());
             while let Some(event)=upstream.next().await {
-                partial=event.message().clone();
+                if event.apply_to(&mut partial).is_err() {
+                    provider_cancel.cancel();
+                    drop(upstream);
+                    let _ = guard.finish(ModelRequestTerminal::Failed, None);
+                    yield error_message(&partial, "provider event does not match its content block");
+                    return;
+                }
                 // Invalid usage is still recorded as invalid metadata; it never
                 // aborts the response. Settlement then treats usage as unknown.
                 if guard.observe(&event).is_err() {
@@ -2091,7 +2052,7 @@ impl Provider for AccountedProvider {
                     return;
                 }
                 if event.is_terminal() {
-                    let message=event.message();
+                    let message=&partial;
                     let successful=matches!(event,AssistantEvent::Done{..}) && matches!(message.stop_reason,StopReason::Stop|StopReason::Length|StopReason::ToolUse) && !cancel.is_cancelled() && !context.cancel.is_cancelled();
                     let terminal=if successful {ModelRequestTerminal::Completed} else if message.stop_reason==StopReason::Aborted||cancel.is_cancelled()||context.cancel.is_cancelled() {ModelRequestTerminal::Cancelled} else {ModelRequestTerminal::Failed};
                     let settlement = guard.last_received.as_ref().and_then(|last| terminal_tokens(terminal, last));
@@ -2189,11 +2150,9 @@ mod tests {
         (runtime, context, request)
     }
 
-    fn delta(message: &AssistantMessage) -> AssistantEvent {
-        AssistantEvent::TextDelta {
-            index: 0,
-            delta: "synthetic fragment".into(),
-            partial: message.clone(),
+    fn checkpoint_event(message: &AssistantMessage) -> AssistantEvent {
+        AssistantEvent::Snapshot {
+            message: message.clone(),
         }
     }
 
@@ -2261,7 +2220,7 @@ mod tests {
         let mut message = AssistantMessage::new(&request.model);
         message.response_id = Some("drop-response".into());
         message.response_model = Some("drop-model".into());
-        guard.observe(&delta(&message)).unwrap();
+        guard.observe(&checkpoint_event(&message)).unwrap();
         drop(guard);
         let session = &context.lease.session_id;
         let original_ledger = runtime.model_requests(session).unwrap();
@@ -2353,29 +2312,29 @@ mod tests {
         let mut guard = request_guard(&context, &mut request);
         guard.start().unwrap();
         let mut message = AssistantMessage::new(&request.model);
-        let mut events = vec![delta(&message)];
+        let mut events = vec![checkpoint_event(&message)];
         events.push(AssistantEvent::TextEnd {
             index: 0,
             partial: message.clone(),
         });
         // A -> B -> A must retain the second A.
-        events.push(delta(&message));
+        events.push(checkpoint_event(&message));
         message.usage_status = UsageStatus::Partial;
-        events.push(delta(&message));
+        events.push(checkpoint_event(&message));
         message.usage.input = 4;
         message.usage.total_tokens = 4;
-        events.push(delta(&message));
+        events.push(checkpoint_event(&message));
         message.usage_fields.insert("input_tokens".into(), json!(4));
-        events.push(delta(&message));
+        events.push(checkpoint_event(&message));
         message.response_id = Some("original-response".into());
-        events.push(delta(&message));
+        events.push(checkpoint_event(&message));
         message.response_model = Some("original-model".into());
-        events.push(delta(&message));
+        events.push(checkpoint_event(&message));
         message.stop_reason = StopReason::Length;
-        events.push(delta(&message));
+        events.push(checkpoint_event(&message));
         message.usage_fields.insert("unrecognized".into(), json!(1));
-        events.push(delta(&message));
-        let expected = events.iter().map(observation).collect::<Vec<_>>();
+        events.push(checkpoint_event(&message));
+        let expected = events.iter().filter_map(observation).collect::<Vec<_>>();
         assert!(expected.windows(2).all(|pair| pair[0] != pair[1]));
         for event in &events {
             guard.observe(event).unwrap();
@@ -2449,6 +2408,35 @@ mod tests {
     }
 
     #[test]
+    fn content_delta_preserves_peer_cancel_checks_without_a_usage_observation() {
+        let temp = tempfile::tempdir().unwrap();
+        let (runtime, context, mut request) = context(temp.path());
+        let peer = reopen_runtime(temp.path(), &request.model, 1000);
+        let mut guard = request_guard(&context, &mut request);
+        guard.start().unwrap();
+        let event = AssistantEvent::TextDelta {
+            index: 0,
+            delta: "content".into(),
+        };
+        guard.observe(&event).unwrap();
+        assert_eq!(guard.observations, 0);
+        assert!(
+            peer.cancel(&peer.task(&context.task.id).unwrap().cancel_target())
+                .unwrap()
+        );
+        guard.observe(&event).unwrap();
+        assert!(context.cancel.is_cancelled());
+        assert_eq!(guard.observations, 0);
+        guard.finish(ModelRequestTerminal::Cancelled, None).unwrap();
+        let ledger = runtime.model_requests(&context.lease.session_id).unwrap();
+        assert!(ledger.requests[0].observations.is_empty());
+        assert_eq!(
+            ledger.requests[0].terminal,
+            Some(ModelRequestTerminal::Cancelled)
+        );
+    }
+
+    #[test]
     fn equal_observation_observes_peer_cancel_before_releasing_its_hold() {
         let temp = tempfile::tempdir().unwrap();
         let (runtime, context, mut request) = context(temp.path());
@@ -2463,7 +2451,7 @@ mod tests {
             ..Default::default()
         };
         message.usage_status = UsageStatus::Reported;
-        let event = delta(&message);
+        let event = checkpoint_event(&message);
         guard.observe(&event).unwrap();
         assert!(
             peer.cancel(&peer.task(&context.task.id).unwrap().cancel_target())
@@ -2498,7 +2486,7 @@ mod tests {
         let (runtime, context, mut request) = context(temp.path());
         let mut guard = request_guard(&context, &mut request);
         guard.start().unwrap();
-        let event = delta(&AssistantMessage::new(&request.model));
+        let event = checkpoint_event(&AssistantMessage::new(&request.model));
         guard.observe(&event).unwrap();
         runtime.store().recover(&context.lease.session_id).unwrap();
         let recovered = runtime.store().snapshot(&context.lease.session_id).unwrap();
@@ -2522,29 +2510,21 @@ mod tests {
     }
 
     #[test]
-    fn equal_observations_still_consume_the_received_observation_limit() {
+    fn received_observations_cross_the_previous_quota_and_keep_the_terminal() {
         let temp = tempfile::tempdir().unwrap();
         let (runtime, context, mut request) = context(temp.path());
         let mut guard = request_guard(&context, &mut request);
         guard.start().unwrap();
         let mut message = AssistantMessage::new(&request.model);
-        guard.observe(&delta(&message)).unwrap();
-        let before = runtime.model_requests(&context.lease.session_id).unwrap();
-        // Synthetic in-memory boundary; this is not 65,536 provider requests.
-        guard.observations = MAX_OBSERVATIONS - 2;
-        guard.observe(&delta(&message)).unwrap();
-        assert_eq!(guard.observations, MAX_OBSERVATIONS - 1);
-        assert_eq!(
-            runtime.model_requests(&context.lease.session_id).unwrap(),
-            before
-        );
-        message.response_id = Some("last-received-at-bound".into());
-        assert!(matches!(
-            guard.observe(&delta(&message)),
-            Err(RuntimeError::Budget("model accounting observation"))
-        ));
+        guard.observe(&checkpoint_event(&message)).unwrap();
+        // Exercise the former received-count boundary without thousands of disk writes.
+        guard.observations = 65_535;
+        guard.observe(&checkpoint_event(&message)).unwrap();
+        message.response_id = Some("received-after-old-quota".into());
+        guard.observe(&checkpoint_event(&message)).unwrap();
+        assert_eq!(guard.observations, 65_537);
         guard
-            .finish(ModelRequestTerminal::RecordingFailed, None)
+            .finish(ModelRequestTerminal::MissingTerminal, None)
             .unwrap();
         let ledger = runtime.model_requests(&context.lease.session_id).unwrap();
         assert_eq!(ledger.requests[0].observations.len(), 2);
@@ -2553,11 +2533,10 @@ mod tests {
             message.response_id
         );
         assert_eq!(
-            ledger.requests[0].terminal_cursor,
-            Some(ledger.requests[0].observations[1].cursor)
+            ledger.requests[0].terminal,
+            Some(ModelRequestTerminal::MissingTerminal)
         );
         assert_eq!(ledger.reserved_tokens, 0);
-        assert_eq!(ledger.charged_unknown_tokens, 1000);
     }
 
     #[test]
@@ -2567,13 +2546,13 @@ mod tests {
         let mut guard = request_guard(&context, &mut request);
         guard.start().unwrap();
         let message = AssistantMessage::new(&request.model);
-        let first = delta(&message);
+        let first = checkpoint_event(&message);
         guard.observe(&first).unwrap();
         let db = rusqlite::Connection::open(temp.path().join("session.db")).unwrap();
         db.execute_batch("CREATE TRIGGER observed_fixture_failure BEFORE INSERT ON core_events WHEN json_extract(NEW.record,'$.event.kind')='model_request' AND json_extract(NEW.record,'$.event.data.record')='observed' BEGIN SELECT RAISE(ABORT,'observation write fixture'); END;").unwrap();
         let mut changed = message.clone();
         changed.response_id = Some("failed-write".into());
-        assert!(guard.observe(&delta(&changed)).is_err());
+        assert!(guard.observe(&checkpoint_event(&changed)).is_err());
         assert!(guard.recording_failed);
         assert!(guard.observe(&first).is_err());
         guard
@@ -2893,70 +2872,116 @@ mod tests {
     }
 
     #[test]
-    fn event_capacity_keeps_received_observation_order_and_a_durable_terminal_slot() {
+    fn long_model_identity_is_preserved_by_admission() {
         let temp = tempfile::tempdir().unwrap();
         let (runtime, context, mut request) = context(temp.path());
-        let mut guard = RequestGuard::reserve_with_limit(
-            context.clone(),
-            &mut request,
-            uuid::Uuid::new_v4().to_string(),
-            1,
-            4,
+        request.model.id = "route/".repeat(100);
+        let mut guard = request_guard(&context, &mut request);
+        guard.start().unwrap();
+        guard.finish(ModelRequestTerminal::Failed, None).unwrap();
+        let ledger = runtime.model_requests(&context.lease.session_id).unwrap();
+        assert_eq!(ledger.requests[0].identity.model, request.model.id);
+    }
+
+    #[test]
+    fn replay_accepts_histories_beyond_old_request_observation_and_event_counts() {
+        let temp = tempfile::tempdir().unwrap();
+        let (runtime, context, request) = context(temp.path());
+        let identity = request_identity(&context, &request, "long-request".into());
+        let reserved = Entry::Reserved {
+            identity: identity.clone(),
+            tokens: 0,
+            token_limit: None,
+            input_token_bound: 1,
+            output_max_tokens: None,
+        };
+        let cursor = append(&context.inner, &context.lease, &reserved).unwrap();
+        let mut event = runtime
+            .store()
+            .events(&context.lease.session_id, cursor - 1, 1)
+            .unwrap()
+            .pop()
+            .unwrap();
+        let mut records = BTreeMap::new();
+        apply(&mut records, &event, reserved).unwrap();
+        let reservation_cursor = event.cursor;
+        event.cursor += 1;
+        apply(
+            &mut records,
+            &event,
+            Entry::Started {
+                request_id: identity.request_id.clone(),
+                reservation_cursor,
+                previous_cursor: reservation_cursor,
+            },
         )
         .unwrap();
+        let observed = message_observation("usage_update", &AssistantMessage::new(&request.model));
+        for _ in 0..262_145 {
+            let previous_cursor = event.cursor;
+            event.cursor += 1;
+            apply(
+                &mut records,
+                &event,
+                Entry::Observed {
+                    request_id: identity.request_id.clone(),
+                    reservation_cursor,
+                    previous_cursor,
+                    observation: observed.clone(),
+                },
+            )
+            .unwrap();
+        }
+        assert_eq!(records[&identity.request_id].observations.len(), 262_145);
+        for index in 0..4096 {
+            event.cursor += 1;
+            let mut identity = identity.clone();
+            identity.request_id = format!("other-request-{index}");
+            apply(
+                &mut records,
+                &event,
+                Entry::Reserved {
+                    identity,
+                    tokens: 0,
+                    token_limit: None,
+                    input_token_bound: 1,
+                    output_max_tokens: None,
+                },
+            )
+            .unwrap();
+        }
+        assert_eq!(records.len(), 4097);
+    }
+
+    #[test]
+    fn append_preserves_changed_usage_and_terminal_without_rescanning_the_ledger() {
+        let temp = tempfile::tempdir().unwrap();
+        let (runtime, context, mut request) = context(temp.path());
+        let mut guard = request_guard(&context, &mut request);
         guard.start().unwrap();
-        let mut first = AssistantMessage::new(&request.model);
-        first.usage = Usage {
+        let mut message = AssistantMessage::new(&request.model);
+        message.usage = Usage {
             input: 4,
             output: 4,
             total_tokens: 8,
             ..Default::default()
         };
-        first.usage_status = UsageStatus::Reported;
+        message.usage_status = UsageStatus::Reported;
         guard
-            .observe(&AssistantEvent::UsageUpdate {
-                partial: first.clone(),
-            })
+            .observe(&AssistantEvent::usage_update(&message))
             .unwrap();
-        let before = runtime.model_requests(&context.lease.session_id).unwrap();
         guard
-            .observe(&AssistantEvent::UsageUpdate {
-                partial: first.clone(),
-            })
+            .observe(&AssistantEvent::usage_update(&message))
             .unwrap();
-        assert_eq!(
-            runtime.model_requests(&context.lease.session_id).unwrap(),
-            before
-        );
-        let second = AssistantEvent::Done {
-            message: AssistantMessage {
-                usage: Usage {
-                    output: 5,
-                    total_tokens: 9,
-                    ..first.usage.clone()
-                },
-                stop_reason: StopReason::Stop,
-                ..first
-            },
-        };
-        assert!(matches!(
-            guard.observe(&second),
-            Err(RuntimeError::Budget(_))
-        ));
-        assert_eq!(
-            runtime.model_requests(&context.lease.session_id).unwrap(),
-            before
-        );
+        message.usage.output = 5;
+        message.usage.total_tokens = 9;
+        message.stop_reason = StopReason::Stop;
+        guard.observe(&AssistantEvent::Done { message }).unwrap();
         guard
-            .finish(ModelRequestTerminal::RecordingFailed, None)
+            .finish(ModelRequestTerminal::Completed, Some(9))
             .unwrap();
+        drop(guard);
         let ledger = runtime.model_requests(&context.lease.session_id).unwrap();
-        assert_eq!(ledger.reserved_tokens, 0);
-        assert_eq!(ledger.charged_unknown_tokens, 1000);
-        assert_eq!(
-            ledger.requests[0].terminal,
-            Some(ModelRequestTerminal::RecordingFailed)
-        );
         assert_eq!(
             ledger.requests[0]
                 .observations
@@ -2965,47 +2990,14 @@ mod tests {
                 .collect::<Vec<_>>(),
             [8, 9]
         );
-        assert!(
-            ledger.requests[0].observations[0].cursor < ledger.requests[0].observations[1].cursor
-        );
         assert_eq!(
-            ledger.requests[0].terminal_cursor,
-            Some(ledger.requests[0].observations[1].cursor)
+            ledger.requests[0].terminal,
+            Some(ModelRequestTerminal::Completed)
         );
-        let (requests, cursor) = (
-            ledger.requests.len(),
-            runtime
-                .store()
-                .snapshot(&context.lease.session_id)
-                .unwrap()
-                .cursor,
-        );
-        assert!(matches!(
-            RequestGuard::reserve_with_limit(
-                context.clone(),
-                &mut request,
-                uuid::Uuid::new_v4().to_string(),
-                2,
-                4
-            ),
-            Err(RuntimeError::Budget(_))
-        ));
-        assert_eq!(
-            runtime
-                .model_requests(&context.lease.session_id)
-                .unwrap()
-                .requests
-                .len(),
-            requests
-        );
-        assert_eq!(
-            runtime
-                .store()
-                .snapshot(&context.lease.session_id)
-                .unwrap()
-                .cursor,
-            cursor
-        );
+        assert_eq!(ledger.settled_tokens, 9);
+        let mut next = request_guard(&context, &mut request);
+        next.start().unwrap();
+        next.finish(ModelRequestTerminal::Failed, None).unwrap();
     }
 
     #[test]

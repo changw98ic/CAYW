@@ -10,7 +10,7 @@ test('snapshot refresh does not skip events that have not been consumed', () => 
   view = applySnapshot(view, snapshot({ cursor: 18, messages: [{ role: 'user', content: [{ type: 'text', text: '你好' }] }] }));
   assert.equal(view.cursor, 10);
   assert.equal(messageText(view.snapshot.messages[0]), '你好');
-  view = consumeEvents(view, [{ cursor: 11, event: { type: 'message_update', message: { content: [{ type: 'text', text: '回答' }] } } }]);
+  view = consumeEvents(view, [{ cursor: 11, event: { type: 'message_update', event: {type:'text_end',index:0,partial:{ content: [{ type: 'text', text: '回答' }] }} } }]);
   assert.equal(view.cursor, 11);
   assert.equal(view.liveText, '回答');
 });
@@ -42,13 +42,13 @@ test('unsafe and decreasing cursors reject the entire page', () => {
   assert.equal(view.cursor, 10);
 });
 
-test('render history and streamed content stay bounded while the cursor consumes the whole page', () => {
+test('history retains every message while rendering uses a page and streams remain complete', () => {
   let view = initial({ messages: Array.from({ length: 900 }, (_, i) => ({ role: 'user', content: [{ type: 'text', text: String(i) }] })) });
   view = consumeEvents(view, Array.from({ length: 900 }, (_, i) => ({ cursor: i + 11, event: { type: 'text_delta', delta: 'x'.repeat(200) } })));
-  assert.equal(view.snapshot.messages.length, 120);
+  assert.equal(view.snapshot.messages.length, 900);
   assert.equal(messageText(view.snapshot.messages.at(-1)), '899');
   assert.equal(view.events.length, 120);
-  assert.ok(view.liveText.length <= 64000);
+  assert.equal(view.liveText.length, 180000);
   assert.equal(view.cursor, 910);
 });
 
@@ -101,7 +101,7 @@ test('frozen binding is visible even when runtime returns the durable state as i
 
 test('wrapped durable agent updates drive live text and their terminal clears it', () => {
   let view = initial();
-  view = consumeEvents(view, [{cursor:11, event:{type:'agent', event:{type:'message_update', message:{content:[{type:'text',text:'逐步回答'}]}}}}]);
+  view = consumeEvents(view, [{cursor:11, event:{type:'agent', event:{type:'message_update', event:{type:'text_end',index:0,partial:{content:[{type:'text',text:'逐步回答'}]}}}}}]);
   assert.equal(view.liveText, '逐步回答');
   view = consumeEvents(view, [{cursor:12, event:{type:'agent', event:{type:'agent_end',messages:[]}}}]);
   assert.equal(view.liveText, '');
@@ -118,7 +118,7 @@ test('model content remains literal text', () => {
 });
 
 const lease = { session_id:'s1', attempt_id:'a1', worker_id:'w1', fence:1 };
-const fact = (cursor, event) => ({ protocol_version:3, session_id:'s1', cursor, timestamp:1, attempt:lease, event });
+const fact = (cursor, event) => ({ protocol_version:4, session_id:'s1', cursor, timestamp:1, attempt:lease, event });
 
 test('an interrupted call in an idle snapshot never locks the next prompt', () => {
   let view = initial({ state:'idle', cursor:12, unresolved_calls:[{ call:{id:'c1'}, state:'outcome_unknown' }] });
@@ -362,4 +362,21 @@ test('a legacy reconciliation rejection no longer locks the session', () => {
   view = applySnapshot(view, snapshot({cursor:11}));
   assert.equal(sessionBlocked(view.snapshot, view), '');
   assert.equal(stateLabel(view.snapshot, view), '就绪');
+});
+
+
+test('long text and full tool records retain the final bytes', () => {
+  const text = 'x'.repeat(70000) + 'TAIL';
+  assert.equal(messageText({role:'assistant',content:[{type:'text',text}]}), text);
+  const presentation = messagePresentation({role:'toolResult',tool_name:'execute_code',content:[{type:'text',text}],structured_content:{status:'completed',outputs:[]}});
+  assert.equal(presentation.raw, text);
+});
+
+test('usage and tool deltas keep text and unconfirmed raw arguments', () => {
+  const record = (cursor, event) => ({cursor,event:{type:'message_update',event}});
+  let view = consumeEvents(createView('s1'), [record(1,{type:'tool_call_start',index:1,partial:{content:[{type:'text',text:'kept'},{type:'toolCall',id:'c',name:'tool',arguments:{}}]}})]);
+  view = consumeEvents(view, [record(2,{type:'tool_call_delta',index:1,delta:'{"x":'}),record(3,{type:'tool_call_delta',index:1,delta:'1}'}),record(4,{type:'usage_update',usage:{},usage_status:'reported',usage_fields:{},response_id:null,response_model:null})]);
+  assert.equal(view.liveText,'kept');
+  assert.equal(view.liveMessage.content[1].arguments,'{"x":1}');
+  assert.equal(view.liveMessage.content[1].arguments_error,'tool argument stream is incomplete');
 });

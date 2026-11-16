@@ -26,7 +26,7 @@ target/debug/cayw-trace-debug \
   --web-addr 127.0.0.1:0
 ```
 
-启动后打开标准输出中的 `web_url`，输入网页令牌。`--session` 可重复指定，最多观察 16 个会话。只能绑定本机地址。按 Ctrl+C 停止插件。
+启动后打开标准输出中的 `web_url`，输入网页令牌。`--session` 可重复指定，可观察多个会话。只能绑定本机地址。按 Ctrl+C 停止插件。
 
 追踪文件保存运行源码、输入、上下文、原始事件和全部内容版本。新文件权限为 `0600`，同一文件只允许一个插件进程打开。追踪文件不设置累计字节、事件、执行或内容版本数量上限。文件通过缓冲流式读写保存，写入完成并同步后再原子替换；磁盘或格式错误仍直接报错。当前投影和网页状态仍完整载入内存，记录增长会增加内存、读取和保存成本；尚未实现分段存储和按需加载。
 
@@ -99,7 +99,7 @@ return {
 }
 ```
 
-`output` 和 `state` 必须存在，嵌套最多 32 层；JSON 空值使用 `cayw.null`。`branch` 可省略，选择默认边；提供时必须匹配该节点的分支边。首版支持最多 64 个节点的无环图。`input_pointer` 是进入节点前原始输入的 JSON 路径，例如 `/payload/value`；空字符串表示整个输入。
+`output` 和 `state` 必须存在，JSON 空值使用 `cayw.null`。`branch` 可省略，选择默认边；提供时必须匹配该节点的分支边。节点图要求无环，不设置固定节点数上限。`input_pointer` 是进入节点前原始输入的 JSON 路径，例如 `/payload/value`；空字符串表示整个输入。
 
 调用 `engine::script_for_plan(&plan)` 生成完整首轮脚本。真实执行通过 `cayw.emit` 输出 `cayw.trace.v1` 的 manifest、started、completed。Cells 先保存输出，Runtime 再发布带执行、任务、源码和输出游标的 `trace_node` 事件。插件核对 Core 的实际源码校验值与生成脚本一致，再核对节点顺序、分支、输入和进入前状态。节点自己的 `cayw.emit` 与 `_G.cayw.emit` 拒绝使用保留的追踪结构；普通 JSON 输出仍可用。追踪结构有误时，该图显示缺口，原始事件继续保存。原始输出不构成额外执行授权。
 
@@ -118,3 +118,7 @@ return {
 接口为 `GET /api/state`、`POST /api/projects/{id}/edit` 和 `POST /api/projects/{id}/undo`。API 仅接受网页 Bearer 令牌。保存包含 `expected_version`，旧版本提交返回冲突，避免覆盖新内容。两种图、时间线和对比都以选中的执行及结果版本为准。
 
 可复跑验收见 [macOS 离线记录](../../docs/validation/issue-31-trace-debug-macos.md)。另有独立的 [Magpie 真实模型补验](../../docs/validation/issue-31-magpie-macos.md)，记录实际请求、网页修复、分支变化、停用后普通任务，以及原始失败与预算保留。普通测试和上述离线演示不会触发真实模型请求。
+
+本地重算沿用 CodeMode 默认执行策略，保留取消与指令调度，不另设固定内存、5 秒时限或输出大小配额。计划与节点源码不设固定字节配额。HTTP 编辑请求仍校验身份、来源、结构和内容版本。
+
+旧 Core v3 追踪事件在打开文件时迁移到当前协议。迁移复用 Core 的规范转换，原文件字节保存在相邻的 `*.v3-evidence.json`；修复过的输入另存独立证据。冲突或损坏的记录会明确报错，不覆盖原文件。

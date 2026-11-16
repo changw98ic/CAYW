@@ -225,32 +225,21 @@ pub struct Limits {
     /// Bounds the total persistent key and nonce registry entries.
     pub max_security_entries: u32,
 }
+// Default values represent the integer storage boundary, not application quotas.
+// Hosts may select smaller explicit quotas; historical objects remain accounted.
 impl Default for Limits {
     fn default() -> Self {
         Self {
-            max_content_bytes: 16 * 1024 * 1024,
-            max_total_bytes: 256 * 1024 * 1024,
-            max_records: 1024,
-            max_security_entries: 16384,
+            max_content_bytes: u64::MAX,
+            max_total_bytes: u64::MAX,
+            max_records: u32::MAX,
+            max_security_entries: u32::MAX,
         }
     }
 }
 impl Limits {
-    /// Raise an orderable soft limit into range. A total quota below one
-    /// content's maximum is raised to that maximum instead of failing.
-    pub fn normalized(mut self) -> Self {
-        self.max_total_bytes = self.max_total_bytes.max(self.max_content_bytes);
-        self
-    }
-
     pub fn validate(self) -> Result<()> {
-        if self.max_content_bytes == 0
-            || self.max_content_bytes > 1024 * 1024 * 1024
-            || self.max_records == 0
-            || self.max_records > 10000
-            || self.max_security_entries == 0
-            || self.max_security_entries > 65536
-        {
+        if self.max_content_bytes == 0 || self.max_records == 0 || self.max_security_entries == 0 {
             return Err(Error::InvalidLimits);
         }
         Ok(())

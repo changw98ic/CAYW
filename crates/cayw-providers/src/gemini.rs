@@ -143,9 +143,7 @@ fn history_parts(assistant: &AssistantMessage) -> Result<Vec<Value>> {
     let mut normalized = Vec::new();
     let mut text_index = None;
     let mut call_index = 0;
-    let mut limits = common::ResponseLimits::default();
     for part in parts {
-        limits.fragment()?;
         validate_part(part)?;
         if let Some(text) = part.get("text") {
             let text = text.as_str().expect("validated text");
@@ -157,7 +155,6 @@ fn history_parts(assistant: &AssistantMessage) -> Result<Vec<Value>> {
                 previous.push_str(text);
             }
         } else {
-            limits.tool_call()?;
             text_index = None;
             let function = &part["functionCall"];
             let id = call_ids
@@ -247,7 +244,6 @@ pub(crate) struct State {
     text_index: Option<usize>,
     finish: Option<StopReason>,
     usage: common::UsageReport,
-    limits: common::ResponseLimits,
 }
 
 impl State {
@@ -269,7 +265,6 @@ impl State {
             text_index: None,
             finish: None,
             usage: common::UsageReport::default(),
-            limits: common::ResponseLimits::default(),
         }
     }
 
@@ -296,7 +291,7 @@ impl State {
             common::stable(&mut self.message.response_model, &value, "modelVersion")?;
             if let Some(usage) = value.get("usageMetadata").filter(|value| !value.is_null()) {
                 self.usage(usage)?;
-                yield AssistantEvent::UsageUpdate { partial: self.message.clone() };
+                yield AssistantEvent::usage_update(&self.message);
             }
             let Some(candidates) = value.get("candidates") else {
                 if value.get("usageMetadata").is_some() {
@@ -329,7 +324,6 @@ impl State {
                 let parts = content.get("parts").and_then(Value::as_array).ok_or("Missing Gemini content parts")?;
                 for part in parts {
                     common::checkpoint(cancel).await?;
-                    self.limits.fragment()?;
                     validate_part(part)?;
                     match (part.get("text"), part.get("functionCall")) {
                         (Some(text), None) => {
@@ -350,7 +344,6 @@ impl State {
                             }
                         }
                         (None, Some(function)) => {
-                            self.limits.tool_call()?;
                             if let Some(event) = self.end_text() {
                                 yield event;
                                 common::checkpoint(cancel).await?;
@@ -375,7 +368,7 @@ impl State {
                             yield AssistantEvent::ToolCallStart { index, partial: self.message.clone() };
                             common::checkpoint(cancel).await?;
                             self.message.content[index] = Content::ToolCall(call);
-                            yield AssistantEvent::ToolCallDelta { index, delta, partial: self.message.clone() };
+                            yield AssistantEvent::ToolCallDelta { index, delta, };
                             common::checkpoint(cancel).await?;
                             yield AssistantEvent::ToolCallEnd { index, partial: self.message.clone() };
                         }

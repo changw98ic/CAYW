@@ -52,14 +52,17 @@ async fn worker_panic_keeps_its_safe_reason_and_unknown_state() {
         "non-string panic payload".into(),
     ] {
         let temp = tempfile::tempdir().unwrap();
-        let rt = Runtime::open(
-            temp.path().join("session.db"),
-            temp.path(),
-            Arc::new(CompletedProvider),
-            Model::new("fixture", "worker-panic"),
-            RuntimeConfig::default(),
-        )
-        .unwrap();
+        let open = || {
+            Runtime::open(
+                temp.path().join("session.db"),
+                temp.path(),
+                Arc::new(CompletedProvider),
+                Model::new("fixture", "worker-panic"),
+                RuntimeConfig::default(),
+            )
+            .unwrap()
+        };
+        let rt = open();
         let session = rt.create(None).unwrap().id;
         let task = rt.enqueue(&session, "worker panic fixture").unwrap();
         let error = tokio::time::timeout(
@@ -97,9 +100,31 @@ async fn worker_panic_keeps_its_safe_reason_and_unknown_state() {
         assert_eq!(stored.error.as_deref(), Some(message.as_str()));
         assert_eq!(rt.health().unwrap().running, 1);
         assert!(
+            rt.enqueue(&session, "wait for original cleanup").is_err(),
+            "unconfirmed worker cleanup must retain admission ownership"
+        );
+        // The injected panic poisoned the in-memory Core mutex. Reopen the
+        // committed store, then explicitly confirm recovery of its old owner.
+        drop(rt);
+        let rt = open();
+        assert_eq!(rt.task(&task.id).unwrap(), stored);
+        let original_audit = rt.audit(&session, 0, 1000).unwrap();
+        let recovered = rt.recover(&session).unwrap();
+        assert_eq!(recovered.state, cayw_core::SessionState::Idle);
+        let recovered_task = rt.task(&task.id).unwrap();
+        assert_eq!(recovered_task.state, TaskState::Interrupted);
+        assert!(!recovered_task.holds_slot);
+        assert_eq!(rt.health().unwrap().running, 0);
+        let audit = rt.audit(&session, 0, 1000).unwrap();
+        assert_eq!(
+            serde_json::to_value(&audit[..original_audit.len()]).unwrap(),
+            serde_json::to_value(original_audit).unwrap(),
+            "recovery must retain the original worker evidence"
+        );
+        assert!(
             rt.enqueue(&session, "record a follow-up without replaying the panic")
                 .is_ok(),
-            "an unknown worker outcome must never freeze the session"
+            "confirmed recovery must permit new work without replaying the panic"
         );
     }
     assert_eq!(panics.load(Ordering::SeqCst), 3);

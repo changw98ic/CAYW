@@ -270,7 +270,7 @@ impl Provider for PagedStream {
                     }
                 }
                 message.content = vec![Content::text(format!("paged fixture {index} 你好"))];
-                yield AssistantEvent::TextDelta { index: 0, delta: format!("{index}"), partial: message.clone() };
+                yield AssistantEvent::TextEnd { index: 0, partial: message.clone() };
             }
             cancel.cancelled().await;
             yield AssistantEvent::Error { message: message.failure(StopReason::Aborted, "fixture cancelled") };
@@ -306,7 +306,11 @@ async fn wait_partial(client: &Client, id: &str, text: &str) -> Value {
                 }
                 if records
                     .iter()
-                    .any(|record| record["event"]["event"]["message"]["content"][0]["text"] == text)
+                    .any(|record| {
+                        let update = &record["event"]["event"]["event"];
+                        update["partial"]["content"][0]["text"] == text
+                            || (update["type"] == "text_delta" && update["delta"] == text)
+                    })
                 {
                     stage = "session.get after matching partial";
                     return client

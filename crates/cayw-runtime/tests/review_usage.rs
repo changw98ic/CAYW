@@ -125,14 +125,19 @@ async fn responses_usage_update_details_admitted_without_redaction_and_reconcile
 
     let provider = Arc::new(StreamingUsageProvider {
         events: vec![
+            AssistantEvent::TextStart {
+                index: 0,
+                partial: {
+                    let mut started = base_message(&model);
+                    started.content = vec![Content::text("")];
+                    started
+                },
+            },
             AssistantEvent::TextDelta {
                 index: 0,
                 delta: "partial responses output".into(),
-                partial: update_msg.clone(),
             },
-            AssistantEvent::UsageUpdate {
-                partial: update_msg.clone(),
-            },
+            AssistantEvent::usage_update(&update_msg),
             AssistantEvent::Error { message: err_msg },
         ],
         calls: AtomicUsize::new(0),
@@ -289,9 +294,7 @@ async fn responses_unknown_detail_fields_are_redacted_and_reconciliation_rejecte
 
     let provider = Arc::new(StreamingUsageProvider {
         events: vec![
-            AssistantEvent::UsageUpdate {
-                partial: update_msg.clone(),
-            },
+            AssistantEvent::usage_update(&update_msg),
             AssistantEvent::Error { message: err_msg },
         ],
         calls: AtomicUsize::new(0),
@@ -408,9 +411,7 @@ async fn responses_non_integer_detail_triggers_redaction_and_rejects_reconcile()
 
     let provider = Arc::new(StreamingUsageProvider {
         events: vec![
-            AssistantEvent::UsageUpdate {
-                partial: update_msg.clone(),
-            },
+            AssistantEvent::usage_update(&update_msg),
             AssistantEvent::Error { message: err_msg },
         ],
         calls: AtomicUsize::new(0),
@@ -511,9 +512,7 @@ async fn responses_decreasing_detail_counter_in_report_is_rejected() {
 
     let provider = Arc::new(StreamingUsageProvider {
         events: vec![
-            AssistantEvent::UsageUpdate {
-                partial: update_msg.clone(),
-            },
+            AssistantEvent::usage_update(&update_msg),
             AssistantEvent::Error { message: err_msg },
         ],
         calls: AtomicUsize::new(0),

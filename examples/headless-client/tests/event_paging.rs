@@ -1,7 +1,7 @@
 use cayw_ai::{AssistantMessage, CancellationToken, Content, Message, Model, StopReason, ToolCall};
 use cayw_core::{EventRecord, SessionState, SessionStore};
 use cayw_ipc::{Client, ServerConfig, serve};
-use cayw_runtime::{Runtime, RuntimeConfig, fixture::OfflineProvider};
+use cayw_runtime::{Runtime, RuntimeConfig};
 use serde_json::{Value, json};
 use std::{net::SocketAddr, path::Path, process::Output, sync::Arc, time::Duration};
 use tokio::{net::TcpListener, process::Command, task::JoinHandle};
@@ -35,6 +35,22 @@ impl cayw_ipc::RpcHandler for TestServerHandler {
     }
 }
 
+struct TerminalProvider;
+impl cayw_ai::Provider for TerminalProvider {
+    fn stream(
+        &self,
+        request: cayw_ai::ModelRequest,
+        _: CancellationToken,
+    ) -> cayw_ai::AssistantStream {
+        let mut message = AssistantMessage::new(&request.model);
+        message.content = vec![Content::text("new task completed")];
+        message.stop_reason = StopReason::Stop;
+        Box::pin(futures::stream::iter([cayw_ai::AssistantEvent::Done {
+            message,
+        }]))
+    }
+}
+
 struct Fixture {
     root: tempfile::TempDir,
     runtime: Runtime,
@@ -50,7 +66,7 @@ impl Fixture {
         let runtime = Runtime::open(
             &database,
             &workspace,
-            Arc::new(OfflineProvider::default()),
+            Arc::new(TerminalProvider),
             Model::new("fixture", "event-paging"),
             RuntimeConfig::default(),
         )
@@ -106,10 +122,9 @@ impl Fixture {
                 .unwrap();
         }
         self.store.mark_tool_started(&lease, &call.id).unwrap();
-        assert_eq!(
-            self.store.recover(&self.id).unwrap().state,
-            SessionState::NeedsReconciliation
-        );
+        let recovered = self.store.recover(&self.id).unwrap();
+        assert_eq!(recovered.state, SessionState::Idle);
+        assert_eq!(recovered.unresolved_calls.len(), 1);
     }
     fn events(&self) -> Vec<EventRecord> {
         let mut events = Vec::new();
@@ -209,7 +224,7 @@ fn saved_cursor(path: &Path) -> Value {
 }
 
 #[tokio::test]
-async fn prompt_reads_large_history_before_reporting_original_unknown() {
+async fn large_history_and_original_unknown_are_read_without_replaying_work() {
     let fixture = Fixture::new();
     fixture.history(1000, 2200);
     fixture.unknown();
@@ -220,34 +235,34 @@ async fn prompt_reads_large_history_before_reporting_original_unknown() {
     let cursor = fixture.cursor(0);
     let server = fixture.server(1024 * 1024).await;
     let client = Client::connect(server.address, TOKEN).await.unwrap();
-    let error = client
+    let page = client
         .request(
             "session.events",
             json!({"session_id":fixture.id,"after":0,"limit":1000}),
         )
         .await
-        .unwrap_err();
-    assert_eq!(error.code, "response_too_large");
-    assert!(!error.outcome_unknown, "{error:?}");
+        .unwrap();
+    let page: Vec<EventRecord> = serde_json::from_value(page).unwrap();
+    assert_eq!(page, expected[..1000]);
     client.close().await;
-    let output = server
-        .command(
-            &fixture.id,
-            &cursor,
-            &[
-                "prompt",
-                "--text",
-                "Do not replay the original uncertain operation.",
-            ],
-        )
-        .await;
+    let mut observed = Vec::new();
+    loop {
+        let output = server
+            .command(&fixture.id, &cursor, &["events", "--limit", "1000"])
+            .await;
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let page = emitted_events(&output);
+        if page.is_empty() {
+            break;
+        }
+        observed.extend(page);
+    }
     server.close().await;
-    assert!(!output.status.success());
-    let errors = rows(&output.stderr);
-    assert_eq!(errors.len(), 1);
-    assert_eq!(errors[0]["code"], "needs_reconciliation_outcome_unknown");
-    assert_eq!(errors[0]["outcome_unknown"], true);
-    assert_eq!(emitted_events(&output), expected);
+    assert_eq!(observed, expected);
     assert_eq!(saved_cursor(&cursor)["after"], before.cursor);
     assert!(fixture.runtime.tasks(&fixture.id).unwrap().is_empty());
     assert_eq!(fixture.runtime.get(&fixture.id).unwrap(), before);
@@ -298,7 +313,7 @@ async fn events_pages_continue_from_saved_cursor_without_gaps_or_repeats() {
 }
 
 #[tokio::test]
-async fn single_oversized_event_fails_without_advancing_cursor_or_enqueuing() {
+async fn single_oversized_event_is_reassembled_without_gaps_or_replays() {
     let fixture = Fixture::new();
     fixture.history(1, 32 * 1024);
     let expected = fixture.events();
@@ -306,26 +321,56 @@ async fn single_oversized_event_fails_without_advancing_cursor_or_enqueuing() {
         .iter()
         .find(|event| serde_json::to_vec(event).unwrap().len() > 8192)
         .unwrap();
-    let cursor = fixture.cursor(oversized.cursor - 1);
-    let saved = std::fs::read(&cursor).unwrap();
-    let before = fixture.runtime.get(&fixture.id).unwrap();
+    let start = oversized.cursor - 1;
+    let cursor = fixture.cursor(start);
     let server = fixture.server(8192).await;
+    let output = server
+        .command(&fixture.id, &cursor, &["events", "--limit", "1000"])
+        .await;
+    server.close().await;
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(emitted_events(&output), expected[start as usize..]);
+    assert_eq!(
+        saved_cursor(&cursor)["after"],
+        expected.last().unwrap().cursor
+    );
+    assert!(fixture.runtime.tasks(&fixture.id).unwrap().is_empty());
+    assert_eq!(fixture.events(), expected);
+}
+
+#[tokio::test]
+async fn prompt_after_historical_unknown_completes_without_replaying_the_original() {
+    let fixture = Fixture::new();
+    fixture.history(1000, 2200);
+    fixture.unknown();
+    let original = fixture.events();
+    let cursor = fixture.cursor(0);
+    let server = fixture.server(1024 * 1024).await;
     let output = server
         .command(
             &fixture.id,
             &cursor,
-            &["prompt", "--text", "Do not enqueue."],
+            &["prompt", "--text", "Start a separate harmless task."],
         )
         .await;
     server.close().await;
-    assert!(!output.status.success());
-    let errors = rows(&output.stderr);
-    assert_eq!(errors.len(), 1);
-    assert_eq!(errors[0]["code"], "response_too_large");
-    assert_eq!(errors[0]["outcome_unknown"], false);
-    assert!(emitted_events(&output).is_empty());
-    assert_eq!(std::fs::read(&cursor).unwrap(), saved);
-    assert!(fixture.runtime.tasks(&fixture.id).unwrap().is_empty());
-    assert_eq!(fixture.runtime.get(&fixture.id).unwrap(), before);
-    assert_eq!(fixture.events(), expected);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let final_events = fixture.events();
+    assert_eq!(&final_events[..original.len()], original.as_slice());
+    assert_eq!(fixture.runtime.tasks(&fixture.id).unwrap().len(), 1);
+    let view = fixture.runtime.get(&fixture.id).unwrap();
+    assert_eq!(view.unresolved_calls.len(), 1);
+    assert!(
+        serde_json::to_string(&view)
+            .unwrap()
+            .contains("new task completed")
+    );
 }

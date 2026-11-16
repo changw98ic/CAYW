@@ -68,41 +68,22 @@ async fn refresh(
     // Prefer Workspace `code.outline` when enabled (authoritative Rust outline).
     if host.config.workspace.is_some() && args.language == "rust" {
         let (workspace, workspace_deadline) = host.open_workspace(cancel, deadline).await?;
-        match workspace
+        let outline = workspace
             .execute_until(
                 "code.outline",
                 &json!({"path": &args.path, "language": "rust"}),
                 cancel.clone(),
                 crate::deadline_instant(workspace_deadline),
             )
-            .await
-        {
-            Ok(outline) => {
-                let file = publish_outline_json(bridge, &outline).map_err(map_error)?;
-                return file_result("code.outline", &file, bridge);
-            }
-            Err(error) if error.outcome_unknown => return Err(error),
-            Err(_) => {
-                // Fall through to lightweight producer.
-            }
-        }
+            .await?;
+        let file = publish_outline_json(bridge, &outline).map_err(map_error)?;
+        return file_result("code.outline", &file, bridge);
     }
 
     // Closed loop without outline: read workspace file bytes, lightweight extract.
-    let read = filesystem::execute(
-        host,
-        "fs.read",
-        &json!({"path": &args.path}),
-        cancel,
-        deadline,
-    )
-    .await?;
-    let content = read
-        .get("content")
-        .and_then(Value::as_str)
-        .ok_or_else(|| failure("fs.read missing content"))?;
-    let file =
-        publish_bytes(bridge, &args.path, content.as_bytes(), &args.language).map_err(map_error)?;
+    let bytes = filesystem::read_complete(host, &args.path, cancel, deadline)?;
+    std::str::from_utf8(&bytes).map_err(|_| failure("source is not valid UTF-8"))?;
+    let file = publish_bytes(bridge, &args.path, &bytes, &args.language).map_err(map_error)?;
     file_result("lightweight", &file, bridge)
 }
 

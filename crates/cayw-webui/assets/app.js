@@ -1,16 +1,14 @@
-const CORE_PROTOCOL_VERSION = 3;
+const CORE_PROTOCOL_VERSION = 4;
 const MAX_MESSAGES = 120;
 const MAX_EVENTS = 120;
-const MAX_TEXT = 64000;
-const MAX_RECORD = 12000;
-const clip = (value, limit = MAX_TEXT) => {
+const clip = (value, limit = Number.POSITIVE_INFINITY) => {
   const text = String(value ?? '');
   return text.length > limit ? `${text.slice(0, limit)}\n…内容过长，已截断显示。` : text;
 };
 const object = value => value !== null && typeof value === 'object' && !Array.isArray(value);
 const safeCursor = value => Number.isSafeInteger(value) && value >= 0;
 const array = value => Array.isArray(value) ? value : [];
-const recordText = value => clip(JSON.stringify(value, null, 2) ?? '', MAX_RECORD);
+const recordText = value => JSON.stringify(value, null, 2) ?? '';
 
 function renderLanNotice(open) {
   const target = document.getElementById('network-notice');
@@ -56,7 +54,7 @@ function textOnly(message) {
 }
 
 export function messagePresentation(message) {
-  const raw = messageText(message);
+  const raw = message?.role === 'toolResult' ? null : messageText(message);
   if (message?.role === 'toolResult') {
     const page = message.structured_content;
     const knownPage = message.tool_name === 'execute_code' && object(page) && ['completed', 'failed', 'cancelled', 'outcome_unknown', 'interrupted', 'running', 'yielded'].includes(page.status) && Array.isArray(page.outputs);
@@ -80,7 +78,7 @@ export function messagePresentation(message) {
       const reason = typeof page?.error === 'string' ? page.error : '';
       detail = /permission denied/.test(reason) ? '有一项操作未获授权，任务已结束。' : /^Timeout:/.test(reason) ? '任务超过本次运行时限。' : '执行未完成，可展开查看原因。';
     }
-    return { kind: 'tool_result', title, status, text: detail, values, raw };
+    return { kind: 'tool_result', title, status, text: detail, values, get raw() { return messageText(message); } };
   }
   const calls = array(message?.content).filter(part => part?.type === 'toolCall');
   if (message?.role === 'assistant' && calls.length) return { kind: 'tool_call', title: '执行工具', text: textOnly(message), calls, raw };
@@ -387,7 +385,7 @@ export function applySnapshot(view, snapshot, initial = false, requestedAfter = 
     originalTaskId: nextTaskId,
     approvalQuestions: Object.fromEntries(Object.entries(view.approvalQuestions ?? {}).filter(([id]) => pendingIds.has(id))),
     activeAttempt: object(snapshot.attempt) && !sameLease(snapshot.attempt,view.activeAttempt?.lease) ? { lease:snapshot.attempt, after:snapshot.cursor, terminal:null } : view.activeAttempt,
-    snapshot: { ...snapshot, messages: snapshot.messages.slice(-MAX_MESSAGES) },
+    snapshot,
     totalMessages: snapshot.messages.length,
     snapshotAfter: Math.max(view.snapshotAfter, requestedAfter),
     snapshotEpoch: Math.max(view.snapshotEpoch, requestedEpoch),
@@ -415,14 +413,41 @@ export function consumeEvents(view, records) {
     if (record.cursor <= view.cursor) continue;
     const event = declaredAgentEvent(record.event ?? record);
     if (event.type === 'text_delta' && typeof event.delta === 'string') {
-      next.liveText = `${next.liveText}${event.delta}`.slice(-MAX_TEXT);
-    } else if (event.type === 'message_update' && object(event.message)) {
-      // AgentEvent carries the actual partial assistant message. Never animate
-      // snapshot text or guess that an unfamiliar event is streaming output.
-      next.liveText = textOnly(event.message).slice(-MAX_TEXT);
+      next.liveText = `${next.liveText}${event.delta}`;
+    } else if (event.type === 'message_update') {
+      const update = event.event;
+      if (!object(update)) throw new Error('流式消息缺少更新记录。');
+      if (update.type === 'usage_update') {
+        if (!object(next.liveMessage)) throw new Error('用量更新缺少消息起点。');
+        next.liveMessage = {...next.liveMessage, usage:update.usage, usage_status:update.usage_status, usage_fields:update.usage_fields, response_id:update.response_id, response_model:update.response_model};
+      } else if (['text_delta', 'thinking_delta', 'tool_call_delta'].includes(update.type)) {
+        const block = next.liveMessage?.content?.[update.index];
+        const expected = {text_delta:'text', thinking_delta:'thinking', tool_call_delta:'toolCall'}[update.type];
+        if (!Number.isSafeInteger(update.index) || update.index < 0 || block?.type !== expected || typeof update.delta !== 'string') throw new Error('流式消息块无效。');
+        const changed = {...block};
+        if (update.type === 'tool_call_delta') {
+          changed.arguments = (typeof block.arguments === 'string' ? block.arguments : '') + update.delta;
+          changed.arguments_error = 'tool argument stream is incomplete';
+        } else {
+          const field = update.type === 'text_delta' ? 'text' : 'thinking';
+          if (typeof block[field] !== 'string') throw new Error('流式消息缺少正文。');
+          changed[field] = block[field] + update.delta;
+        }
+        const content = next.liveMessage.content.slice();
+        content[update.index] = changed;
+        next.liveMessage = {...next.liveMessage, content};
+        if (update.type === 'text_delta') next.liveText = textOnly(next.liveMessage);
+      } else {
+        const snapshot = update.partial ?? update.message;
+        if (!object(snapshot) || !Array.isArray(snapshot.content)) throw new Error('流式消息缺少快照。');
+        next.liveMessage = snapshot;
+        next.liveText = textOnly(snapshot);
+      }
     } else if (event.type === 'message_start' && event.message?.role === 'assistant') {
+      next.liveMessage = event.message;
       next.liveText = '';
     } else if ((event.type === 'message_end' && event.message?.role === 'assistant') || event.type === 'agent_end') {
+      next.liveMessage = null;
       next.liveText = '';
     }
     next = consumeWriteFact(next, record);
@@ -720,8 +745,8 @@ function boot() {
 
   function renderMessages(view) {
     const fragment = document.createDocumentFragment();
-    const messages = array(view?.snapshot?.messages).filter(message => message.role !== 'system' && messageText(message).trim());
-    const pendingApprovals = array(view?.snapshot?.pending_approvals).slice(0, 30);
+    const messages = array(view?.snapshot?.messages).filter(message => message.role !== 'system').slice(-(view?.historyVisible ?? MAX_MESSAGES));
+    const pendingApprovals = array(view?.snapshot?.pending_approvals);
     if (!messages.length && !pendingApprovals.length) {
       const empty = el('div', 'empty');
       empty.append(el('h2', '', view?.snapshot ? '从一条消息开始' : '开始对话'), el('p', '', view?.snapshot ? '在下面说你要做的事。' : '左边选一段已有的，或新建一段。'));
@@ -731,15 +756,20 @@ function boot() {
     const detailsFor = (key, label, text) => {
       const details = el('details', 'record-details');
       details.open = expanded.has(key);
-      details.append(el('summary', '', label), el('pre', '', text));
+      const content = el('pre', '');
+      let loaded = false;
+      const load = () => { if (details.open && !loaded) { content.textContent = typeof text === 'function' ? text() : text; loaded = true; } };
+      details.append(el('summary', '', label), content);
+      load();
       details.addEventListener('toggle', () => {
+        load();
         if (!details.isConnected) return;
         const current = views.get(view.id);
         if (!current) return;
         const keys = new Set(current.expandedRecords ?? []);
         if (details.open) keys.add(key);
         else keys.delete(key);
-        rememberView({ ...current, expandedRecords: [...keys].slice(-MAX_MESSAGES) });
+        rememberView({ ...current, expandedRecords: [...keys] });
       });
       return details;
     };
@@ -756,7 +786,7 @@ function boot() {
           if (presentation.text) card.append(el('div', 'body', presentation.text));
           for (const [callIndex, call] of presentation.calls.entries()) {
             const title = call.name === 'execute_code' ? call.arguments?.action === 'wait' ? '等待任务结果' : '运行任务' : `使用工具：${clip(call.name, 100)}`;
-            card.append(detailsFor(`${key}/${callIndex}`, title, recordText(call)));
+            card.append(detailsFor(`${key}/${callIndex}`, title, () => recordText(call)));
           }
         } else {
           card.append(el('strong', `result-title ${presentation.status ?? ''}`, presentation.title));
@@ -764,7 +794,7 @@ function boot() {
           for (const value of presentation.values ?? []) {
             card.append(el('div', 'output-label', value.label), el('div', 'body output-value', value.text));
           }
-          card.append(detailsFor(key, '查看完整执行记录', presentation.raw));
+          card.append(detailsFor(key, '查看完整执行记录', () => presentation.raw));
         }
       }
       if (message.error_message) card.append(el('p', 'effect-warning', clip(message.error_message, 2000)));
@@ -798,7 +828,17 @@ function boot() {
     }
     ui['messages'].replaceChildren(fragment);
     const total = view?.totalMessages ?? 0;
-    ui['history-note'].textContent = total > MAX_MESSAGES ? '显示最近的对话，完整记录保存在本机。' : (messages.length ? `${messages.length} 条消息` : '');
+    ui['history-note'].replaceChildren();
+    const visible = view?.historyVisible ?? MAX_MESSAGES;
+    if (total > visible) {
+      const earlier = el('button', 'quiet', `加载更早消息（当前 ${Math.min(visible, total)} / ${total}）`);
+      earlier.type = 'button';
+      earlier.addEventListener('click', () => {
+        const current = views.get(view.id);
+        if (current) { rememberView({ ...current, historyVisible: visible + MAX_MESSAGES }); renderView(); }
+      });
+      ui['history-note'].append(earlier);
+    } else ui['history-note'].textContent = messages.length ? `${messages.length} 条消息` : '';
     ui['live-text'].textContent = view?.liveText ?? '';
     ui['live-section'].hidden = !view?.liveText;
   }

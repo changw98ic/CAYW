@@ -27,6 +27,7 @@ struct Pending {
     reply: Option<oneshot::Sender<Reply>>,
     deadline: Option<Instant>,
     sent: bool,
+    chunks: Vec<u8>,
 }
 
 struct Metadata {
@@ -145,6 +146,7 @@ impl State {
                 reply: Some(reply),
                 deadline,
                 sent: false,
+                chunks: Vec::new(),
             },
         );
         permit.send(Outbound {
@@ -202,6 +204,7 @@ impl State {
                     .request_timeout
                     .map(|timeout| Instant::now() + timeout),
                 sent: false,
+                chunks: Vec::new(),
             },
         );
         permit.send(Outbound {
@@ -219,12 +222,38 @@ impl State {
         {
             return false;
         }
+        if let wire::Payload::Chunk { chunk } = response.payload {
+            let mut metadata = self.lock();
+            let Some(pending) = metadata.pending.get_mut(&response.id) else {
+                return false;
+            };
+            if !pending.sent
+                || chunk.offset != pending.chunks.len()
+                || (!chunk.done && chunk.data.is_empty())
+            {
+                return false;
+            }
+            pending.chunks.extend_from_slice(&chunk.data);
+            if !chunk.done {
+                return true;
+            }
+            let bytes = std::mem::take(&mut pending.chunks);
+            drop(metadata);
+            let Ok(terminal) = wire::decode::<Response>(&bytes, bytes.len()) else {
+                return false;
+            };
+            if terminal.id != response.id || matches!(terminal.payload, wire::Payload::Chunk { .. })
+            {
+                return false;
+            }
+            return self.complete(terminal);
+        }
         let pending = {
             let mut metadata = self.lock();
             if !metadata
                 .pending
                 .get(&response.id)
-                .is_some_and(|pending| pending.sent)
+                .is_some_and(|pending| pending.sent && pending.chunks.is_empty())
             {
                 return false;
             }

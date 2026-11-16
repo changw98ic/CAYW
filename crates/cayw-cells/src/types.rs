@@ -521,6 +521,9 @@ pub struct CellPage {
     pub outputs: Vec<OutputEntry>,
     pub has_more: bool,
     pub required_budget: Option<usize>,
+    /// The complete error remains stored; retry this page with required_budget.
+    #[serde(default)]
+    pub error_truncated: bool,
     pub outcome_unknown: bool,
     pub error: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -710,9 +713,5 @@ pub(crate) fn discard_json(value: Value) {
 }
 
 pub(crate) fn bounded_error(message: &str) -> String {
-    let mut end = message.len().min(160);
-    while !message.is_char_boundary(end) {
-        end -= 1;
-    }
-    message[..end].to_owned()
+    message.to_owned()
 }

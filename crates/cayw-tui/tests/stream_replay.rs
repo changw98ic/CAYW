@@ -45,7 +45,7 @@ fn update(cursor: u64, attempt: &Value, text: &str) -> Value {
     agent(
         cursor,
         attempt,
-        json!({"type":"message_update","message":message(text)}),
+        json!({"type":"message_update","event":{"type":"text_end","index":0,"partial":message(text)}}),
     )
 }
 
@@ -238,7 +238,7 @@ fn updates_and_terminals_require_the_entire_current_attempt_identity() {
             key => other[key] = json!("different"),
         }
         for event in [
-            json!({"type":"message_update","message":message("WRONG attempt")}),
+            json!({"type":"message_update","event":{"type":"snapshot","message":message("WRONG attempt")}}),
             json!({"type":"message_end","message":{"role":"assistant","timestamp":10,"content":[]}}),
             json!({"type":"agent_end","messages":[]}),
         ] {
@@ -388,4 +388,20 @@ fn unknown_frozen_cancel_and_prompt_ownership_survive_catchup_and_reconnect() {
         assert_eq!(app.selected().unwrap().cursor, 2);
         assert_eq!(app.input.text(), "owned prompt");
     }
+}
+
+#[test]
+fn incremental_deltas_keep_all_text_until_terminal_snapshot() {
+    let attempt = lease("delta", 1);
+    let mut app = attach(snapshot("running", 0, attempt.clone()));
+    let mut records = vec![start(1, &attempt), update(2, &attempt, "")];
+    for cursor in 3..203 {
+        records.push(agent(
+            cursor,
+            &attempt,
+            json!({"type":"message_update","event":{"type":"text_delta","index":0,"delta":"字"}}),
+        ));
+    }
+    app.apply_events("s1", json!(records)).unwrap();
+    assert_stream(&app, Some(&"字".repeat(200)), "incremental output");
 }

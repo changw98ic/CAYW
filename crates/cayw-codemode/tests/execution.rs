@@ -510,3 +510,28 @@ fn every_limit_must_be_non_zero() {
         assert_eq!(error.kind, ErrorKind::InvalidLimits);
     }
 }
+
+#[tokio::test]
+async fn byte_budget_does_not_reduce_accepted_host_json_depth() {
+    let code = mode(
+        Arc::new(Host::default()),
+        Limits {
+            output_bytes: Some(1024 * 1024),
+            ..Limits::default()
+        },
+    );
+    let report = code
+        .execute(
+            r#"
+        local value = {value = 1}
+        for _ = 1, 70 do value = {child = value} end
+        local result = cayw.call('echo', value)
+        for _ = 1, 70 do result = result.child end
+        return result.value
+    "#,
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(report.return_value, json!(1));
+}

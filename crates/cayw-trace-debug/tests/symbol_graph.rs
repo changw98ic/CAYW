@@ -221,7 +221,7 @@ fn lease() -> AttemptLease {
 
 fn event(cursor: u64, event: CoreEvent) -> EventRecord {
     EventRecord {
-        protocol_version: 3,
+        protocol_version: cayw_core::PROTOCOL_VERSION,
         session_id: "session".into(),
         cursor,
         timestamp: cayw_trace_debug::now_ms(),
@@ -529,5 +529,41 @@ fn workspace_file_change_refreshes_indexed_symbols_on_reingest() {
     assert!(
         condition.symbol.is_none(),
         "condition removed from source must clear symbol hang"
+    );
+}
+
+#[test]
+fn failed_source_refresh_is_visible_without_discarding_runtime_events() {
+    let workspace = tempfile::tempdir().unwrap();
+    std::fs::create_dir(workspace.path().join("examples")).unwrap();
+    let source = workspace.path().join("examples/demo.rs");
+    std::fs::write(&source, "pub fn input() {}\npub fn condition() {}\n").unwrap();
+    let store =
+        TraceStore::open_with_workspace(workspace.path().join("trace.json"), workspace.path())
+            .unwrap();
+    ingest_manifest(&store, demo_plan());
+    let before = store.snapshot();
+    assert!(!before.projects["exec"].symbol_hangs.is_empty());
+    std::fs::write(&source, [0xff]).unwrap();
+    store.refresh_symbol_hangs().unwrap();
+    let failed = store.snapshot();
+    assert_eq!(failed.events, before.events);
+    assert!(failed.projects["exec"].symbol_hangs.is_empty());
+    assert!(
+        failed.projects["exec"]
+            .gaps
+            .iter()
+            .any(|gap| gap.message.starts_with("源码挂载暂不可用："))
+    );
+    assert!(failed.sequence > before.sequence);
+    std::fs::write(&source, "pub fn input() {}\npub fn condition() {}\n").unwrap();
+    store.refresh_symbol_hangs().unwrap();
+    let restored = store.snapshot();
+    assert!(!restored.projects["exec"].symbol_hangs.is_empty());
+    assert!(
+        !restored.projects["exec"]
+            .gaps
+            .iter()
+            .any(|gap| gap.message.starts_with("源码挂载暂不可用："))
     );
 }

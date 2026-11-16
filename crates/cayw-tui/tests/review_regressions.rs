@@ -55,12 +55,10 @@ fn agent(cursor: u64, kind: &str, message: Value) -> Value {
         "message_update" => {
             message.stop_reason = StopReason::Pending;
             AgentEvent::MessageUpdate {
-                event: Box::new(AssistantEvent::TextDelta {
+                event: Box::new(AssistantEvent::TextEnd {
                     index: 0,
-                    delta: cayw_ai::content_text(&message.content),
-                    partial: message.clone(),
+                    partial: message,
                 }),
-                message,
             }
         }
         "message_end" => AgentEvent::MessageEnd {

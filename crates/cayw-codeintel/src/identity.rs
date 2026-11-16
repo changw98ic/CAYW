@@ -1,14 +1,11 @@
-//! Bounded path / name / hash validators for the symbol bridge.
+//! Path / name / hash validators for the symbol bridge.
 
-/// Workspace-relative paths: non-empty, ≤512 bytes, no NUL, no leading `/`,
+/// Workspace-relative paths: non-empty, no NUL, no leading `/`,
 /// no `..` segments, forward slashes only after normalization.
 pub fn normalize_path(value: &str) -> Result<String, String> {
     let trimmed = value.trim();
     if trimmed.is_empty() {
         return Err("path is empty".into());
-    }
-    if trimmed.len() > 512 {
-        return Err("path exceeds 512 bytes".into());
     }
     if trimmed.contains('\0') {
         return Err("path contains NUL".into());
@@ -32,14 +29,11 @@ pub fn normalize_path(value: &str) -> Result<String, String> {
     Ok(parts.join("/"))
 }
 
-/// Symbol names: non-empty Unicode, ≤256 chars after trim.
+/// Symbol names: non-empty Unicode after trim.
 pub fn validate_name(value: &str) -> Result<String, String> {
     let trimmed = value.trim();
     if trimmed.is_empty() {
         return Err("symbol name is empty".into());
-    }
-    if trimmed.chars().count() > 256 {
-        return Err("symbol name exceeds 256 characters".into());
     }
     if trimmed.contains('\0') {
         return Err("symbol name contains NUL".into());
@@ -47,14 +41,11 @@ pub fn validate_name(value: &str) -> Result<String, String> {
     Ok(trimmed.to_owned())
 }
 
-/// Symbol kinds: non-empty ASCII snake / kebab, ≤64 bytes (e.g. `function`).
+/// Symbol kinds: non-empty ASCII snake / kebab (e.g. `function`).
 pub fn validate_kind(value: &str) -> Result<String, String> {
     let trimmed = value.trim();
     if trimmed.is_empty() {
         return Err("symbol kind is empty".into());
-    }
-    if trimmed.len() > 64 {
-        return Err("symbol kind exceeds 64 bytes".into());
     }
     if !trimmed
         .bytes()

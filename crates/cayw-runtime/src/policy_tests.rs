@@ -228,3 +228,33 @@ fn final_content_check_uses_the_held_root_and_rejects_changed_store_limits() {
     std::fs::write(state_path, original).unwrap();
     fixture.check().unwrap();
 }
+
+#[test]
+fn scheduler_policy_accepts_values_above_former_product_caps() {
+    let config = crate::RuntimeConfig {
+        max_concurrent_runs: 1025,
+        max_queued_runs: 100001,
+        fairness_after_dispatches: 100001,
+        ..Default::default()
+    };
+    config.validate().unwrap();
+    let max = i64::MAX as usize;
+    crate::RuntimeConfig {
+        max_concurrent_runs: max,
+        max_queued_runs: max,
+        fairness_after_dispatches: 1,
+        ..Default::default()
+    }
+    .validate()
+    .unwrap();
+    if usize::BITS > 32 {
+        assert!(
+            crate::RuntimeConfig {
+                max_queued_runs: usize::MAX,
+                ..Default::default()
+            }
+            .validate()
+            .is_err()
+        );
+    }
+}

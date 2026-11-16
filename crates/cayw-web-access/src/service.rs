@@ -138,20 +138,23 @@ impl WebAccess {
         limit: Option<u32>,
     ) -> Result<SearchResult, WebAccessError> {
         let q = query.trim();
-        if q.is_empty() || q.len() > 8192 {
+        if q.is_empty() {
             return Err(WebAccessError::new(
                 FailureClass::InvalidUrl,
-                "search query must be 1..=8192 bytes",
+                "search query must be non-empty",
             ));
         }
-        let limit = {
-            // Validate first so a host configuration such as
-            // `max_search_limit = 0` is a known error, never a `clamp` panic.
-            self.limits.validate()?;
-            limit
-                .unwrap_or(self.limits.default_search_limit)
-                .clamp(1, self.limits.max_search_limit)
-        };
+        self.limits.validate()?;
+        let limit = limit.unwrap_or(self.limits.default_search_limit);
+        if limit == 0 || limit > self.limits.max_search_limit {
+            return Err(WebAccessError::new(
+                FailureClass::InvalidRequest,
+                format!(
+                    "requested search limit must be in 1..={}",
+                    self.limits.max_search_limit
+                ),
+            ));
+        }
         let mut response = self.search.search(q, limit).await?;
         let truncated = response.hits.len() as u32 >= limit;
         if response.hits.len() as u32 > limit {

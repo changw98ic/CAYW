@@ -381,7 +381,7 @@ async fn unauthenticated_query_decision_and_revocation_never_reach_runtime() {
     .enumerate()
     {
         let mut stream = TcpStream::connect(address).await.unwrap();
-        let frame = json!({"version":1,"id":format!("unauth-{index}"),"method":method,"params":{}});
+        let frame = json!({"version":cayw_ipc::PROTOCOL_VERSION,"id":format!("unauth-{index}"),"method":method,"params":{}});
         stream
             .write_all(format!("{frame}\n").as_bytes())
             .await

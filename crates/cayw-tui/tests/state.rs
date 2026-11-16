@@ -58,8 +58,8 @@ fn stream_cursor_deduplicates_and_invalid_records_do_not_consume_cursor() {
     let attempt = json!({"session_id":"s1","attempt_id":"a1","worker_id":"worker","fence":1});
     let records = json!([
         {"cursor":1,"attempt":attempt,"event":{"type":"attempt_started","lease":attempt}},
-        {"cursor": 2, "attempt":attempt, "event": {"type":"agent", "event":{"type": "message_update", "message": {"content": [{"type":"text", "text":"你"} ]}}}},
-        {"cursor": 3, "attempt":attempt, "event": {"type":"agent", "event":{"type": "message_update", "message": {"content": [{"type":"text", "text":"你好"} ]}}}}
+        {"cursor": 2, "attempt":attempt, "event": {"type":"agent", "event":{"type": "message_update", "event":{"type":"snapshot","message":{"content": [{"type":"text", "text":"你"} ]}}}}},
+        {"cursor": 3, "attempt":attempt, "event": {"type":"agent", "event":{"type": "message_update", "event":{"type":"snapshot","message":{"content": [{"type":"text", "text":"你好"} ]}}}}}
     ]);
     app.apply_events("s1", records.clone()).unwrap();
     app.apply_events("s1", records).unwrap();
@@ -296,7 +296,7 @@ fn stale_snapshot_does_not_rewind_successfully_consumed_events() {
     let attempt = json!({"session_id":"s1","attempt_id":"a1","worker_id":"worker","fence":1});
     app.apply_events("s1", json!([
         {"cursor":1,"attempt":attempt,"event":{"type":"attempt_started","lease":attempt}},
-        {"cursor":5,"attempt":attempt,"event":{"type":"agent","event":{"type":"message_update","message":{"content":[{"type":"text","text":"latest"}]}}}}
+        {"cursor":5,"attempt":attempt,"event":{"type":"agent","event":{"type":"message_update","event":{"type":"snapshot","message":{"content":[{"type":"text","text":"latest"}]}}}}}
     ])).unwrap();
     app.upsert_snapshot(snapshot("idle", 3), false).unwrap();
     assert_eq!(app.selected().unwrap().cursor, 5);
@@ -329,7 +329,7 @@ fn lost_connection_preserves_draft_and_cursor_and_does_not_resend_prompt() {
 fn malformed_event_page_is_atomic_and_other_session_cannot_advance_cursor() {
     let mut app = app("running");
     let bad = json!([
-        {"cursor":1, "event":{"type":"agent", "event":{"type":"message_update", "message":{"content":[{"type":"text", "text":"partial"}]}}}},
+        {"cursor":1, "event":{"type":"agent", "event":{"type":"message_update", "event":{"type":"snapshot","message":{"content":[{"type":"text", "text":"partial"}]}}}}},
         {"cursor":2, "event":{"type":"agent"}}
     ]);
     assert!(app.apply_events("s1", bad).is_err());
@@ -672,7 +672,7 @@ fn apply_list_validates_page_atomically_and_preserves_cursor_draft_and_attempt()
     let attempt = json!({"session_id":"s1","attempt_id":"a1","worker_id":"worker","fence":1});
     let records = json!([
         {"cursor": 1, "attempt": attempt, "event": {"type": "attempt_started", "lease": attempt}},
-        {"cursor": 2, "attempt": attempt, "event": {"type": "agent", "event": {"type": "message_update", "message": {"content": [{"type": "text", "text": "streaming text"}]}}}},
+        {"cursor": 2, "attempt": attempt, "event": {"type": "agent", "event": {"type": "message_update", "event":{"type":"snapshot","message":{"content": [{"type": "text", "text": "streaming text"}]}}}}},
         {"cursor": 3, "attempt": attempt, "event": {"type": "agent", "event": {"type": "tool_execution_end", "call": {"id": "call-interrupted", "name": "fs.write"}, "result": {"outcome_unknown": true, "content": "interrupted"}}}}
     ]);
     app.apply_events("s1", records).unwrap();

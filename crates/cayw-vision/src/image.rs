@@ -77,11 +77,11 @@ impl ImageBuffer {
         }
         // Identity covers dimensions + pixels so same pixels at different
         // sizes never collide, and pure-pixel ops stay content-addressed.
-        let mut identity = Vec::with_capacity(8 + rgba.len());
-        identity.extend_from_slice(&width.to_be_bytes());
-        identity.extend_from_slice(&height.to_be_bytes());
-        identity.extend_from_slice(&rgba);
-        let sha256 = content_sha256(&identity);
+        let mut identity = Sha256::new();
+        identity.update(width.to_be_bytes());
+        identity.update(height.to_be_bytes());
+        identity.update(&rgba);
+        let sha256 = format!("{:x}", identity.finalize());
         Ok(Self {
             width,
             height,

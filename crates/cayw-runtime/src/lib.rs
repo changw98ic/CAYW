@@ -292,11 +292,15 @@ impl RuntimeConfig {
                 .flatten()
                 .any(|d| d.is_zero() || std::time::Instant::now().checked_add(d).is_none());
         if self.max_concurrent_runs == 0
-            || self.max_concurrent_runs > 1024
+            || self.max_concurrent_runs > i64::MAX as usize
             || self.max_queued_runs < self.max_concurrent_runs
-            || self.max_queued_runs > 100_000
+            || self.max_queued_runs > i64::MAX as usize
             || self.fairness_after_dispatches == 0
-            || self.fairness_after_dispatches > 100_000
+            || self.fairness_after_dispatches > i64::MAX as usize
+            || self
+                .fairness_after_dispatches
+                .checked_add(self.max_queued_runs - 1)
+                .is_none()
             || budgets_invalid
             || self.grant_lifetime.is_zero()
             || std::time::Instant::now()
@@ -521,11 +525,6 @@ impl Runtime {
         config: RuntimeConfig,
     ) -> Result<Self, RuntimeError> {
         let mut config = config;
-        // Normalize orderable optional limits before validation, binding and
-        // store construction so every layer sees the same values.
-        if let Some(content) = config.content.take() {
-            config.content = Some(content.normalized());
-        }
         config.validate()?;
         if model.provider.trim().is_empty() || model.id.trim().is_empty() {
             return Err(RuntimeError::InvalidInput(

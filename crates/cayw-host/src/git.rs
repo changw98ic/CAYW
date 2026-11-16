@@ -16,12 +16,10 @@ use cayw_codemode::CapabilityError;
 use cayw_device::{DirectoryProcessSpec, ProcessIo, ProcessResult, TerminationReason};
 use serde_json::{Value, json};
 use std::collections::BTreeSet;
-use std::io::{self, Read};
+use std::io::{self, Read, Write};
 use std::path::{Component, Path, PathBuf};
 use std::time::Instant;
 
-const MAX_MESSAGE_BYTES: usize = 64 * 1024;
-const MAX_STAGE_PATHS: usize = 256;
 const WORKTREE_ROOT: &str = ".cayw-worktrees";
 const MAX_OUTPUT_DETAIL: usize = 8192;
 
@@ -133,8 +131,8 @@ pub(crate) fn definitions(config: &HostConfig) -> Vec<ToolDefinition> {
         ),
         definition(
             "git.log",
-            "Read a bounded commit log without decorations or signature commands.",
-            json!({"limit":{"type":"integer", "minimum":1, "maximum":100}}),
+            "Read complete commit history, or an explicit limited prefix, without decorations or signature commands.",
+            json!({"limit":{"type":"integer", "minimum":1}}),
             &[],
         ),
         definition(
@@ -158,7 +156,7 @@ pub(crate) fn definitions(config: &HostConfig) -> Vec<ToolDefinition> {
             "git.stage",
             "Stage exact workspace file paths after verifying HEAD and the current index tree. No implicit pathspec expansion.",
             json!({
-                "paths":{"type":"array", "items":path_value(), "minItems":1, "maxItems":MAX_STAGE_PATHS, "uniqueItems":true},
+                "paths":{"type":"array", "items":path_value(), "minItems":1, "uniqueItems":true},
                 "expected_head":object_id(),
                 "expected_index_tree":object_id()
             }),
@@ -170,7 +168,7 @@ pub(crate) fn definitions(config: &HostConfig) -> Vec<ToolDefinition> {
             "git.commit",
             "Commit the verified index with host-owned author and committer identity. Hooks and signing are disabled.",
             json!({
-                "message":{"type":"string", "minLength":1, "maxLength":MAX_MESSAGE_BYTES},
+                "message":{"type":"string", "minLength":1},
                 "expected_head":object_id(),
                 "expected_index_tree":object_id()
             }),
@@ -291,8 +289,8 @@ fn stage_paths<'a>(
         .get("paths")
         .and_then(Value::as_array)
         .ok_or_else(|| failure("paths must be a nonempty array"))?;
-    if values.is_empty() || values.len() > MAX_STAGE_PATHS {
-        return Err(failure("paths must contain between 1 and 256 entries"));
+    if values.is_empty() {
+        return Err(failure("paths must contain at least one entry"));
     }
     let mut paths = Vec::with_capacity(values.len());
     let mut seen = BTreeSet::new();
@@ -347,13 +345,8 @@ pub(crate) fn validate_arguments(
                 .get("message")
                 .and_then(Value::as_str)
                 .ok_or_else(|| failure("commit message must be a string"))?;
-            if message.trim().is_empty()
-                || message.len() > MAX_MESSAGE_BYTES
-                || message.contains('\0')
-            {
-                return Err(failure(
-                    "commit message must be nonempty, NUL-free, and within the byte limit",
-                ));
+            if message.trim().is_empty() || message.contains('\0') {
+                return Err(failure("commit message must be nonempty and NUL-free"));
             }
             object_id_value(arguments.get("expected_head"), "expected_head")?;
             object_id_value(arguments.get("expected_index_tree"), "expected_index_tree")?;
@@ -1109,9 +1102,22 @@ async fn stage(
     }
     repo.verify(host)?;
 
+    // Transfer data through a private NUL-separated file, not argv, so normal
+    // large path sets do not hit the platform's aggregate command-line limit.
+    let (input_guard, mut input) = filesystem::temporary(&host.root)?;
+    for path in &paths {
+        check(cancel, deadline)?;
+        input.write_all(path.as_bytes()).map_err(io_error)?;
+        input.write_all(&[0]).map_err(io_error)?;
+    }
+    input.flush().map_err(io_error)?;
+    drop(input);
     let mut args = write_base_args();
-    args.extend(["add".into(), "--".into()]);
-    args.extend(paths.iter().map(|path| (*path).to_string()));
+    args.extend([
+        "add".into(),
+        format!("--pathspec-from-file={}", input_guard.name),
+        "--pathspec-file-nul".into(),
+    ]);
     let result = match run(host, policy, args, cancel, deadline).await {
         Ok(result) => result,
         Err(error) => {
@@ -1184,14 +1190,18 @@ async fn commit(
     }
     repo.verify(host)?;
 
+    let (input_guard, mut input) = filesystem::temporary(&host.root)?;
+    input.write_all(message.as_bytes()).map_err(io_error)?;
+    input.flush().map_err(io_error)?;
+    drop(input);
     let mut args = write_base_args();
     args.extend([
         "commit".into(),
         "--no-verify".into(),
         "--no-gpg-sign".into(),
         "--cleanup=verbatim".into(),
-        "-m".into(),
-        message.into(),
+        "-F".into(),
+        input_guard.name.clone(),
     ]);
     let result = match run(host, policy, args, cancel, deadline).await {
         Ok(result) => result,

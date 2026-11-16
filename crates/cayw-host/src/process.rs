@@ -169,10 +169,9 @@ fn git_args(name: &str, arguments: &Value, excludes_file: &str) -> Vec<String> {
                 ]
                 .map(str::to_string),
             );
-            args.push(format!(
-                "--max-count={}",
-                arguments.get("limit").and_then(Value::as_u64).unwrap_or(20)
-            ));
+            if let Some(limit) = arguments.get("limit").and_then(Value::as_u64) {
+                args.push(format!("--max-count={limit}"));
+            }
             args.push("--".into());
         }
         "git.show" => {
@@ -1187,11 +1186,15 @@ pub(crate) async fn execute_git_read(
         .map_err(device_error)?;
     // Preserve an uncertain process terminal before reporting a read conflict.
     // A completed read with a replaced repository or index discards its data.
-    let result = process_value(
+    let mut result = process_value(
         result,
         output_filter_options(host, name),
         host.config.content_store.as_deref(),
     )?;
+    if name == "git.log" {
+        result["history_limited"] = json!(arguments.get("limit").is_some());
+        result["requested_limit"] = arguments.get("limit").cloned().unwrap_or(Value::Null);
+    }
     identity.verify(host)?;
     Ok(result)
 }

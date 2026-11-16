@@ -26,13 +26,6 @@ pub struct ContentConfig {
     pub limits: Limits,
 }
 impl ContentConfig {
-    /// Normalize orderable soft limits. The durable binding, validation and
-    /// store all use the same normalized values.
-    pub fn normalized(mut self) -> Self {
-        self.limits = self.limits.normalized();
-        self
-    }
-
     pub fn validate(&self) -> Result<(), RuntimeError> {
         Id::new(&self.device_id)?;
         self.limits.validate()?;
@@ -326,8 +319,6 @@ pub(crate) fn open(
     workspace: &Path,
     config: Option<&ContentConfig>,
 ) -> Result<Option<Arc<ContentStore>>, RuntimeError> {
-    let normalized = config.map(|config| config.clone().normalized());
-    let config = normalized.as_ref();
     if let Some(config) = config {
         config.validate()?;
         if config.directory.starts_with(workspace) || workspace.starts_with(&config.directory) {
@@ -352,8 +343,7 @@ pub(crate) fn check_binding(
     config: Option<&ContentConfig>,
     store: Option<&ContentStore>,
 ) -> Result<(), RuntimeError> {
-    let normalized = config.map(|config| config.clone().normalized());
-    let expected = parse_binding(Some(&encode_identity(normalized.as_ref(), store)?))?;
+    let expected = parse_binding(Some(&encode_identity(config, store)?))?;
     if read_binding(database)? != expected {
         return Err(binding_error());
     }

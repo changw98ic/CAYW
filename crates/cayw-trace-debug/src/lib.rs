@@ -14,7 +14,7 @@ use cayw_core::EventRecord;
 use std::{
     env,
     fs::{File, OpenOptions},
-    io::{BufReader, BufWriter, Write},
+    io::{BufReader, BufWriter, Read, Write},
     os::unix::fs::OpenOptionsExt,
     path::{Path, PathBuf},
     sync::{Arc, Mutex},
@@ -39,6 +39,88 @@ impl From<serde_json::Error> for Error {
             None => Self::Json(error),
         }
     }
+}
+
+/// Preserve byte-exact evidence independently of the source file, including
+/// when validation fails and a user later repairs the original in place.
+fn archive_v3_document(path: &Path) -> Result<(), Error> {
+    let mut archive = path.with_extension("v3-evidence.json");
+    reject_symlink(&archive)?;
+    if archive.try_exists()? {
+        let mut source = File::open(path)?;
+        let mut evidence = File::open(&archive)?;
+        let mut remaining = source.metadata()?.len();
+        let mut same = remaining == evidence.metadata()?.len();
+        let mut left = [0u8; 64 * 1024];
+        let mut right = [0u8; 64 * 1024];
+        while same && remaining > 0 {
+            let count = remaining.min(left.len() as u64) as usize;
+            source.read_exact(&mut left[..count])?;
+            evidence.read_exact(&mut right[..count])?;
+            same = left[..count] == right[..count];
+            remaining -= count as u64;
+        }
+        if same {
+            return Ok(());
+        }
+        // A repaired input is another piece of evidence, never an overwrite.
+        archive = path.with_extension(format!("v3-{}.evidence.json", uuid::Uuid::new_v4()));
+    }
+
+    let temp = path.with_extension(format!("{}.evidence.tmp", uuid::Uuid::new_v4()));
+    let result = (|| -> Result<(), Error> {
+        let mut output = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(&temp)?;
+        std::io::copy(&mut File::open(path)?, &mut output)?;
+        output.sync_all()?;
+        // Link the completed copy atomically without replacing existing evidence.
+        std::fs::hard_link(&temp, &archive)?;
+        File::open(
+            path.parent()
+                .filter(|p| !p.as_os_str().is_empty())
+                .unwrap_or(Path::new(".")),
+        )?
+        .sync_all()?;
+        Ok(())
+    })();
+    let cleanup = std::fs::remove_file(&temp);
+    result?;
+    cleanup?;
+    Ok(())
+}
+
+fn read_document(path: &Path) -> Result<(Document, bool), Error> {
+    let file = match File::open(path) {
+        Ok(file) => file,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok((Document::default(), false));
+        }
+        Err(error) => return Err(error.into()),
+    };
+    let mut raw: serde_json::Value = serde_json::from_reader(BufReader::new(file))?;
+    let mut migrated = false;
+    if let Some(events) = raw
+        .get_mut("events")
+        .and_then(serde_json::Value::as_array_mut)
+    {
+        if events.iter().any(|event| event["protocol_version"] == 3) {
+            archive_v3_document(path)?;
+        }
+        for event in events {
+            if event["protocol_version"] == 3 {
+                let canonical = cayw_core::migrate_v3_event_json(&serde_json::to_string(event)?)
+                    .map_err(|error| Error::Invalid(error.to_string()))?;
+                *event = serde_json::to_value(canonical)?;
+                migrated = true;
+            } else if event["protocol_version"] != cayw_core::PROTOCOL_VERSION {
+                return Err(Error::Invalid("追踪事件版本不受支持".into()));
+            }
+        }
+    }
+    Ok((serde_json::from_value(raw)?, migrated))
 }
 
 pub struct TraceStore {
@@ -116,11 +198,7 @@ impl TraceStore {
         lock.try_lock()
             .map_err(|_| Error::Conflict("追踪文件正由另一个插件进程使用".into()))?;
         reject_symlink(&path)?;
-        let document: Document = match File::open(&path) {
-            Ok(file) => serde_json::from_reader(BufReader::new(file))?,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Document::default(),
-            Err(error) => return Err(error.into()),
-        };
+        let (document, migrated) = read_document(&path)?;
         if document.schema != TRACE_SCHEMA {
             return Err(Error::Invalid("追踪文件版本不受支持".into()));
         }
@@ -134,7 +212,7 @@ impl TraceStore {
         });
         // A lost plugin process cannot resume a partially evaluated Lua stack.
         let mut recovered = store.snapshot();
-        let mut changed = false;
+        let mut changed = migrated;
         for project in recovered.projects.values_mut() {
             if project.version() > 1
                 && project
@@ -198,9 +276,9 @@ impl TraceStore {
         let mut next = current.clone();
         let mut changed = false;
         for project in next.projects.values_mut() {
-            let before = project.symbol_hangs.clone();
-            link_project(project, &self.linker, self.workspace_root.as_deref())?;
-            if project.symbol_hangs != before {
+            let before = (project.symbol_hangs.clone(), project.gaps.clone());
+            link_project(project, &self.linker, self.workspace_root.as_deref());
+            if (project.symbol_hangs.clone(), project.gaps.clone()) != before {
                 changed = true;
             }
         }
@@ -278,7 +356,7 @@ impl TraceStore {
                 .entry(event.session_id.clone())
                 .or_default()
                 .after;
-            if event.protocol_version != 3 {
+            if event.protocol_version != cayw_core::PROTOCOL_VERSION {
                 return Err(Error::Invalid("Runtime 事件版本不受支持".into()));
             }
             if event.cursor <= after {
@@ -304,7 +382,7 @@ impl TraceStore {
         }
         if changed {
             for project in next.projects.values_mut() {
-                link_project(project, &self.linker, self.workspace_root.as_deref())?;
+                link_project(project, &self.linker, self.workspace_root.as_deref());
             }
             next.sequence += 1;
             self.persist(&next)?;
@@ -443,7 +521,7 @@ impl TraceStore {
             created_at_ms: now_ms(),
             reason: reason.into(),
         });
-        link_project(project, &self.linker, self.workspace_root.as_deref())?;
+        link_project(project, &self.linker, self.workspace_root.as_deref());
         self.commit(document)?;
         let local_mode = if changed_node.is_some() {
             "recompute"
@@ -547,21 +625,31 @@ impl TraceStore {
 ///
 /// When `workspace` is set, plan paths are published (and re-published on
 /// content-digest change) through the codeintel workspace producer before hanging.
-fn link_project(
-    project: &mut Project,
-    linker: &SymbolGraphLinker,
-    workspace: Option<&Path>,
-) -> Result<(), Error> {
+fn link_project(project: &mut Project, linker: &SymbolGraphLinker, workspace: Option<&Path>) {
+    const SOURCE_GAP: &str = "源码挂载暂不可用：";
+    project
+        .gaps
+        .retain(|gap| !gap.message.starts_with(SOURCE_GAP));
     let Some(revision) = project.revisions.last() else {
         project.symbol_hangs.clear();
-        return Ok(());
+        return;
     };
-    if let Some(root) = workspace {
-        let _ = feed_plan_from_workspace(linker.bridge(), &revision.plan, root)
-            .map_err(Error::Invalid)?;
+    let linked = (|| {
+        if let Some(root) = workspace {
+            feed_plan_from_workspace(linker.bridge(), &revision.plan, root)?;
+        }
+        linker.hang_plan(&revision.plan)
+    })();
+    match linked {
+        Ok(hangs) => project.symbol_hangs = hangs,
+        Err(error) => {
+            project.symbol_hangs.clear();
+            project.gaps.push(Gap {
+                node_id: None,
+                message: format!("{SOURCE_GAP}{error}"),
+            });
+        }
     }
-    project.symbol_hangs = linker.hang_plan(&revision.plan).map_err(Error::Invalid)?;
-    Ok(())
 }
 
 fn default_workspace_root() -> PathBuf {

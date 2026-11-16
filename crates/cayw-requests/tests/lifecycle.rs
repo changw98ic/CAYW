@@ -729,17 +729,16 @@ fn budgets_preserve_space_for_revoke_task_end_and_immutable_events() {
 }
 
 #[test]
-fn event_failure_rolls_back_projection_and_oversized_input_never_persists() {
+fn event_failure_rolls_back_projection_and_long_gap_is_preserved() {
     let fixture = Fixture::new();
     let store = fixture.open();
     fixture.start(&store, TaskIntent::General);
     let mut oversized = input();
     oversized.gap = "x".repeat(2049);
-    assert!(
-        store
-            .request(&identity(), &fixture.catalog, oversized)
-            .is_err()
-    );
+    let long_gap = store
+        .request(&identity(), &fixture.catalog, oversized)
+        .unwrap();
+    assert_eq!(long_gap.input.gap.len(), 2049);
     let before = store.events(&identity(), 0, 64).unwrap().len();
     let connection = rusqlite::Connection::open(&fixture.path).unwrap();
     connection.execute_batch("CREATE TRIGGER test_fail_event BEFORE INSERT ON request_events BEGIN SELECT RAISE(ABORT,'injected event failure'); END;").unwrap();
@@ -1288,4 +1287,77 @@ async fn revoke_during_upstream_permission_wait_defeats_previously_valid_check()
             .await
             .is_err()
     );
+}
+
+#[test]
+fn large_catalog_arguments_and_task_rows_use_host_schema_and_explicit_budget() {
+    let fixture = Fixture::new();
+    let defs: Vec<_> = (0..129)
+        .map(|n| ToolDefinition {
+            name: format!("tool{n}"),
+            description: "fixture".into(),
+            parameters: json!({"type":"object"}),
+        })
+        .collect();
+    let mut deep = json!({"leaf":true});
+    for _ in 0..40 {
+        deep = json!({"next":deep});
+    }
+    let arguments = json!({"text":"x".repeat(200*1024),"deep":deep,"rows":vec![0;5000]});
+    let scopes: Vec<_> = (0..65)
+        .map(|n| OperationScope::exact(format!("scope{n}"), "tool0", arguments.clone(), "policy"))
+        .collect();
+    let catalog = OperationCatalog::bind(
+        host_identity(&fixture.root, &HostConfig::default(), "wide").unwrap(),
+        &defs,
+        scopes,
+    )
+    .unwrap();
+    let store = fixture.open();
+    store
+        .start_task(&identity(), TaskIntent::General, &catalog, &actor())
+        .unwrap();
+    let request = store
+        .request(
+            &identity(),
+            &catalog,
+            RequestInput {
+                purpose: "p".repeat(3000),
+                gap: "g".repeat(3000),
+                operation_id: "scope0".into(),
+                capability: "tool0".into(),
+                arguments,
+            },
+        )
+        .unwrap();
+    assert!(
+        request
+            .validity_reasons
+            .contains(&ValidityReason::ExactHostOperation)
+    );
+    let next = store
+        .replace_attempt(&identity(), "next", &catalog, &actor(), "resume")
+        .unwrap();
+    assert_eq!(next.attempt_id, "next");
+    drop(store);
+    fixture.open().check_task(&next, &catalog).unwrap();
+    let database = rusqlite::Connection::open(&fixture.path).unwrap();
+    let plan: String = database.query_row(
+        "EXPLAIN QUERY PLAN SELECT data FROM request_tasks WHERE json_extract(data,'$.state.state') IN ('active','closing') ORDER BY id",
+        [], |row| row.get(3),
+    ).unwrap();
+    assert!(
+        plan.contains("request_active_tasks"),
+        "unfinished-state accounting must use the active-task index: {plan}"
+    );
+
+    let tight = Fixture::with_config(RequestConfig {
+        max_state_bytes: Some(1024),
+        ..Default::default()
+    });
+    let tight_store = tight.open();
+    assert!(matches!(
+        tight_store.start_task(&identity(), TaskIntent::General, &catalog, &actor()),
+        Err(RequestError::Budget)
+    ));
 }

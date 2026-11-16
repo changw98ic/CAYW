@@ -105,7 +105,7 @@ async fn invalid_web_and_vision_config_disable_only_those_services() {
                 search: cayw_web_access::SearchBackend::Fixture,
             }),
             vision: Some(cayw_vision::Limits {
-                input_bytes: 0,
+                input_bytes: Some(0),
                 ..Default::default()
             }),
             ..Default::default()

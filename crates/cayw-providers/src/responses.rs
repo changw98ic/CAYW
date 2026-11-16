@@ -7,10 +7,6 @@ use futures::{StreamExt, stream::BoxStream};
 use serde_json::{Value, json};
 use std::collections::{BTreeMap, BTreeSet};
 
-// A single tool argument string may arrive as many bounded deltas. This cap is
-// independent of the stream-wide byte limit and is checked before appending.
-const MAX_ARGUMENT_BYTES: usize = 8 * 1024 * 1024;
-
 pub(crate) fn request_body(request: &ModelRequest) -> Result<Value> {
     let mut prepared = common::prepare_request(request, Format::Responses)?;
     let system = current_system(&request.messages);
@@ -102,9 +98,7 @@ fn history_items(assistant: &AssistantMessage) -> Result<Vec<Value>> {
     let mut normalized = Vec::new();
     let mut seen_items = BTreeSet::new();
     let mut seen_calls = BTreeSet::new();
-    let mut limits = common::ResponseLimits::default();
     for item in output {
-        limits.fragment()?;
         common::object(item)?;
         let id = common::string(item, "id")?;
         if id.trim().is_empty() {
@@ -139,7 +133,6 @@ fn history_items(assistant: &AssistantMessage) -> Result<Vec<Value>> {
                 }
             }
             "function_call" => {
-                limits.tool_call()?;
                 let call_id = common::string(item, "call_id")?;
                 if call_id.trim().is_empty() || !seen_calls.insert(call_id.to_owned()) {
                     return Err("Invalid or duplicate Responses replay call ID".into());
@@ -164,7 +157,6 @@ pub(crate) struct State {
     created: bool,
     completed: bool,
     items: Vec<Item>,
-    limits: common::ResponseLimits,
 }
 
 struct Item {
@@ -225,7 +217,6 @@ impl State {
             created: false,
             completed: false,
             items: Vec::new(),
-            limits: common::ResponseLimits::default(),
         }
     }
 
@@ -405,7 +396,6 @@ impl State {
                         );
                     }
                 }
-                self.limits.tool_call()?;
                 let content_index = self.message.content.len();
                 self.message.content.push(Content::ToolCall(ToolCall::new(
                     call_id,
@@ -470,7 +460,6 @@ impl State {
                 if part_index != parts.len() {
                     return Err("Responses content parts must be added in order".into());
                 }
-                self.limits.fragment()?;
                 let content_index = self.message.content.len();
                 self.message.content.push(Content::text(text));
                 parts.push(TextPart {
@@ -499,7 +488,6 @@ impl State {
                 if part_index != parts.len() {
                     return Err("Responses reasoning content parts must be added in order".into());
                 }
-                self.limits.fragment()?;
                 parts.push(ReasoningPart {
                     text: text.to_owned(),
                     text_done: false,
@@ -539,7 +527,6 @@ impl State {
             part.text.push_str(delta);
             part.content_index
         };
-        self.limits.fragment()?;
         events.push(common::text_delta(&mut self.message, content_index, delta));
         Ok(())
     }
@@ -721,7 +708,7 @@ impl State {
         let index = usize_field(value, "output_index")?;
         let item_id = common::string(value, "item_id")?;
         let delta = common::string(value, "delta")?;
-        let (content_index, partial) = {
+        let content_index = {
             let item = self
                 .items
                 .get_mut(index)
@@ -743,18 +730,15 @@ impl State {
             if *arguments_done {
                 return Err("Responses argument delta arrived after its done event".into());
             }
-            if buffer.len().saturating_add(delta.len()) > MAX_ARGUMENT_BYTES {
-                return Err("Responses tool arguments exceed the size limit".into());
-            }
             buffer.push_str(delta);
-            (*content_index, self.message.clone())
+            *content_index
         };
-        self.limits.fragment()?;
-        events.push(AssistantEvent::ToolCallDelta {
+        let event = AssistantEvent::ToolCallDelta {
             index: content_index,
             delta: delta.to_owned(),
-            partial,
-        });
+        };
+        event.apply_to(&mut self.message)?;
+        events.push(event);
         Ok(())
     }
 
@@ -951,9 +935,7 @@ impl State {
         self.stable_identity(response)?;
         if let Some(usage) = response.get("usage").filter(|usage| !usage.is_null()) {
             self.usage(usage)?;
-            events.push(AssistantEvent::UsageUpdate {
-                partial: self.message.clone(),
-            });
+            events.push(AssistantEvent::usage_update(&self.message));
         }
         let output = response
             .get("output")

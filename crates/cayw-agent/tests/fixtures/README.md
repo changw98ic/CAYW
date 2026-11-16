@@ -4,7 +4,7 @@
 `AgentEvent` variants plus `ToolResult` values covering `outcome_unknown` and the
 optional fields. It pins field names and bytes so the relocation of the
 definitions into `cayw-agent-types` cannot change the contract silently.
-`crates/cayw-agent/tests/golden_events.rs` only reads it.
+The current test reads the Core v4 sample described below.
 
 Do not regenerate it from the moved tree. The committed tests must always
 compare against the frozen bytes.
@@ -33,3 +33,10 @@ normal test run.
   `usage` and `terminate` fields.
 - Generation command (sealed baseline copy):
   `cargo test -p cayw-agent --test golden_events -- --ignored generate_golden_events`
+
+## Core v4 contract
+
+`agent_events.v4.golden.json` is the separately reviewed incremental event sample.
+`MessageUpdate` contains only `event`; `TextDelta` contains its index and delta,
+with no duplicate complete message. The active golden test uses this sample.
+The original pre-move sample above remains unchanged as historical evidence.

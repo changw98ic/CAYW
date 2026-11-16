@@ -667,6 +667,26 @@ async fn slot_loss_after_execution_commit_settles_core_before_the_known_refusal(
     let mut worker = spawn_prompt(&h.rt, &h.session);
     let round = next_round(&mut h.rounds).await;
     tool(round, "exec-a", exec("return 1"));
+    // The known refusal is a normal tool result. The worker reacquires its
+    // execution slot to let the model consume it; the controlled fixture must
+    // answer that next model round rather than leave it waiting forever.
+    let round = next_round(&mut h.rounds).await;
+    let Some(cayw_ai::Message::ToolResult(result)) = round.request.messages.last() else {
+        panic!("the next round must receive the cell admission refusal");
+    };
+    assert!(result.is_error);
+    assert!(!result.outcome_unknown);
+    let refused = h.rt.get(&h.session).unwrap();
+    assert_eq!(refused.executions.len(), 1);
+    assert_eq!(
+        refused.executions[0].state,
+        cayw_core::ExecutionState::Cancelled
+    );
+    assert!(matches!(
+        refused.executions[0].terminal,
+        Some(cayw_core::ExecutionOutcome::Cancelled { .. })
+    ));
+    final_text(round, "known cell refusal handled");
     let view = tokio::time::timeout(Duration::from_secs(15), &mut worker)
         .await
         .expect("the refused cell must not wedge the worker")

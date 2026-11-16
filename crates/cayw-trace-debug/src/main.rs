@@ -55,8 +55,8 @@ impl Config {
         }
         sessions.sort();
         sessions.dedup();
-        if sessions.is_empty() || sessions.len() > 16 {
-            return Err(Error::Invalid("需要1..16个 --session".into()));
+        if sessions.is_empty() {
+            return Err(Error::Invalid("至少需要一个 --session".into()));
         }
         let ipc_token = token("CAYW_IPC_TOKEN")?;
         let web_token = token("CAYW_TRACE_WEB_TOKEN")?;
@@ -127,7 +127,7 @@ pub(crate) async fn observe(
             .await;
         if !health
             .as_ref()
-            .is_ok_and(|health| health["protocol_version"] == 3)
+            .is_ok_and(|health| health["protocol_version"] == cayw_core::PROTOCOL_VERSION)
         {
             client.close().await;
             return Err(Error::Invalid(

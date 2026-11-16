@@ -111,7 +111,7 @@ async fn all_four_capabilities_reject_unknown_fields_and_zero_result_limits() {
 }
 
 #[tokio::test]
-async fn reads_stop_at_file_depth_ignore_bytes_and_output_limits() {
+async fn reads_honor_explicit_file_depth_output_limits_and_allow_large_ignore_files() {
     let temp = tempfile::tempdir().unwrap();
     fs::create_dir_all(temp.path().join("a/b")).unwrap();
     fs::write(temp.path().join("a/b/c"), "x".repeat(100)).unwrap();
@@ -140,10 +140,9 @@ async fn reads_stop_at_file_depth_ignore_bytes_and_output_limits() {
     fs::write(temp.path().join(".gitignore"), "#".repeat(65537)).unwrap();
     let ws = open(&temp, Limits::default());
     assert!(
-        !call(&ws, "fs.glob", json!({"path":".","pattern":"**/*"}))
+        call(&ws, "fs.glob", json!({"path":".","pattern":"**/*"}))
             .await
-            .unwrap_err()
-            .outcome_unknown
+            .is_ok()
     );
     assert!(
         call(
@@ -253,20 +252,19 @@ async fn outline_has_depth_bound_and_correct_shebang_and_unicode_spans() {
 }
 
 #[tokio::test]
-async fn finite_repeated_search_work_and_expired_deadlines_are_known_failures() {
+async fn repeated_search_completes_and_expired_deadlines_remain_errors() {
     let temp = tempfile::tempdir().unwrap();
-    fs::write(temp.path().join("a"), "x".repeat(100_000)).unwrap();
+    fs::write(temp.path().join("a"), "x\n".repeat(100_000)).unwrap();
     let ws = open(&temp, Limits::default());
-    assert!(
-        !call(
-            &ws,
-            "fs.grep",
-            json!({"path":"a","pattern":"x","max_matches":100_000})
-        )
-        .await
-        .unwrap_err()
-        .outcome_unknown
-    );
+    let result = call(
+        &ws,
+        "fs.grep",
+        json!({"path":"a","pattern":"x","max_matches":100_000}),
+    )
+    .await
+    .unwrap();
+    assert_eq!(result["matches"].as_array().unwrap().len(), 100_000);
+    assert_eq!(result["truncated"], false);
     let error = ws
         .execute_until(
             "fs.grep",
@@ -277,4 +275,68 @@ async fn finite_repeated_search_work_and_expired_deadlines_are_known_failures() 
         .await
         .unwrap_err();
     assert!(error.message.contains("deadline"));
+}
+
+#[tokio::test]
+async fn outline_accepts_many_shallow_declarations_without_semicolons() {
+    let temp = tempfile::tempdir().unwrap();
+    let source = (0..1100)
+        .map(|n| format!("fn f{n}() {{}}\n"))
+        .collect::<String>();
+    fs::write(temp.path().join("a.rs"), source).unwrap();
+    let ws = open(&temp, Limits::default());
+    let result = call(
+        &ws,
+        "code.outline",
+        json!({"path":"a.rs","language":"rust","max_symbols":1100}),
+    )
+    .await
+    .unwrap();
+    assert_eq!(result["symbols"].as_array().unwrap().len(), 1100);
+    assert_eq!(result["truncated"], false);
+}
+
+#[tokio::test]
+async fn long_recursive_expression_is_rejected_before_recursive_parsing() {
+    let temp = tempfile::tempdir().unwrap();
+    fs::write(
+        temp.path().join("recursive.rs"),
+        format!("fn f() {{ let _ = {}true; }}", "!".repeat(10_000)),
+    )
+    .unwrap();
+    let ws = open(&temp, Limits::default());
+    let error = call(
+        &ws,
+        "code.outline",
+        json!({"path":"recursive.rs","language":"rust"}),
+    )
+    .await
+    .unwrap_err();
+    assert!(error.message.contains("complexity"));
+    assert!(!error.outcome_unknown);
+}
+
+#[tokio::test]
+async fn outline_accepts_long_iterative_binary_and_postfix_expressions() {
+    let temp = tempfile::tempdir().unwrap();
+    let ws = open(&temp, Limits::default());
+    for (name, expression) in [
+        ("binary", format!("{}1", "1+".repeat(10_000))),
+        ("postfix", format!("x{}", ".f()".repeat(10_000))),
+    ] {
+        fs::write(
+            temp.path().join("large.rs"),
+            format!("fn {name}() {{ let _ = {expression}; }}"),
+        )
+        .unwrap();
+        let result = call(
+            &ws,
+            "code.outline",
+            json!({"path":"large.rs","language":"rust"}),
+        )
+        .await
+        .unwrap();
+        assert_eq!(result["symbols"][0]["name"], name);
+        assert_eq!(result["truncated"], false);
+    }
 }

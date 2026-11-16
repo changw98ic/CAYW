@@ -739,12 +739,21 @@ async fn capacity_output_and_store_limits_are_enforced_without_cursor_overwrite(
         )
         .await
         .unwrap();
-    assert!(matches!(
-        cells
-            .exec_fixture(exec("text('overflow')"), CancellationToken::new())
-            .await,
-        Err(CellError::Capacity(ref diag)) if diag.kind == CapacityKind::MaxRunning
-    ));
+    let queued = cells
+        .exec_fixture(
+            ExecRequest {
+                yield_time_ms: 0,
+                ..exec("text('overflow')")
+            },
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(queued.status, CellStatus::NotStarted);
+    assert_eq!(
+        cells.cancel(&queued.cell_id).await.unwrap().status,
+        CellStatus::Cancelled
+    );
     let cancelled = cells.cancel(&page.cell_id).await.unwrap();
     assert_eq!(cancelled.status, CellStatus::Cancelled);
     cells.close().await;
@@ -1692,4 +1701,120 @@ async fn manager_ownership_and_session_task_lookup_are_enforced() {
     );
     cells.close().await;
     other.close().await;
+}
+
+#[tokio::test]
+async fn full_vm_capacity_queues_and_cancels_without_dispatching_the_queued_cell() {
+    let dir = tempfile::tempdir().unwrap();
+    let journal = Arc::new(SqliteJournal::open(dir.path().join("cells.db")).unwrap());
+    let host = Arc::new(Host::default());
+    let limits = CellLimits {
+        max_running: 1,
+        ..Default::default()
+    };
+    let cells = manager(
+        journal,
+        host.clone(),
+        ReadCoordinator::new(vec![], limits.clone()).unwrap(),
+        limits,
+        "queue",
+    );
+    let first = cells
+        .exec_fixture(
+            ExecRequest {
+                yield_time_ms: 0,
+                ..exec("return cayw.call('block',{})")
+            },
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+    wait_entered(&host).await;
+    let second = cells
+        .exec_fixture(
+            ExecRequest {
+                yield_time_ms: 0,
+                ..exec("return cayw.call('write',{})")
+            },
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(second.status, CellStatus::NotStarted);
+    assert_eq!(host.write_value.load(Ordering::SeqCst), 0);
+    let cancelled = cells.cancel(&second.cell_id).await.unwrap();
+    assert_eq!(cancelled.status, CellStatus::Cancelled);
+    let third = cells
+        .exec_fixture(
+            ExecRequest {
+                yield_time_ms: 0,
+                ..exec("return cayw.call('write',{})")
+            },
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(third.status, CellStatus::NotStarted);
+    host.release.add_permits(1);
+    assert_eq!(terminal(&cells, first).await.status, CellStatus::Completed);
+    assert_eq!(terminal(&cells, third).await.status, CellStatus::Completed);
+    assert_eq!(host.write_value.load(Ordering::SeqCst), 1);
+    cells.close().await;
+}
+
+#[tokio::test]
+async fn complete_errors_are_durable_and_small_pages_explicitly_request_more_budget() {
+    let (_dir, journal, _host, cells) = setup();
+    let source = "error(string.rep('diagnostic-',500))";
+    let mut request = exec(source);
+    request.max_output_tokens = 1024;
+    let mut page = cells
+        .exec_fixture(request, CancellationToken::new())
+        .await
+        .unwrap();
+    while page.vm_alive {
+        page = cells
+            .wait(
+                WaitRequest {
+                    cell_id: page.cell_id.clone(),
+                    cursor: 0,
+                    yield_time_ms: 1000,
+                    max_output_tokens: 1024,
+                    continue_execution: true,
+                },
+                CancellationToken::new(),
+            )
+            .await
+            .unwrap();
+    }
+    let record = cells.record(&page.cell_id).unwrap();
+    assert!(record.error.as_ref().unwrap().len() > 160);
+    assert!(page.error_truncated);
+    assert!(page.has_more);
+    let complete = cells
+        .wait(
+            WaitRequest {
+                cell_id: page.cell_id.clone(),
+                cursor: 0,
+                yield_time_ms: 0,
+                max_output_tokens: page.required_budget.unwrap() + 1024,
+                continue_execution: false,
+            },
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+    assert!(!complete.error_truncated);
+    assert_eq!(complete.error, record.error);
+    assert_eq!(
+        journal
+            .records(&identity("session"), &CellLimits::default())
+            .unwrap()
+            .into_iter()
+            .find(|r| r.cell_id == page.cell_id)
+            .unwrap()
+            .error,
+        record.error
+    );
+    cells.close().await;
 }

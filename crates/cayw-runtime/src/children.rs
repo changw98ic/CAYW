@@ -83,7 +83,7 @@ fn earliest(
 /// catalog entirely; this is the only way to enable it.
 #[derive(Clone, Debug)]
 pub struct LocalAgents {
-    /// Maximum live children in one root tree, across all depths.
+    /// Maximum executing children in one root tree; waiting children stay queued.
     pub max_children: usize,
     /// 1 permits one child level. A child at this depth cannot start another.
     pub max_depth: usize,
@@ -126,6 +126,7 @@ pub(crate) fn validate(config: Option<&LocalAgents>) -> Result<(), RuntimeError>
             time.is_zero() || std::time::Instant::now().checked_add(time).is_none()
         });
     if config.max_children == 0
+        || i64::try_from(config.max_children).is_err()
         || config.max_depth == 0
         || config.max_output_bytes == 0
         || budgets_invalid
@@ -226,7 +227,7 @@ pub(crate) fn is_capability(name: &str) -> bool {
 
 /// Shared and per-run local-agent state attached to every RunContext.
 ///
-/// Token/call/byte counters, the agent-run counter, the live-child counter and the
+/// Token/call/byte counters, the agent-run counter, the tree identity and the
 /// absolute run deadline are shared by the root task and every descendant. The
 /// child map is per run: a child's drain must not join its parent's siblings.
 pub(crate) struct RunScope {
@@ -235,7 +236,7 @@ pub(crate) struct RunScope {
     calls: Arc<AtomicUsize>,
     bytes: Arc<AtomicUsize>,
     agent_runs: Arc<AtomicUsize>,
-    live_children: Arc<AtomicUsize>,
+    tree_id: String,
     children: Mutex<BTreeMap<String, ChildHandle>>,
     depth: usize,
     permissions: Vec<ScopedPermission>,
@@ -269,7 +270,7 @@ impl RunScope {
             calls: Arc::new(AtomicUsize::new(0)),
             bytes: Arc::new(AtomicUsize::new(0)),
             agent_runs: Arc::new(AtomicUsize::new(0)),
-            live_children: Arc::new(AtomicUsize::new(0)),
+            tree_id: uuid::Uuid::new_v4().to_string(),
             children: Mutex::new(BTreeMap::new()),
             depth: 0,
             permissions: inner.config.permissions.clone(),
@@ -293,7 +294,7 @@ impl RunScope {
             calls: self.calls.clone(),
             bytes: self.bytes.clone(),
             agent_runs: self.agent_runs.clone(),
-            live_children: self.live_children.clone(),
+            tree_id: self.tree_id.clone(),
             children: Mutex::new(BTreeMap::new()),
             depth: self.depth + 1,
             permissions: config.permissions.clone(),
@@ -414,20 +415,7 @@ impl RunScope {
         }
     }
 
-    fn reserve_child(&self, max_children: usize) -> Result<ChildPermit, RuntimeError> {
-        self.live_children
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |count| {
-                (count < max_children).then_some(count + 1)
-            })
-            .map(|_| ChildPermit {
-                live: self.live_children.clone(),
-                active: true,
-            })
-            .map_err(|_| RuntimeError::InvalidInput("local agent concurrency limit reached".into()))
-    }
-
-    fn insert_child(&self, task_id: String, handle: ChildHandle, mut permit: ChildPermit) {
-        permit.active = false;
+    fn insert_child(&self, task_id: String, handle: ChildHandle) {
         let previous = self
             .children
             .lock()
@@ -437,8 +425,8 @@ impl RunScope {
     }
 
     /// Temporarily removes one child so its runner can be joined without
-    /// holding the scope lock across an await. The tree-wide live slot remains
-    /// charged; `ChildJoin` restores the handle unless the join is confirmed.
+    /// holding the scope lock across an await. Queue retains execution ownership;
+    /// `ChildJoin` restores the handle unless the join is confirmed.
     fn take_child_for_join(&self, task_id: &str) -> ChildJoin<'_> {
         let handle = self
             .children
@@ -462,17 +450,6 @@ impl RunScope {
         debug_assert!(previous.is_none(), "child task identity is unique");
     }
 
-    /// Releases the live slot of a child whose handle was removed for a
-    /// confirmed join. The permit count is never released before that proof.
-    fn release_child(&self) {
-        self.live_children.fetch_sub(1, Ordering::AcqRel);
-    }
-
-    /// Shared live-child counter for FleetRegistry detached ownership.
-    fn live_children_handle(&self) -> Arc<AtomicUsize> {
-        self.live_children.clone()
-    }
-
     /// Snapshot of the children still owned by this run. Used only after the
     /// run's capability futures have been dropped, so no new child can be
     /// inserted. Each child is then removed and re-inserted one at a time, so
@@ -484,19 +461,6 @@ impl RunScope {
             .keys()
             .cloned()
             .collect()
-    }
-}
-
-struct ChildPermit {
-    live: Arc<AtomicUsize>,
-    active: bool,
-}
-
-impl Drop for ChildPermit {
-    fn drop(&mut self) {
-        if self.active {
-            self.live.fetch_sub(1, Ordering::AcqRel);
-        }
     }
 }
 
@@ -535,7 +499,7 @@ enum JoinAttempt {
 
 /// Owns a temporarily removed child handle. Unless the runner join is confirmed,
 /// Drop puts the handle back so the run's drain still owns the same worker and
-/// its live-child permit. A cancelled or dropped wait therefore cannot detach
+/// its cleanup responsibility. A cancelled or dropped wait therefore cannot detach
 /// the runner silently.
 struct ChildJoin<'a> {
     scope: &'a RunScope,
@@ -613,6 +577,7 @@ struct SteerArgs {
 struct ChildService {
     context: Arc<RunContext>,
     config: LocalAgents,
+    cell_id: String,
 }
 
 impl ChildService {
@@ -640,17 +605,40 @@ impl ChildService {
         {
             return Err(known("parent run time budget is exhausted"));
         }
+        if !mode.detached() {
+            let mut occupied = 0;
+            let mut occupied_children = 0;
+            for (task, is_child) in context.inner.fleet.foreground_chain(&context.task.id) {
+                if context.inner.queue.get(&task).map_err(known)?.holds_slot
+                    && crate::lock(&context.inner.processes)
+                        .get(&task)
+                        .is_some_and(|host| host.active_terminal_sessions() != 0)
+                {
+                    occupied += 1;
+                    occupied_children += usize::from(is_child);
+                }
+            }
+            if occupied >= context.inner.config.max_concurrent_runs
+                || occupied_children >= self.config.max_children
+            {
+                return Err(known(
+                    "foreground child cannot run while its waiting task chain owns all execution slots and live terminals; close the terminal first or use mode='background'",
+                ));
+            }
+        }
         let child_scope = Arc::new(context.scope.child(&self.config).map_err(known)?);
         context
             .scope
             .begin_agent_run(self.config.max_calls)
             .map_err(known)?;
-        let permit = context
-            .scope
-            .reserve_child(self.config.max_children)
-            .map_err(known)?;
+        if !mode.detached() {
+            context
+                .activity
+                .waiting_dependency(&context, &self.cell_id)
+                .map_err(known)?;
+        }
 
-        // Serialize the capacity precheck, child session creation and immediate
+        // Serialize the capacity precheck, child session creation and durable
         // enqueue with the runtime's other admission decisions. A capacity
         // refusal must not leave an empty child session behind. No await occurs
         // while the coordination guard is held.
@@ -665,12 +653,13 @@ impl ChildService {
             let lease = context
                 .inner
                 .queue
-                .try_start_child(
+                .enqueue_child(
                     &session.id,
                     &prompt,
                     &TaskIntent::General,
                     context.inner.config.max_queued_runs,
-                    context.inner.config.max_concurrent_runs,
+                    &context.scope.tree_id,
+                    self.config.max_children,
                 )
                 .map_err(known)?;
             (session, lease)
@@ -685,6 +674,7 @@ impl ChildService {
             "prompt_bytes": prompt.len(),
             "mode": mode,
             "detached": mode.detached(),
+            "state": TaskState::Queued,
         });
         if let Err(error) = context.inner.store.append_host_event(
             &context.lease,
@@ -720,24 +710,6 @@ impl ChildService {
         let depth = child_scope.depth();
         let runner_task = task_id.clone();
         let runner_cancel = child_cancel.clone();
-        let join = tokio::spawn(async move {
-            let result =
-                crate::execution::resume_child(&runtime, &runner_task, child_scope, runner_cancel)
-                    .await;
-            let outcome = observe(
-                &runtime,
-                &runner_task,
-                &runner_session,
-                &runner_label,
-                depth,
-                result,
-            );
-            let _ = sender.send(Some(outcome));
-        });
-        // Transfer the live-slot permit into fleet ownership before any await.
-        let live = context.scope.live_children_handle();
-        let mut permit = permit;
-        permit.active = false;
         context
             .inner
             .fleet
@@ -752,19 +724,29 @@ impl ChildService {
                     mode,
                     detached: mode.detached(),
                     cancel: child_cancel.clone(),
-                    state: FleetMemberState::Running,
+                    state: FleetMemberState::Queued,
                     error: None,
-                    live: live.clone(),
-                    // Only detached members own the live-slot release via fleet.
-                    // Foreground still releases through insert_child / release_child.
-                    slot_held: mode.detached(),
                     control: Mutex::new(None),
                 },
             )
             .map_err(known)?;
+        let join = tokio::spawn(async move {
+            let result =
+                crate::execution::resume_child(&runtime, &runner_task, child_scope, runner_cancel)
+                    .await;
+            let outcome = observe(
+                &runtime,
+                &runner_task,
+                &runner_session,
+                &runner_label,
+                depth,
+                result,
+            );
+            let _ = sender.send(Some(outcome));
+        });
         if mode.detached() {
             // Detached background: do not park the handle in the parent drain map.
-            // A finisher owns join + durable evidence + live-slot release.
+            // A finisher owns join + durable evidence and cleanup.
             let finish_context = context.clone();
             let finish_task = task_id.clone();
             let finish_session = session_id.clone();
@@ -792,7 +774,7 @@ impl ChildService {
                 "depth": depth,
                 "mode": mode,
                 "detached": true,
-                "state": "running",
+                "state": context.inner.queue.get(&task_id).map_err(known)?.state,
             }));
         }
         context.scope.insert_child(
@@ -807,7 +789,6 @@ impl ChildService {
                 depth,
                 detached: false,
             },
-            permit,
         );
 
         let mut receiver = receiver;
@@ -841,6 +822,9 @@ impl ChildService {
                     timed_out = true;
                     child_cancel.cancel();
                     break Stop::Cleanup;
+                }
+                _ = tokio::time::sleep(Duration::from_millis(20)) => {
+                    context.activity.waiting_dependency(&context, &self.cell_id).map_err(known)?;
                 }
                 changed = receiver.changed() => {
                     if changed.is_err() {
@@ -942,19 +926,17 @@ impl ChildService {
                 .store
                 .append_host_event(&context.lease, "agent_child_finished", event)
         {
-            // The joined worker and its live slot stay owned by the scope; a
+            // The joined worker and its cleanup obligation stay owned by the scope; a
             // later drain sees `Joined` and retries this evidence write.
             drop(joined);
             return Err(context.record_error(error.into()));
         }
         joined.confirmed = true;
         drop(joined);
-        context.scope.release_child();
         context.inner.fleet.mark_terminal(
             &outcome.task_id,
             FleetMemberState::from_task(outcome.state),
             outcome.error.clone(),
-            false,
         );
         context.inner.changed.notify_waiters();
         if timed_out && outcome.state != TaskState::Completed {
@@ -1001,7 +983,15 @@ impl ExternalHost for ChildService {
                 }
                 let label = args.label.unwrap_or_else(|| DEFAULT_LABEL.into());
                 let mode = AgentRunMode::parse(args.mode.as_deref()).map_err(known)?;
-                self.run(args.prompt, label, cancel, mode).await
+                let result = self.run(args.prompt, label, cancel.clone(), mode).await;
+                if !cancel.is_cancelled() && !self.context.cancel.is_cancelled() {
+                    self.context
+                        .activity
+                        .resume_cell(&self.context, &self.cell_id, &cancel)
+                        .await
+                        .map_err(known)?;
+                }
+                result
             }
             CAPABILITY_FLEET => {
                 let args: FleetArgs = serde_json::from_value(arguments).map_err(|error| {
@@ -1086,7 +1076,11 @@ pub(crate) async fn call(
         CAPABILITY_STEER => steer_definition(),
         other => return Err(known(format!("local agent service received {other}"))),
     };
-    let service = ChildService { context, config };
+    let service = ChildService {
+        context,
+        config,
+        cell_id: scope.key.execution_id.clone(),
+    };
     let child = cancel.child_token();
     let _cancel_on_drop = child.clone().drop_guard();
     let run = host.call_service(&definition, arguments, child.clone(), &service);
@@ -1094,10 +1088,9 @@ pub(crate) async fn call(
 }
 
 fn capacity_precheck(inner: &Inner) -> Result<(), RuntimeError> {
-    inner.queue.check_child_capacity(
-        inner.config.max_queued_runs,
-        inner.config.max_concurrent_runs,
-    )?;
+    inner
+        .queue
+        .check_child_capacity(inner.config.max_queued_runs)?;
     Ok(())
 }
 
@@ -1252,7 +1245,6 @@ async fn finish_detached(
             &task_id,
             FleetMemberState::from_task(outcome.state),
             outcome.error.clone(),
-            true,
         );
     } else {
         let error = if !join_ok {
@@ -1269,7 +1261,7 @@ async fn finish_detached(
         context
             .inner
             .fleet
-            .mark_terminal(&task_id, FleetMemberState::Unknown, error, false);
+            .mark_terminal(&task_id, FleetMemberState::Unknown, error);
     }
     context.inner.changed.notify_waiters();
 }
@@ -1496,12 +1488,10 @@ pub(crate) async fn drain(context: &RunContext) -> Result<(), RuntimeError> {
             Ok(_) => {
                 joined.confirmed = true;
                 drop(joined);
-                context.scope.release_child();
                 context.inner.fleet.mark_terminal(
                     &task_id,
                     FleetMemberState::from_task(outcome.state),
                     outcome.error.clone(),
-                    false,
                 );
                 context.inner.changed.notify_waiters();
             }
@@ -1536,7 +1526,7 @@ impl RunScope {
             calls: Arc::new(AtomicUsize::new(0)),
             bytes: Arc::new(AtomicUsize::new(0)),
             agent_runs: Arc::new(AtomicUsize::new(0)),
-            live_children: Arc::new(AtomicUsize::new(0)),
+            tree_id: uuid::Uuid::new_v4().to_string(),
             children: Mutex::new(BTreeMap::new()),
             depth: 0,
             permissions: vec![],
@@ -1557,9 +1547,8 @@ mod tests {
     /// bounded join that does not finish must put the original handle back and
     /// keep its live slot charged.
     #[tokio::test(start_paused = true)]
-    async fn unconfirmed_join_restores_the_original_handle_and_live_slot() {
-        let scope = RunScope::fixture();
-        let permit = scope.reserve_child(1).expect("first child slot");
+    async fn unconfirmed_join_restores_the_original_handle() {
+        let scope = Arc::new(RunScope::fixture());
         let (sender, outcome) = watch::channel(None);
         let join = tokio::spawn(std::future::pending::<()>());
         scope.insert_child(
@@ -1574,9 +1563,7 @@ mod tests {
                 depth: 1,
                 detached: false,
             },
-            permit,
         );
-        assert_eq!(scope.live_children.load(Ordering::Acquire), 1);
 
         let mut joined = scope.take_child_for_join("child-task");
         let handle = joined.handle.as_mut().expect("handle");
@@ -1592,18 +1579,11 @@ mod tests {
             scope.children.lock().unwrap().contains_key("child-task"),
             "the original handle must be restored after an unconfirmed join"
         );
-        assert_eq!(
-            scope.live_children.load(Ordering::Acquire),
-            1,
-            "the live slot stays charged until the finish path is confirmed"
-        );
 
         let mut joined = scope.take_child_for_join("child-task");
         let handle = joined.handle.take().expect("restored handle");
         handle.join.abort();
         let _ = handle.join.await;
-        scope.release_child();
-        assert_eq!(scope.live_children.load(Ordering::Acquire), 0);
         drop(sender);
     }
 }

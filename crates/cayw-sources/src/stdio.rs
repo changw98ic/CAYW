@@ -41,7 +41,7 @@ pub struct StdioConfig {
     pub max_frame_bytes: usize,
     pub max_pending: usize,
     pub max_observations: usize,
-    pub max_received_frames: usize,
+    pub max_received_frames: Option<usize>,
     pub max_stderr_bytes: usize,
     pub request_timeout: Duration,
     pub cleanup_timeout: Duration,
@@ -56,7 +56,7 @@ impl StdioConfig {
             max_frame_bytes: 64 * 1024 * 1024,
             max_pending: 64,
             max_observations: 256,
-            max_received_frames: usize::MAX,
+            max_received_frames: None,
             max_stderr_bytes: 256 * 1024,
             request_timeout: Duration::from_secs(3600),
             cleanup_timeout: Duration::from_secs(5),
@@ -69,8 +69,9 @@ impl StdioConfig {
             || !self.program.is_file()
             || !(256..=256 * 1024 * 1024).contains(&self.max_frame_bytes)
             || self.max_pending == 0
+            || self.max_pending > tokio::sync::Semaphore::MAX_PERMITS
             || self.max_observations == 0
-            || self.max_received_frames == 0
+            || self.max_received_frames == Some(0)
             || self.request_timeout.is_zero()
             || self.cleanup_timeout.is_zero()
             || self.arguments.iter().any(|arg| arg.contains('\0'))
@@ -177,6 +178,7 @@ impl StdioControl {
 }
 enum CommandMessage {
     Request {
+        permit: tokio::sync::OwnedSemaphorePermit,
         id: u64,
         method: &'static str,
         params: Value,
@@ -190,6 +192,7 @@ struct Transport {
     shared: Arc<Shared>,
     next: AtomicU64,
     config: StdioConfig,
+    slots: Arc<tokio::sync::Semaphore>,
 }
 impl Drop for Transport {
     fn drop(&mut self) {
@@ -201,6 +204,7 @@ struct Client {
     transport: Arc<Transport>,
 }
 struct Pending {
+    _permit: tokio::sync::OwnedSemaphorePermit,
     reply: oneshot::Sender<Result<Value, CapabilityError>>,
     effect: bool,
 }
@@ -237,6 +241,13 @@ impl Client {
         if cancel.is_cancelled() || transport.shared.close.is_cancelled() {
             return Err(failure("stdio cancelled or disconnected before dispatch"));
         }
+        let deadline = Instant::now() + transport.config.request_timeout;
+        let permit = tokio::select! { biased;
+            _ = cancel.cancelled() => return Err(failure("stdio cancelled while waiting for capacity")),
+            _ = transport.shared.close.cancelled() => return Err(failure("stdio disconnected while waiting for capacity")),
+            _ = tokio::time::sleep_until(deadline) => return Err(failure("stdio capacity deadline")),
+            permit = transport.slots.clone().acquire_owned() => permit.map_err(|_| failure("stdio capacity closed"))?,
+        };
         let id = transport
             .next
             .fetch_update(Ordering::AcqRel, Ordering::Acquire, |id| id.checked_add(1))
@@ -262,12 +273,11 @@ impl Client {
             queued: false,
             done: false,
         };
-        let deadline = Instant::now() + transport.config.request_timeout;
         tokio::select! { biased;
             _ = cancel.cancelled() => return Err(failure("stdio cancelled before enqueue")),
             _ = transport.shared.close.cancelled() => return Err(failure("stdio disconnected before enqueue")),
             _ = tokio::time::sleep_until(deadline) => return Err(failure("stdio enqueue deadline")),
-            sent = transport.commands.send(CommandMessage::Request { id, method, params, effect, reply }) => {
+            sent = transport.commands.send(CommandMessage::Request { permit, id, method, params, effect, reply }) => {
                 sent.map_err(|_| failure("stdio connection unavailable"))?;
                 guard.queued = true;
             }
@@ -353,6 +363,7 @@ impl StdioSource {
                 shared: shared.clone(),
                 next: AtomicU64::new(1),
                 config: config.clone(),
+                slots: Arc::new(tokio::sync::Semaphore::new(config.max_pending)),
             }),
         };
         tokio::spawn(run(child, stdin, stdout, stderr, receiver, shared, config));
@@ -716,7 +727,7 @@ async fn run(
                     let frame_bytes=line.len();line.clear();
                     let mut exhausted=false;
                     shared.update(|state|{state.received_frames+=1;state.observed_frame_bytes=state.observed_frame_bytes.max(frame_bytes);
-                        exhausted=(state.received_frames as u128) > (config.max_received_frames as u128);});
+                        exhausted=config.max_received_frames.is_some_and(|limit| (state.received_frames as u128) > (limit as u128));});
                     if exhausted {return Err(CapabilityError::unknown("stdio received-message budget exhausted"));}
                     if value["jsonrpc"]!="2.0" || !value.is_object() {return Err(CapabilityError::unknown("stdio invalid JSON-RPC envelope"));}
                     if let Some(id)=value.get("id") {
@@ -734,11 +745,8 @@ async fn run(
                     }
                 },
                 message=receiver.recv()=>match message {
-                    Some(CommandMessage::Request{id,method,params,effect,reply})=>{
+                    Some(CommandMessage::Request{permit,id,method,params,effect,reply})=>{
                         if reply.is_closed() {continue;}
-                        if pending.len()>=config.max_pending {
-                            let _=reply.send(Err(failure("stdio pending-call budget exhausted")));continue;
-                        }
                         let value=json!({"jsonrpc":"2.0","id":id,"method":method,"params":params});
                         let frame = match encode_bounded_frame(&value, config.max_frame_bytes) {
                             Ok(frame) => frame,
@@ -747,7 +755,7 @@ async fn run(
                                 continue;
                             }
                         };
-                        pending.insert(id,Pending{reply,effect});
+                        pending.insert(id,Pending{reply,effect,_permit:permit});
                         write_frame(&mut writer, &frame, &shared, config.request_timeout).await?;
                         shared.update(|state| {
                             if state.methods.len()<config.max_observations {state.methods.push(method.into());}

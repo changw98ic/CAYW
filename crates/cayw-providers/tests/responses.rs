@@ -259,7 +259,11 @@ async fn run(case: &str, wire: Vec<Value>) -> (Vec<AssistantEvent>, Value) {
 fn terminal(events: &[AssistantEvent]) -> &AssistantMessage {
     assert!(events.last().unwrap().is_terminal());
     assert_eq!(events.iter().filter(|e| e.is_terminal()).count(), 1);
-    events.last().unwrap().message()
+    events
+        .last()
+        .unwrap()
+        .snapshot()
+        .expect("snapshot boundary")
 }
 fn assert_error(events: &[AssistantEvent]) {
     assert!(
@@ -388,8 +392,10 @@ async fn native_text_and_nested_usage_preserve_original_counters() {
         .iter()
         .rev()
         .find_map(|event| {
-            if let AssistantEvent::UsageUpdate { partial } = event {
-                Some(partial)
+            if let AssistantEvent::UsageUpdate { .. } = event {
+                let mut message = AssistantMessage::new(&Model::new("fixture", "fixture"));
+                event.apply_to(&mut message).unwrap();
+                Some(message)
             } else {
                 None
             }
@@ -1047,11 +1053,19 @@ async fn complete_response_stops_before_late_garbage_and_releases_socket() {
 }
 
 #[tokio::test]
-async fn response_fragment_limit_stops_empty_argument_flood() {
+async fn empty_argument_fragments_do_not_impose_a_response_quota() {
     let mut wire = vec![created(), call_added(0, "fc-flood", "call-flood")];
     for _ in 0..65_537 {
         wire.push(argument_delta(0, "fc-flood", ""));
     }
+    wire.push(argument_delta(0, "fc-flood", r#"{"city":"Paris"}"#));
+    wire.extend(call_done(
+        0,
+        "fc-flood",
+        "call-flood",
+        r#"{"city":"Paris"}"#,
+    ));
+    wire.push(json!({"type":"response.completed","response":response("resp-native","completed",vec![call_item("fc-flood","call-flood",r#"{"city":"Paris"}"#)],usage())}));
     let (base, _, task) = server(
         "fragment-limit",
         "200 OK",
@@ -1070,14 +1084,8 @@ async fn response_fragment_limit_stops_empty_argument_flood() {
     .await
     .unwrap();
     save("fragment-limit", "events.json", &events);
-    assert_error(&events);
-    assert!(
-        terminal(&events)
-            .error_message
-            .as_ref()
-            .unwrap()
-            .contains("limit")
-    );
+    assert_eq!(terminal(&events).stop_reason, StopReason::ToolUse);
+    assert_eq!(terminal(&events).tool_calls().len(), 1);
     task.await.unwrap();
 }
 

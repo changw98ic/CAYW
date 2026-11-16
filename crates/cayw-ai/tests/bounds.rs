@@ -12,7 +12,9 @@ use tokio::sync::oneshot;
 use tokio::time::timeout;
 
 const MIB: usize = 1024 * 1024;
-const GUARD: Duration = Duration::from_secs(30);
+// Large-frame-count fixtures share CPU with the workspace tests; this is a
+// deadlock guard, not a latency assertion or a Provider timeout.
+const GUARD: Duration = Duration::from_secs(120);
 
 async fn read_request(socket: &mut TcpStream) {
     let mut bytes = Vec::new();
@@ -112,7 +114,7 @@ async fn terminal(kind: &str, body: String, fragment: usize) -> (AssistantMessag
         }
         if event.is_terminal() {
             assert!(result.is_none(), "more than one terminal event");
-            result = Some(event.message().clone());
+            result = Some(event.snapshot().expect("snapshot boundary").clone());
         }
     }
     timeout(GUARD, server).await.unwrap().unwrap();
@@ -157,19 +159,18 @@ async fn repeated_wire_object_fields_are_rejected_instead_of_overwritten() {
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn response_and_frame_counts_accumulate_even_without_content() {
+async fn response_and_frame_counts_do_not_reject_complete_streams() {
     for kind in ["openai", "magpie"] {
         let heartbeat = format!(": {}\n\n", "x".repeat(1024 * 1024 - 4));
-        let body = heartbeat.repeat(65) + &stop("stop");
-        limited(
-            kind,
-            "response-bytes",
-            body,
-            "response exceeds the 64 MiB limit",
-        )
-        .await;
-        let body = frame(json!({}), Value::Null).repeat(131_073) + &stop("stop");
-        limited(kind, "frame-count", body, "frame limit").await;
+        for prefix in [
+            heartbeat.repeat(65),
+            frame(json!({}), Value::Null).repeat(131_073),
+        ] {
+            let body = prefix + &frame(json!({"content":"ok"}), Value::Null) + &stop("stop");
+            let (message, _) = terminal(kind, body, 64 * 1024).await;
+            assert_eq!(message.stop_reason, StopReason::Stop);
+            assert_eq!(cayw_ai::content_text(&message.content), "ok");
+        }
     }
 }
 
@@ -187,60 +188,44 @@ async fn individual_sse_events_remain_bounded() {
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn fragments_and_tool_calls_have_cumulative_and_single_frame_limits() {
+async fn fragments_and_tool_calls_can_cross_previous_cumulative_limits() {
     for kind in ["openai", "magpie"] {
-        let body = frame(json!({"content":""}), Value::Null).repeat(65_537) + &stop("stop");
-        limited(kind, "empty-fragments", body, "content fragment limit").await;
+        let body = frame(json!({"content":""}), Value::Null).repeat(65_537)
+            + &frame(json!({"content":"ok"}), Value::Null)
+            + &stop("stop");
+        let (message, _) = terminal(kind, body, 64 * 1024).await;
+        assert_eq!(message.stop_reason, StopReason::Stop);
         let calls = (0..1025).map(|index| json!({"index":index,"id":format!("c{index}"),"type":"function","function":{"name":"sum","arguments":"{}"}})).collect::<Vec<_>>();
         let body = frame(json!({"tool_calls":calls}), Value::Null) + &stop("tool_calls");
-        let (message, events) = limited(kind, "single-frame-calls", body, "tool call limit").await;
-        assert!(message.content.is_empty());
-        assert_eq!(
-            events, 0,
-            "oversized frame generated snapshots before rejection"
-        );
-        let calls = (0..1025).map(|index| frame(json!({"tool_calls":[{"index":index,"id":format!("c{index}"),"function":{"name":"sum","arguments":"{}"}}]}), Value::Null)).collect::<String>();
-        // At this many calls the per-run snapshot-work budget stops the
-        // stream first; the single-frame case above covers the exact call cap.
-        let (message, _) = limited(
-            kind,
-            "cumulative-calls",
-            calls + &stop("tool_calls"),
-            "limit",
-        )
-        .await;
-        assert!(message.tool_calls().len() < 1024);
-        let body = frame(
-            json!({"tool_calls":vec![json!({"index":1}); 65_537]}),
-            Value::Null,
-        ) + &stop("stop");
-        let (message, events) =
-            limited(kind, "deferred-fragments", body, "content fragment limit").await;
-        assert!(message.content.is_empty());
-        assert_eq!(events, 0);
+        let (message, _) = terminal(kind, body, 64 * 1024).await;
+        assert_eq!(message.stop_reason, StopReason::ToolUse);
+        assert_eq!(message.tool_calls().len(), 1025);
     }
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn retained_content_and_full_message_snapshot_work_are_bounded() {
+async fn growing_replies_are_complete_with_incremental_deltas() {
     for kind in ["openai", "magpie"] {
         let content = "x".repeat(MIB);
         let body = frame(json!({"content":content}), Value::Null).repeat(9) + &stop("stop");
-        limited(
-            kind,
-            "content-bytes",
-            body,
-            "content exceeds the 8 MiB limit",
-        )
-        .await;
-        // A large retained message makes each subsequent small delta expensive.
-        // Do not hide that cost behind only small fixture inputs.
+        let (message, _) = terminal(kind, body, 64 * 1024).await;
+        assert_eq!(message.stop_reason, StopReason::Stop);
+        assert_eq!(cayw_ai::content_text(&message.content).len(), 9 * MIB);
         let body = frame(json!({"content":"x".repeat(MIB)}), Value::Null)
             + &frame(json!({"content":"y"}), Value::Null).repeat(100)
             + &stop("stop");
-        let (message, events) = limited(kind, "snapshot-work", body, "snapshot work limit").await;
-        assert!(cayw_ai::content_text(&message.content).len() < MIB + 100);
-        assert!(events < 100);
+        let (message, events) = terminal(kind, body, 64 * 1024).await;
+        assert_eq!(message.stop_reason, StopReason::Stop);
+        assert_eq!(
+            cayw_ai::content_text(&message.content),
+            "x".repeat(MIB) + &"y".repeat(100)
+        );
+        assert_eq!(events, 102);
+        let body = frame(json!({"content":"z"}), Value::Null).repeat(20_000) + &stop("stop");
+        let (message, events) = terminal(kind, body, 64 * 1024).await;
+        assert_eq!(message.stop_reason, StopReason::Stop);
+        assert_eq!(cayw_ai::content_text(&message.content), "z".repeat(20_000));
+        assert_eq!(events, 20_001);
     }
 }
 
@@ -274,20 +259,32 @@ async fn same_thread_cancel_interrupts_one_ready_frame_before_the_remaining_tool
                 terminals += 1;
                 println!(
                     "{kind}/same-thread: {:?}; tool_events={tool_events}; retained_calls={}",
-                    event.message().stop_reason,
-                    event.message().tool_calls().len()
+                    event.snapshot().expect("snapshot boundary").stop_reason,
+                    event
+                        .snapshot()
+                        .expect("snapshot boundary")
+                        .tool_calls()
+                        .len()
                 );
                 assert_eq!(
-                    event.message().stop_reason,
+                    event.snapshot().expect("snapshot boundary").stop_reason,
                     StopReason::Aborted,
                     "ready frame completed synchronously before the signalled cancellation task ran"
                 );
                 assert_eq!(
-                    event.message().error_message.as_deref(),
+                    event
+                        .snapshot()
+                        .expect("snapshot boundary")
+                        .error_message
+                        .as_deref(),
                     Some("Request cancelled")
                 );
                 assert_eq!(
-                    event.message().tool_calls().len(),
+                    event
+                        .snapshot()
+                        .expect("snapshot boundary")
+                        .tool_calls()
+                        .len(),
                     1,
                     "accept consumed the rest of the frame before its first observable tool event"
                 );
@@ -330,20 +327,33 @@ async fn same_thread_cancel_interrupts_ready_frames_that_emit_no_content_events(
         let event = timeout(GUARD, stream.next()).await.unwrap().unwrap();
         println!(
             "{kind}/same-thread-empty-frames: {:?}: {:?}",
-            event.message().stop_reason,
-            event.message().error_message
+            event.snapshot().expect("snapshot boundary").stop_reason,
+            event.snapshot().expect("snapshot boundary").error_message
         );
         assert!(
             matches!(event, AssistantEvent::Error { .. }),
             "ready empty frames ignored scheduled cancellation"
         );
-        assert_eq!(event.message().stop_reason, StopReason::Aborted);
         assert_eq!(
-            event.message().error_message.as_deref(),
+            event.snapshot().expect("snapshot boundary").stop_reason,
+            StopReason::Aborted
+        );
+        assert_eq!(
+            event
+                .snapshot()
+                .expect("snapshot boundary")
+                .error_message
+                .as_deref(),
             Some("Request cancelled")
         );
-        assert_eq!(event.message().usage.input, 1);
-        assert!(event.message().content.is_empty());
+        assert_eq!(event.snapshot().expect("snapshot boundary").usage.input, 1);
+        assert!(
+            event
+                .snapshot()
+                .expect("snapshot boundary")
+                .content
+                .is_empty()
+        );
         assert!(stream.next().await.is_none());
         canceller.await.unwrap();
         server.await.unwrap();
@@ -405,7 +415,7 @@ async fn protocol_end_stops_before_invalid_or_oversized_tail_bytes() {
                     assert!(
                         matches!(event, AssistantEvent::Done { .. }),
                         "tail changed terminal: {:?}",
-                        event.message().error_message
+                        event.snapshot().expect("snapshot boundary").error_message
                     );
                 }
             }
@@ -454,4 +464,97 @@ async fn strict_network_parsing_preserves_unicode_and_incomplete_length_argument
                 .is_some_and(|error| error.contains("duplicate"))
         );
     }
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn pending_between_every_delta_keeps_updates_incremental_and_lossless() {
+    for kind in ["openai", "magpie"] {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let provider =
+            OpenAiProvider::without_auth(format!("http://{}/v1", listener.local_addr().unwrap()))
+                .unwrap();
+        let (ack, mut received) = tokio::sync::mpsc::channel::<()>(1);
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            read_request(&mut socket).await;
+            let first = frame(json!({"content":"x".repeat(MIB)}), Value::Null);
+            let next = frame(json!({"content":"y"}), Value::Null);
+            let end = stop("stop");
+            let size = first.len() + 100 * next.len() + end.len();
+            socket.write_all(format!("HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {size}\r\n\r\n").as_bytes()).await.unwrap();
+            socket.write_all(first.as_bytes()).await.unwrap();
+            received.recv().await.unwrap();
+            for _ in 0..100 {
+                socket.write_all(next.as_bytes()).await.unwrap();
+                received.recv().await.unwrap();
+            }
+            socket.write_all(end.as_bytes()).await.unwrap();
+        });
+        let req = request(kind);
+        let mut state = AssistantMessage::new(&req.model);
+        let mut stream = provider.stream(req, CancellationToken::new());
+        let mut deltas = 0;
+        let mut delta_wire_bytes = 0;
+        let mut terminals = 0;
+        while let Some(event) = timeout(GUARD, stream.next()).await.unwrap() {
+            event.apply_to(&mut state).unwrap();
+            if matches!(event, AssistantEvent::TextDelta { .. }) {
+                assert!(event.snapshot().is_none());
+                delta_wire_bytes += serde_json::to_vec(&event).unwrap().len();
+                deltas += 1;
+                ack.send(()).await.unwrap();
+            }
+            if event.is_terminal() {
+                terminals += 1;
+            }
+        }
+        assert_eq!((deltas, terminals), (101, 1));
+        assert_eq!(state.stop_reason, StopReason::Stop);
+        assert_eq!(
+            cayw_ai::content_text(&state.content),
+            "x".repeat(MIB) + &"y".repeat(100)
+        );
+        // Serialized updates contain each fragment once, plus small event metadata.
+        assert!(delta_wire_bytes < MIB + 20_000, "{delta_wire_bytes}");
+        timeout(GUARD, server).await.unwrap().unwrap();
+    }
+}
+
+#[test]
+fn delta_reducer_keeps_unfinished_tool_arguments_and_usage_without_full_snapshots() {
+    let mut message = AssistantMessage::new(&Model::new("openai", "fixture"));
+    message.content.push(Content::ToolCall(cayw_ai::ToolCall {
+        id: "c".into(),
+        name: "sum".into(),
+        arguments: Value::Null,
+        arguments_error: None,
+    }));
+    for delta in ["{\"number\":", "123"] {
+        let event = AssistantEvent::ToolCallDelta {
+            index: 0,
+            delta: delta.into(),
+        };
+        assert!(event.snapshot().is_none());
+        event.apply_to(&mut message).unwrap();
+    }
+    let calls = message.tool_calls();
+    assert_eq!(calls[0].arguments, Value::String("{\"number\":123".into()));
+    assert!(calls[0].arguments_error.is_some());
+    message.content.push(Content::text("x".repeat(MIB)));
+    message.usage.input = 5;
+    let update = AssistantEvent::usage_update(&message);
+    assert!(update.snapshot().is_none());
+    assert!(serde_json::to_vec(&update).unwrap().len() < 1024);
+    let mut view = AssistantMessage::new(&Model::new("openai", "fixture"));
+    update.apply_to(&mut view).unwrap();
+    assert_eq!(view.usage.input, 5);
+    assert!(view.content.is_empty());
+    assert!(
+        AssistantEvent::TextDelta {
+            index: 0,
+            delta: "invalid".into()
+        }
+        .apply_to(&mut view)
+        .is_err()
+    );
 }

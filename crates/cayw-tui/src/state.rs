@@ -285,13 +285,10 @@ impl StreamReplay {
         let event = &event["event"];
         match required_string(event, "type")? {
             "message_update" => {
-                let message = event["message"]
-                    .as_object()
-                    .ok_or("Missing streaming message")?;
-                self.message = Some(Value::Object(message.clone()));
+                apply_stream_update(&mut self.message, &event["event"])?;
             }
             "message_start" if event["message"]["role"] == "assistant" => {
-                self.message = None;
+                self.message = Some(event["message"].clone());
             }
             "message_end" | "turn_end" => {
                 let message = &event["message"];
@@ -310,6 +307,73 @@ impl StreamReplay {
         }
         Ok(None)
     }
+}
+
+fn apply_stream_update(message: &mut Option<Value>, update: &Value) -> Result<(), String> {
+    let kind = required_string(update, "type")?;
+    if kind == "usage_update" {
+        let target = message
+            .as_mut()
+            .and_then(Value::as_object_mut)
+            .ok_or("Usage update has no started message")?;
+        for field in [
+            "usage",
+            "usage_status",
+            "usage_fields",
+            "response_id",
+            "response_model",
+        ] {
+            target.insert(
+                field.into(),
+                update.get(field).ok_or("Missing usage field")?.clone(),
+            );
+        }
+        return Ok(());
+    }
+
+    if matches!(kind, "text_delta" | "thinking_delta" | "tool_call_delta") {
+        let index = update["index"]
+            .as_u64()
+            .ok_or("Missing stream block index")? as usize;
+        let delta = required_string(update, "delta")?;
+        let block = message
+            .as_mut()
+            .and_then(|message| message.get_mut("content"))
+            .and_then(Value::as_array_mut)
+            .and_then(|content| content.get_mut(index))
+            .ok_or("Streaming delta has no started block")?;
+        let (expected, field) = match kind {
+            "text_delta" => ("text", "text"),
+            "thinking_delta" => ("thinking", "thinking"),
+            _ => ("toolCall", ""),
+        };
+        if block["type"] != expected {
+            return Err("Streaming delta block type differs".into());
+        }
+        if !field.is_empty() {
+            let Some(Value::String(text)) = block.get_mut(field) else {
+                return Err("Missing stream block text".into());
+            };
+            text.push_str(delta);
+        } else {
+            let arguments = block.get_mut("arguments").ok_or("Missing tool arguments")?;
+            if !arguments.is_string() {
+                *arguments = Value::String(String::new());
+            }
+            if let Value::String(raw) = arguments {
+                raw.push_str(delta);
+            }
+            block["arguments_error"] = Value::String("tool argument stream is incomplete".into());
+        }
+        return Ok(());
+    }
+    let snapshot = update
+        .get("partial")
+        .or_else(|| update.get("message"))
+        .filter(|value| value.is_object())
+        .ok_or("Streaming event is missing snapshot")?;
+    *message = Some(snapshot.clone());
+    Ok(())
 }
 
 #[derive(Clone, Debug)]
@@ -490,10 +554,6 @@ impl SessionView {
             self.settled_capabilities
                 .retain(|existing| existing["key"] != *key || key.is_null());
             self.settled_capabilities.push(call.clone());
-            if self.settled_capabilities.len() > MAX_INSPECTOR_ITEMS {
-                let drain = self.settled_capabilities.len() - MAX_INSPECTOR_ITEMS;
-                self.settled_capabilities.drain(0..drain);
-            }
             self.rebuild_inspectors();
         }
         // Already represented by the snapshot: consume its envelope without
@@ -577,9 +637,10 @@ impl SessionView {
             }
             "message_update" => {
                 event
-                    .get("message")
+                    .get("event")
                     .filter(|v| v.is_object())
-                    .ok_or("Missing streaming message")?;
+                    .ok_or("Missing streaming update")?;
+                return Ok(());
             }
             "message_end" => {
                 let message = event
@@ -837,8 +898,8 @@ impl App {
                 next.refresh_after = Some(next.refresh_after.unwrap_or(0).max(cursor));
             }
             next.cursor = cursor;
-            next.project_stream();
         }
+        next.project_stream();
         *session = next;
         Ok(())
     }
@@ -1464,27 +1525,8 @@ pub fn message_text(message: &Value) -> String {
         .map_or_else(String::new, |text| sanitize(&text))
 }
 
-const MAX_LOGS: usize = 200;
-const MAX_INSPECTOR_ITEMS: usize = 64;
-const MAX_PREVIEW_BYTES: usize = 4096;
-
-fn clip_text(text: &str, max_bytes: usize) -> String {
-    let clean = sanitize(text);
-    if clean.len() <= max_bytes {
-        return clean;
-    }
-    let mut end = max_bytes;
-    while end > 0 && !clean.is_char_boundary(end) {
-        end -= 1;
-    }
-    format!("{}\n… [truncated]", &clean[..end])
-}
-
 fn push_log(logs: &mut Vec<String>, entry: String) {
-    logs.push(clip_text(&entry, 512));
-    if logs.len() > MAX_LOGS {
-        logs.drain(0..logs.len() - MAX_LOGS);
-    }
+    logs.push(sanitize(&entry));
 }
 
 fn format_event_log(cursor: u64, attempt: Option<&Value>, event: &Value) -> String {
@@ -1580,9 +1622,9 @@ fn project_files_and_diffs(
         let args = &call["call"]["arguments"];
         if let Some(path) = args["path"].as_str().filter(|path| !path.is_empty()) {
             files.push(FileEntry {
-                path: clip_text(path, 240),
-                action: clip_text(if name.is_empty() { "call" } else { name }, 64),
-                status: clip_text(if state.is_empty() { "running" } else { state }, 64),
+                path: sanitize(path),
+                action: sanitize(if name.is_empty() { "call" } else { name }),
+                status: sanitize(if state.is_empty() { "running" } else { state }),
                 preview: "Call in progress — awaiting runtime settlement.".into(),
             });
         }
@@ -1603,32 +1645,23 @@ fn project_files_and_diffs(
                 (scope_value["old"].as_str(), scope_value["new"].as_str())
             {
                 diffs.push(DiffEntry {
-                    path: clip_text(path, 240),
+                    path: sanitize(path),
                     status: "awaiting_approval".into(),
                     diff: format_replacement_diff(old, new),
                 });
             } else if let Some(content) = scope_value["content"].as_str() {
                 files.push(FileEntry {
-                    path: clip_text(path, 240),
-                    action: clip_text(
-                        if capability.is_empty() {
-                            "approval"
-                        } else {
-                            capability
-                        },
-                        64,
-                    ),
+                    path: sanitize(path),
+                    action: sanitize(if capability.is_empty() {
+                        "approval"
+                    } else {
+                        capability
+                    }),
                     status: "awaiting_approval".into(),
-                    preview: clip_text(content, MAX_PREVIEW_BYTES),
+                    preview: sanitize(content),
                 });
             }
         }
-    }
-    if files.len() > MAX_INSPECTOR_ITEMS {
-        files.drain(0..files.len() - MAX_INSPECTOR_ITEMS);
-    }
-    if diffs.len() > MAX_INSPECTOR_ITEMS {
-        diffs.drain(0..diffs.len() - MAX_INSPECTOR_ITEMS);
     }
     (files, diffs)
 }
@@ -1649,8 +1682,8 @@ fn collect_from_settled_capability(
     if outcome_type == "outcome_unknown" {
         if !path.is_empty() {
             files.push(FileEntry {
-                path: clip_text(path, 240),
-                action: clip_text(if name.is_empty() { "capability" } else { name }, 64),
+                path: sanitize(path),
+                action: sanitize(if name.is_empty() { "capability" } else { name }),
                 status: "interrupted".into(),
                 preview: "Execution was interrupted before completion.".into(),
             });
@@ -1664,10 +1697,10 @@ fn collect_from_settled_capability(
                 .or_else(|| call["outcome"]["error"].as_str())
                 .unwrap_or("not executed");
             files.push(FileEntry {
-                path: clip_text(path, 240),
-                action: clip_text(if name.is_empty() { "capability" } else { name }, 64),
-                status: clip_text(outcome_type, 64),
-                preview: clip_text(reason, MAX_PREVIEW_BYTES),
+                path: sanitize(path),
+                action: sanitize(if name.is_empty() { "capability" } else { name }),
+                status: sanitize(outcome_type),
+                preview: sanitize(reason),
             });
         }
         return;
@@ -1675,13 +1708,13 @@ fn collect_from_settled_capability(
     if !path.is_empty() {
         if let (Some(old), Some(new)) = (args["old"].as_str(), args["new"].as_str()) {
             diffs.push(DiffEntry {
-                path: clip_text(path, 240),
+                path: sanitize(path),
                 status: format!("{name} · completed"),
                 diff: format_unified_diff(path, Some(old), new),
             });
             files.push(FileEntry {
-                path: clip_text(path, 240),
-                action: clip_text(name, 64),
+                path: sanitize(path),
+                action: sanitize(name),
                 status: "completed".into(),
                 preview: format_numbered_lines(new),
             });
@@ -1692,13 +1725,13 @@ fn collect_from_settled_capability(
                 None => "completed".into(),
             };
             files.push(FileEntry {
-                path: clip_text(path, 240),
-                action: clip_text(if name.is_empty() { "write" } else { name }, 64),
+                path: sanitize(path),
+                action: sanitize(if name.is_empty() { "write" } else { name }),
                 status: status.clone(),
                 preview: format_numbered_lines(content),
             });
             diffs.push(DiffEntry {
-                path: clip_text(path, 240),
+                path: sanitize(path),
                 status: format!(
                     "{} · {status}",
                     if name.is_empty() { "write" } else { name }
@@ -1707,8 +1740,8 @@ fn collect_from_settled_capability(
             });
         } else if let Some(content) = result["content"].as_str() {
             files.push(FileEntry {
-                path: clip_text(path, 240),
-                action: clip_text(if name.is_empty() { "read" } else { name }, 64),
+                path: sanitize(path),
+                action: sanitize(if name.is_empty() { "read" } else { name }),
                 status: "completed".into(),
                 preview: format_numbered_lines(content),
             });
@@ -1751,7 +1784,7 @@ fn collect_from_tool_result(
                 diffs.push(DiffEntry {
                     path: "cell output".into(),
                     status: status.into(),
-                    diff: clip_text(text, MAX_PREVIEW_BYTES),
+                    diff: sanitize(text),
                 });
             }
         }
@@ -1760,9 +1793,9 @@ fn collect_from_tool_result(
     let text = message_text(message);
     if looks_like_diff(&text) {
         diffs.push(DiffEntry {
-            path: clip_text(string(message, "tool_name"), 120),
+            path: sanitize(string(message, "tool_name")),
             status: status.into(),
-            diff: clip_text(&text, MAX_PREVIEW_BYTES),
+            diff: sanitize(&text),
         });
     }
 }
@@ -1786,9 +1819,9 @@ fn collect_value_entry(
         .filter(|text| !text.is_empty())
     {
         diffs.push(DiffEntry {
-            path: clip_text(if path.is_empty() { "diff" } else { path }, 240),
+            path: sanitize(if path.is_empty() { "diff" } else { path }),
             status: status.into(),
-            diff: clip_text(diff, MAX_PREVIEW_BYTES),
+            diff: sanitize(diff),
         });
     } else if let Some(hunks) = value["hunks"].as_array() {
         let rendered = hunks
@@ -1817,14 +1850,14 @@ fn collect_value_entry(
             .join("\n");
         if !rendered.is_empty() {
             diffs.push(DiffEntry {
-                path: clip_text(if path.is_empty() { "hunks" } else { path }, 240),
+                path: sanitize(if path.is_empty() { "hunks" } else { path }),
                 status: status.into(),
-                diff: clip_text(&rendered, MAX_PREVIEW_BYTES),
+                diff: sanitize(&rendered),
             });
         }
     } else if let (Some(old), Some(new)) = (value["old"].as_str(), value["new"].as_str()) {
         diffs.push(DiffEntry {
-            path: clip_text(if path.is_empty() { "patch" } else { path }, 240),
+            path: sanitize(if path.is_empty() { "patch" } else { path }),
             status: status.into(),
             diff: format_replacement_diff(old, new),
         });
@@ -1832,7 +1865,7 @@ fn collect_value_entry(
     if !path.is_empty()
         && let Some(content) = value["content"].as_str()
     {
-        let clean_path = clip_text(path, 240);
+        let clean_path = sanitize(path);
         if !files.iter().any(|existing| existing.path == clean_path) {
             files.push(FileEntry {
                 path: clean_path,
@@ -1852,7 +1885,7 @@ fn format_replacement_diff(old: &str, new: &str) -> String {
     for line in sanitize(new).lines() {
         out.push(format!("+{line}"));
     }
-    clip_text(&out.join("\n"), MAX_PREVIEW_BYTES)
+    sanitize(&out.join("\n"))
 }
 
 fn format_unified_diff(path: &str, old: Option<&str>, new: &str) -> String {
@@ -1884,7 +1917,7 @@ fn format_unified_diff(path: &str, old: Option<&str>, new: &str) -> String {
     for line in new_lines {
         out.push(format!("+{line}"));
     }
-    clip_text(&out.join("\n"), MAX_PREVIEW_BYTES)
+    sanitize(&out.join("\n"))
 }
 
 fn format_numbered_lines(content: &str) -> String {
@@ -1897,7 +1930,7 @@ fn format_numbered_lines(content: &str) -> String {
     if lines.is_empty() {
         "  1 │ ".into()
     } else {
-        clip_text(&lines.join("\n"), MAX_PREVIEW_BYTES)
+        sanitize(&lines.join("\n"))
     }
 }
 
@@ -1917,4 +1950,61 @@ fn fork_label(label: &str) -> String {
         budget -= 1;
     }
     format!("{}{SUFFIX}", &label[..budget])
+}
+
+#[cfg(test)]
+mod complete_inspector_tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn all_files_diffs_and_text_tails_survive_projection() {
+        let text = format!("{}TAIL", "x".repeat(5000));
+        let calls: Vec<_> = (0..100)
+            .map(|n| {
+                json!({
+                    "name":"fs.write", "arguments":{"path":format!("file-{n}.txt"),"content":text},
+                    "outcome":{"type":"completed","result":{"bytes":text.len()}}
+                })
+            })
+            .collect();
+        let (files, diffs) = project_files_and_diffs(&[], &[], &[], &calls);
+        assert_eq!(files.len(), 100);
+        assert_eq!(diffs.len(), 100);
+        assert_eq!(files[0].path, "file-0.txt");
+        assert!(files[0].preview.ends_with("TAIL"));
+        assert!(diffs[0].diff.ends_with("TAIL"));
+        let mut logs = Vec::new();
+        for n in 0..250 {
+            push_log(&mut logs, format!("{n}: {text}"));
+        }
+        assert_eq!(logs.len(), 250);
+        assert!(logs[0].ends_with("TAIL"));
+    }
+}
+
+#[cfg(test)]
+mod stream_delta_tests {
+    use super::*;
+    #[test]
+    fn metadata_and_tool_fragments_preserve_text_and_incomplete_arguments() {
+        let mut message = Some(
+            json!({"content":[{"type":"text","text":"kept"},{"type":"toolCall","id":"c","name":"tool","arguments":{}}]}),
+        );
+        apply_stream_update(
+            &mut message,
+            &json!({"type":"tool_call_delta","index":1,"delta":"{\"x\":"}),
+        )
+        .unwrap();
+        apply_stream_update(
+            &mut message,
+            &json!({"type":"tool_call_delta","index":1,"delta":"1}"}),
+        )
+        .unwrap();
+        apply_stream_update(&mut message, &json!({"type":"usage_update","usage":{},"usage_status":"reported","usage_fields":{},"response_id":null,"response_model":null})).unwrap();
+        let message = message.unwrap();
+        assert_eq!(message["content"][0]["text"], "kept");
+        assert_eq!(message["content"][1]["arguments"], "{\"x\":1}");
+        assert!(message["content"][1]["arguments_error"].is_string());
+    }
 }

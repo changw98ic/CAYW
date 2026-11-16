@@ -327,7 +327,7 @@ mod tests {
     #[test]
     fn recovery_required_reads_the_nested_unknown_state() {
         let nested_cause = RuntimeError::RecoveryRequired {
-            cause: Box::new(RuntimeError::NeedsReconciliation),
+            cause: Box::new(unknown_recovery()),
             cleanup: None,
             outcome_unknown: false,
         };
@@ -356,6 +356,14 @@ mod tests {
         assert!(!failure.outcome_unknown);
     }
 
+    fn unknown_recovery() -> RuntimeError {
+        RuntimeError::RecoveryRequired {
+            cause: Box::new(RuntimeError::Worker("lost terminal evidence".into())),
+            cleanup: None,
+            outcome_unknown: true,
+        }
+    }
+
     fn assert_sdk_and_ipc_agree(name: &str, build: fn() -> RuntimeError) {
         assert_eq!(classify_sdk(build()), classify_ipc(build()), "{name}");
     }
@@ -373,7 +381,7 @@ mod tests {
         });
         assert_sdk_and_ipc_agree("nested unknown recovery", || {
             RuntimeError::RecoveryRequired {
-                cause: Box::new(RuntimeError::NeedsReconciliation),
+                cause: Box::new(unknown_recovery()),
                 cleanup: None,
                 outcome_unknown: false,
             }
@@ -386,9 +394,9 @@ mod tests {
     }
 
     #[test]
-    fn reconciliation_keeps_the_runtime_code_in_both_modes() {
-        let expected = ("needs_reconciliation_outcome_unknown".into(), true);
-        assert_eq!(classify_sdk(RuntimeError::NeedsReconciliation), expected);
-        assert_eq!(classify_ipc(RuntimeError::NeedsReconciliation), expected);
+    fn unknown_recovery_keeps_the_runtime_code_in_both_modes() {
+        let expected = ("runtime_outcome_unknown".into(), true);
+        assert_eq!(classify_sdk(unknown_recovery()), expected);
+        assert_eq!(classify_ipc(unknown_recovery()), expected);
     }
 }

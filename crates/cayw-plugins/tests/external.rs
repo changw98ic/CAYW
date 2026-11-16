@@ -575,7 +575,15 @@ async fn confirmed_handshake_failure_is_known_and_retryable() {
 #[tokio::test]
 async fn wrong_request_id_crash_oversize_and_forged_envelope_are_terminal() {
     for mode in ["wrong_id", "crash", "oversize", "approval", "unknown"] {
-        let registry = load(mode).await;
+        let registry = PluginRegistry::new();
+        let mut configuration = config(mode);
+        if mode == "oversize" {
+            configuration.max_line_bytes = Some(64 * 1024);
+        }
+        registry
+            .load_external(configuration, context(), CancellationToken::new())
+            .await
+            .unwrap();
         let error = registry
             .call(
                 "fixture",
@@ -626,8 +634,8 @@ async fn external_known_failure_is_retained_and_process_can_continue() {
 async fn stderr_and_lifetime_stdout_budgets_are_enforced() {
     let registry = PluginRegistry::new();
     let mut configuration = config("stderr");
-    configuration.max_line_bytes = 4096;
-    configuration.max_output_bytes = 8192;
+    configuration.max_line_bytes = Some(4096);
+    configuration.max_output_bytes = Some(8192);
     registry
         .load_external(configuration, context(), CancellationToken::new())
         .await
@@ -645,8 +653,8 @@ async fn stderr_and_lifetime_stdout_budgets_are_enforced() {
     assert!(matches!(error, PluginError::Protocol(_)));
     let registry = PluginRegistry::new();
     let mut configuration = config("echo");
-    configuration.max_line_bytes = 1024;
-    configuration.max_output_bytes = 2048;
+    configuration.max_line_bytes = Some(1024);
+    configuration.max_output_bytes = Some(2048);
     registry
         .load_external(configuration, context(), CancellationToken::new())
         .await
@@ -837,4 +845,26 @@ async fn unix_unload_kills_process_group_including_descendant() {
     );
     wait_dead(parent).await;
     wait_dead(descendant).await;
+}
+
+#[tokio::test]
+async fn default_external_stream_survives_large_frames_and_cumulative_output() {
+    let registry = load("echo").await;
+    let body = "x".repeat(128 * 1024);
+    for sequence in 0..40 {
+        let result = registry
+            .call(
+                "fixture",
+                "fixture.echo",
+                json!({"sequence":sequence,"body":body}),
+                CancellationToken::new(),
+                Some(Duration::from_secs(10)),
+            )
+            .await
+            .unwrap();
+        assert_eq!(result["sequence"], sequence);
+        assert!(result["body"].as_str() == Some(body.as_str()));
+    }
+    assert!(registry.check_available("fixture").is_ok());
+    registry.unload_and_wait("fixture").await.unwrap();
 }

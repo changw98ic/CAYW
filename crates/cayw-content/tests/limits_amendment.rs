@@ -128,3 +128,40 @@ fn amendment_with_equal_limits_is_a_no_op_and_still_checks_identity() {
         Err(Error::RootIdentityMismatch)
     ));
 }
+
+#[test]
+fn old_default_limits_require_explicit_amendment_and_keep_all_content() {
+    let root = dir();
+    let path = root.path().join("store");
+    let device = id("device");
+    let old = Limits {
+        max_content_bytes: 16 * 1024 * 1024,
+        max_total_bytes: 256 * 1024 * 1024,
+        max_records: 1024,
+        max_security_entries: 16384,
+    };
+    let store = ContentStore::open_private(&path, device.clone(), old, None).unwrap();
+    let record = store
+        .put(&id("note"), ExpectedRevision::Absent, b"preserved")
+        .unwrap();
+    let metadata = store.root_metadata().unwrap();
+    assert!(matches!(
+        ContentStore::open_private(&path, device.clone(), Limits::default(), None),
+        Err(Error::StoreConfigurationMismatch)
+    ));
+    let amended = ContentStore::open_private_amending_limits(
+        &path,
+        device,
+        Limits::default(),
+        (metadata.device, metadata.inode),
+    )
+    .unwrap();
+    assert_eq!(
+        amended.read(&id("note")).unwrap().unwrap(),
+        (record, b"preserved".to_vec())
+    );
+    assert!(matches!(
+        store.read(&id("note")),
+        Err(Error::StoreConfigurationMismatch)
+    ));
+}

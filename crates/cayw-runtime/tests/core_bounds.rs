@@ -164,18 +164,21 @@ impl Provider for StreamingHugeProvider {
             }),
         )));
         partial.stop_reason = StopReason::ToolUse;
-        // Providers accumulate tool-call arguments and republish the partial on
-        // every delta. Every MessageUpdate is durable, so a 70 KiB argument now
-        // persists verbatim instead of being rewritten into a summary.
+        // Delta arguments persist verbatim; block completion confirms the JSON.
+        let mut started = partial.clone();
+        let Content::ToolCall(call) = &mut started.content[0] else {
+            unreachable!()
+        };
+        let arguments = serde_json::to_string(&call.arguments).unwrap();
+        call.arguments = json!({});
         Box::pin(futures::stream::iter([
             AssistantEvent::ToolCallStart {
                 index: 0,
-                partial: AssistantMessage::new(&request.model),
+                partial: started,
             },
             AssistantEvent::ToolCallDelta {
                 index: 0,
-                delta: "x".repeat(256),
-                partial: partial.clone(),
+                delta: arguments,
             },
             AssistantEvent::ToolCallEnd {
                 index: 0,

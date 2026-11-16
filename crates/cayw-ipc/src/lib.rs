@@ -19,7 +19,7 @@ use tokio::sync::Semaphore;
 use tokio_util::sync::CancellationToken;
 
 /// The only wire version accepted by this crate.
-pub const PROTOCOL_VERSION: u32 = 1;
+pub const PROTOCOL_VERSION: u32 = 2;
 
 /// A terminal RPC error. Codes ending in `_outcome_unknown` (or `outcome_unknown`)
 /// explicitly mean that side effects may have happened.

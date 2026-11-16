@@ -22,10 +22,6 @@ use uuid::Uuid;
 const TASK_EVENT_RESERVE: u64 = 3; // start, optional closing, and end
 const ATTEMPT_EVENT_RESERVE: u64 = 1;
 const REQUEST_EVENT_RESERVE: u64 = 6; // submitted, evaluation, decision, terminal (+ margin)
-const TASK_RESERVE: u64 = (TASK_BYTES as u64) * 3;
-const REQUEST_RESERVE: u64 = (RECORD_BYTES as u64) * 8;
-// Defensive bound for explicit authority inspection, not an admission quota.
-const INSPECTION_TASKS: usize = 1_000_000;
 
 const SCHEMA: &str = "
 CREATE TABLE IF NOT EXISTS request_meta (
@@ -38,6 +34,8 @@ CREATE TABLE IF NOT EXISTS request_meta (
  reserved_bytes INTEGER NOT NULL CHECK(reserved_bytes>=0)
 ) STRICT;
 CREATE TABLE IF NOT EXISTS request_tasks (id TEXT PRIMARY KEY, data BLOB NOT NULL) STRICT;
+CREATE INDEX IF NOT EXISTS request_active_tasks ON request_tasks(id)
+ WHERE json_extract(data,'$.state.state') IN ('active','closing');
 CREATE TABLE IF NOT EXISTS capability_requests (
  id TEXT PRIMARY KEY, task_id TEXT NOT NULL REFERENCES request_tasks(id), data BLOB NOT NULL
 ) STRICT;
@@ -246,16 +244,6 @@ impl RequestStore {
             let prepared_result = (|| -> Result<RepairData> {
                 fence.write(&current.authority_id, now, Phase::Pending)?;
                 tx.execute_batch(REPAIR_SCHEMA)?;
-                let inspection_bytes = bounded_json(
-                    &request.inspection,
-                    repair_record_limit(current.tasks.len())?,
-                )?
-                .len() as u64;
-                let repair_bytes = inspection_bytes
-                    .checked_mul(2)
-                    .and_then(|n| n.checked_add(16 * 1024))
-                    .ok_or(RequestError::Budget)?;
-                reserve(&tx, &config, 0, repair_bytes)?;
                 for task in &current.tasks {
                     let mut stored = identity_task(&tx, &task.identity)?;
                     terminalize_all(
@@ -295,10 +283,7 @@ impl RequestStore {
                     prepared_digest: facts_digest(&tx)?,
                     at_ms: now,
                 };
-                let bytes = bounded_json(
-                    &repair,
-                    repair_record_limit(request.inspection.tasks.len())?,
-                )?;
+                let bytes = serde_json::to_vec(&repair)?;
                 tx.execute(
                     "INSERT INTO request_authority_repairs VALUES(?1,?2,?3,?4)",
                     params![request.repair_id, current.authority_id, next_id, bytes],
@@ -676,9 +661,24 @@ impl RequestStore {
         let config = self.config.read().map_err(|_| RequestError::Poisoned)?;
         self.transaction_with(&config, operation)
     }
+    fn transaction_admitting<T>(
+        &self,
+        operation: impl FnOnce(&Transaction<'_>, u64, &RequestConfig) -> Result<T>,
+    ) -> Result<T> {
+        let config = self.config.read().map_err(|_| RequestError::Poisoned)?;
+        self.transaction_with_admission(&config, true, operation)
+    }
     fn transaction_with<T>(
         &self,
         config: &RequestConfig,
+        operation: impl FnOnce(&Transaction<'_>, u64, &RequestConfig) -> Result<T>,
+    ) -> Result<T> {
+        self.transaction_with_admission(config, false, operation)
+    }
+    fn transaction_with_admission<T>(
+        &self,
+        config: &RequestConfig,
+        admission: bool,
         operation: impl FnOnce(&Transaction<'_>, u64, &RequestConfig) -> Result<T>,
     ) -> Result<T> {
         let mut fence = self
@@ -776,7 +776,17 @@ impl RequestStore {
             // Keep the IMMEDIATE lock through the clock commit. Only projection
             // and events are rolled back on a rejected business operation.
             tx.execute_batch("SAVEPOINT request_operation")?;
-            let result = operation(&tx, observed, config);
+            let result = operation(&tx, observed, config).and_then(|value| {
+                let (count, bytes) = live_usage(&tx)?;
+                if admission && config.max_state_bytes.is_some_and(|limit| bytes > limit) {
+                    return Err(RequestError::Budget);
+                }
+                tx.execute(
+                    "UPDATE request_meta SET task_count=?1,reserved_bytes=?2 WHERE singleton=1",
+                    params![count, sql_integer(bytes)?],
+                )?;
+                Ok(value)
+            });
             if result.is_err()
                 && !matches!(
                     result,
@@ -827,7 +837,7 @@ impl RequestStore {
     ) -> Result<()> {
         identity.validate()?;
         crate::types::validate_intent(&intent)?;
-        self.transaction(|tx, now, config| {
+        self.transaction_admitting(|tx, now, config| {
             let exists: bool = tx.query_row(
                 "SELECT EXISTS(SELECT 1 FROM request_tasks WHERE id=?1)",
                 [&identity.task_id],
@@ -844,7 +854,7 @@ impl RequestStore {
             if config.max_tasks.is_some_and(|limit| count >= limit) {
                 return Err(RequestError::Budget);
             }
-            reserve(tx, config, TASK_EVENT_RESERVE, TASK_RESERVE)?;
+            reserve(tx, config, TASK_EVENT_RESERVE)?;
             let task = TaskData {
                 identity: identity.clone(),
                 intent,
@@ -853,7 +863,7 @@ impl RequestStore {
                 attempts: vec![identity.attempt_id.clone()],
                 request_count: 0,
             };
-            let data = bounded_json(&task, TASK_BYTES)?;
+            let data = serde_json::to_vec(&task)?;
             tx.execute(
                 "INSERT INTO request_tasks VALUES(?1,?2)",
                 params![identity.task_id, data],
@@ -887,7 +897,7 @@ impl RequestStore {
         current.validate()?;
         identifier(next_attempt_id)?;
         text(reason)?;
-        self.transaction(|tx, now, config| {
+        self.transaction_admitting(|tx, now, config| {
             let mut task = active_task(tx, current)?;
             if task.attempts.iter().any(|a| a == next_attempt_id) { return Err(RequestError::Stale); }
             if config
@@ -896,7 +906,7 @@ impl RequestStore {
             {
                 return Err(RequestError::Budget);
             }
-            reserve(tx, config, ATTEMPT_EVENT_RESERVE, TASK_BYTES as u64 + 16 * 1024)?;
+            reserve(tx, config, ATTEMPT_EVENT_RESERVE)?;
             terminalize_all(tx, &task, now, RequestState::Superseded, DecisionKind::Superseded, actor, reason)?;
             task.identity.attempt_id = next_attempt_id.into();
             task.attempts.push(next_attempt_id.into());
@@ -968,7 +978,6 @@ impl RequestStore {
             if matches!(task.state, TaskState::Ended { .. }) {
                 return Err(RequestError::Stale);
             }
-            let release = task_reservation(&task);
             terminalize_all(
                 tx,
                 &task,
@@ -994,10 +1003,8 @@ impl RequestStore {
                 actor.as_str(),
                 &task.state,
             )?;
-            // A finished task stops running work. Its task count and
-            // conservative active-state reservation return to the operational
-            // pool; its immutable projection and events remain tombstones.
-            release_task_quota(tx, release)?;
+            // The transaction recomputes operational usage from unfinished
+            // rows; the ended task and immutable events remain retained.
             Ok(task.state)
         })
     }
@@ -1027,14 +1034,9 @@ impl RequestStore {
         identity.validate()?;
         identifier(&input.operation_id)?;
         identifier(&input.capability)?;
-        if input.purpose.len() > TEXT_BYTES || input.gap.len() > TEXT_BYTES {
-            return Err(RequestError::InvalidInput(
-                "purpose or gap exceeds byte limit".into(),
-            ));
-        }
         argument_bounds(&input.arguments)?;
         input.arguments = canonical(&input.arguments);
-        self.transaction(|tx, now, config| {
+        self.transaction_admitting(|tx, now, config| {
             let mut task = active_task(tx, identity)?;
             check_catalog(&task, catalog)?;
             expire_task(tx, &task, now)?;
@@ -1124,8 +1126,8 @@ impl RequestStore {
                 record: record.clone(),
                 evaluation_nonce: None,
             };
-            let data = bounded_json(&stored, RECORD_BYTES)?;
-            reserve(tx, config, REQUEST_EVENT_RESERVE, REQUEST_RESERVE)?;
+            let data = serde_json::to_vec(&stored)?;
+            reserve(tx, config, REQUEST_EVENT_RESERVE)?;
             // A new valid request replaces older requests for exactly this scope;
             // any outstanding evaluator ticket immediately becomes stale.
             if valid {
@@ -1436,7 +1438,7 @@ impl RequestStore {
             while let Some(row) = rows.next()? {
                 let payload: Vec<u8> = row.get(6)?;
                 let event = RequestEvent { sequence: read_unsigned(&row.get::<_, i64>(0)?)?, at_ms: read_unsigned(&row.get::<_, i64>(1)?)?, task_id: row.get(2)?, request_id: row.get(3)?, kind: row.get(4)?, actor: row.get(5)?, payload: serde_json::from_slice(&payload)? };
-                let size = bounded_json(&event, TASK_BYTES + RECORD_BYTES)?.len().checked_add(usize::from(!events.is_empty())).ok_or(RequestError::Budget)?;
+                let size = serde_json::to_vec(&event)?.len().checked_add(usize::from(!events.is_empty())).ok_or(RequestError::Budget)?;
                 if config
                     .max_result_bytes
                     .is_some_and(|limit| size > limit.saturating_sub(bytes))
@@ -1551,18 +1553,8 @@ fn inspect_locked(
     let mut rows = statement.query([])?;
     let mut tasks = Vec::new();
     while let Some(row) = rows.next()? {
-        // Completed tasks are permanent tombstones, so the operational
-        // `max_tasks` admission limit must not bound inspection. This wider
-        // defensive parse bound only stops a corrupt table from exhausting
-        // memory during explicit recovery.
-        if tasks.len() >= INSPECTION_TASKS {
-            return Err(RequestError::Budget);
-        }
         let id: String = row.get(0)?;
         let data: Vec<u8> = row.get(1)?;
-        if data.len() > TASK_BYTES {
-            return Err(RequestError::Budget);
-        }
         let task: TaskData = serde_json::from_slice(&data)?;
         task.identity.validate()?;
         if task.identity.task_id != id {
@@ -1629,12 +1621,6 @@ fn marker_time(marker: &[u8]) -> u64 {
     serde_json::from_slice::<crate::authority::Record>(marker)
         .ok()
         .map_or(0, |record| record.last_now_ms)
-}
-fn repair_record_limit(tasks: usize) -> Result<usize> {
-    tasks
-        .checked_mul(4096)
-        .and_then(|n| n.checked_add(16 * 1024))
-        .ok_or(RequestError::Budget)
 }
 fn read_repair(tx: &Transaction<'_>, repair_id: &str) -> Result<Option<RepairData>> {
     let exists: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE type='table' AND name='request_authority_repairs')", [], |r| r.get(0))?;
@@ -1705,10 +1691,8 @@ fn activate_repair(
             "INSERT INTO request_authority_activations VALUES(?1)",
             [&repair.receipt.repair_id],
         )?;
-        // Preparation held a temporary reservation through the activation
-        // commit. Rebuild the unfinished-task projection in this same commit
-        // so completed repairs never become a lifetime admission charge. The
-        // immutable repair and activation records remain retained.
+        // Repair is a control operation, not a new admission. Recompute the
+        // actual unfinished-task bytes while retaining immutable repair evidence.
         let (active, reserved_bytes) = live_usage(&tx)?;
         tx.execute(
             "UPDATE request_meta SET authority_stopped=0,task_count=?2,reserved_bytes=?3 WHERE singleton=1 AND authority_id=?1",
@@ -1758,49 +1742,29 @@ fn sql_integer(value: u64) -> Result<i64> {
 fn read_unsigned(value: &i64) -> Result<u64> {
     u64::try_from(*value).map_err(|_| RequestError::Clock)
 }
-fn reserve(tx: &Transaction<'_>, config: &RequestConfig, events: u64, bytes: u64) -> Result<()> {
-    let (old_events, old_bytes): (i64, i64) = tx.query_row(
-        "SELECT reserved_events,reserved_bytes FROM request_meta WHERE singleton=1",
+fn reserve(tx: &Transaction<'_>, config: &RequestConfig, events: u64) -> Result<()> {
+    let old_events: i64 = tx.query_row(
+        "SELECT reserved_events FROM request_meta WHERE singleton=1",
         [],
-        |r| Ok((r.get(0)?, r.get(1)?)),
+        |r| r.get(0),
     )?;
-    let old_events = read_unsigned(&old_events)?;
-    let old_bytes = read_unsigned(&old_bytes)?;
-    let next_events = old_events.checked_add(events);
-    let next_events = match config.max_events {
-        Some(limit) => next_events.filter(|n| *n <= limit),
-        None => next_events,
+    let next = read_unsigned(&old_events)?
+        .checked_add(events)
+        .ok_or(RequestError::Budget)?;
+    if config.max_events.is_some_and(|limit| next > limit) {
+        return Err(RequestError::Budget);
     }
-    .ok_or(RequestError::Budget)?;
-    let next_bytes = old_bytes.checked_add(bytes);
-    let next_bytes = match config.max_state_bytes {
-        Some(limit) => next_bytes.filter(|n| *n <= limit),
-        None => next_bytes,
-    }
-    .ok_or(RequestError::Budget)?;
     tx.execute(
-        "UPDATE request_meta SET reserved_events=?1,reserved_bytes=?2 WHERE singleton=1",
-        params![sql_integer(next_events)?, sql_integer(next_bytes)?],
+        "UPDATE request_meta SET reserved_events=?1 WHERE singleton=1",
+        [sql_integer(next)?],
     )?;
     Ok(())
-}
-/// Conservative state reservation held by one unfinished task. It covers the
-/// original projection, every terminal rewrite, each attempt replacement, and
-/// all request lifecycles recorded in that task. `end_task` returns exactly
-/// this amount, so completed ordinary work does not consume an operational
-/// allowance forever. Terminal tombstones and event rows remain retained.
-fn task_reservation(task: &TaskData) -> u64 {
-    let attempts = task.attempts.len().saturating_sub(1) as u64;
-    let requests = task.request_count as u64;
-    TASK_RESERVE
-        .saturating_add(attempts.saturating_mul(TASK_BYTES as u64 + 16 * 1024))
-        .saturating_add(requests.saturating_mul(REQUEST_RESERVE))
 }
 /// Rebuild the operational counters from the durable task projection. Called
 /// on open so databases from the earlier lifetime-counter semantics migrate
 /// without deleting any audit fact. Terminal tasks hold no reservation.
 fn live_usage(tx: &Transaction<'_>) -> Result<(u32, u64)> {
-    let mut statement = tx.prepare("SELECT data FROM request_tasks ORDER BY id")?;
+    let mut statement = tx.prepare("SELECT data FROM request_tasks WHERE json_extract(data,'$.state.state') IN ('active','closing') ORDER BY id")?;
     let mut rows = statement.query([])?;
     let mut active = 0_u32;
     let mut reserved = 0_u64;
@@ -1809,29 +1773,18 @@ fn live_usage(tx: &Transaction<'_>) -> Result<(u32, u64)> {
         let task: TaskData = serde_json::from_slice(&data)?;
         if matches!(task.state, TaskState::Active | TaskState::Closing { .. }) {
             active = active.checked_add(1).ok_or(RequestError::Budget)?;
+            let request_bytes: i64 = tx.query_row(
+                "SELECT COALESCE(SUM(length(data)),0) FROM capability_requests WHERE task_id=?1",
+                [&task.identity.task_id],
+                |row| row.get(0),
+            )?;
             reserved = reserved
-                .checked_add(task_reservation(&task))
+                .checked_add(data.len() as u64)
+                .and_then(|total| total.checked_add(request_bytes as u64))
                 .ok_or(RequestError::Budget)?;
         }
     }
     Ok((active, reserved))
-}
-/// Return one finished task's count and state reservation to the operational
-/// pool. Saturating arithmetic cannot silently wrap on a migrated projection
-/// whose older reservation was already released or never charged.
-fn release_task_quota(tx: &Transaction<'_>, release: u64) -> Result<()> {
-    let (count, reserved): (i64, i64) = tx.query_row(
-        "SELECT task_count,reserved_bytes FROM request_meta WHERE singleton=1",
-        [],
-        |r| Ok((r.get(0)?, r.get(1)?)),
-    )?;
-    let count = read_unsigned(&count)?.saturating_sub(1);
-    let reserved = read_unsigned(&reserved)?.saturating_sub(release);
-    tx.execute(
-        "UPDATE request_meta SET task_count=?1,reserved_bytes=?2 WHERE singleton=1",
-        params![sql_integer(count)?, sql_integer(reserved)?],
-    )?;
-    Ok(())
 }
 fn event(
     tx: &Transaction<'_>,
@@ -1842,7 +1795,7 @@ fn event(
     actor: &str,
     payload: &impl Serialize,
 ) -> Result<()> {
-    let payload = bounded_json(payload, TASK_BYTES + RECORD_BYTES)?;
+    let payload = serde_json::to_vec(payload)?;
     tx.execute("INSERT INTO request_events(at_ms,task_id,request_id,kind,actor,payload) VALUES(?1,?2,?3,?4,?5,?6)", params![sql_integer(now)?,identity.task_id,request_id,kind,actor,payload])?;
     Ok(())
 }
@@ -1875,7 +1828,7 @@ fn check_catalog(task: &TaskData, catalog: &OperationCatalog) -> Result<()> {
     Ok(())
 }
 fn save_task(tx: &Transaction<'_>, task: &TaskData) -> Result<()> {
-    let bytes = bounded_json(task, TASK_BYTES)?;
+    let bytes = serde_json::to_vec(task)?;
     tx.execute(
         "UPDATE request_tasks SET data=?1 WHERE id=?2",
         params![bytes, task.identity.task_id],
@@ -1908,7 +1861,7 @@ fn task_requests(tx: &Transaction<'_>, task_id: &str) -> Result<Vec<StoredReques
     rows.map(|row| Ok(serde_json::from_slice(&row?)?)).collect()
 }
 fn save_request(tx: &Transaction<'_>, request: &StoredRequest) -> Result<()> {
-    let bytes = bounded_json(request, RECORD_BYTES)?;
+    let bytes = serde_json::to_vec(request)?;
     tx.execute(
         "UPDATE capability_requests SET data=?1 WHERE id=?2",
         params![bytes, request.record.id],

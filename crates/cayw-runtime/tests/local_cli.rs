@@ -1180,6 +1180,7 @@ async fn start_owns_one_client_without_workspace_launcher_state() {
 }
 
 #[cfg(feature = "plugins")]
+#[cfg(feature = "plugins")]
 #[tokio::test]
 async fn client_owns_global_plugin_inventory_and_workspace_activations() {
     let root = tempfile::tempdir().unwrap();
@@ -1499,6 +1500,7 @@ async fn client_owns_global_plugin_inventory_and_workspace_activations() {
     );
 }
 
+#[cfg(feature = "plugins")]
 #[cfg(feature = "plugins")]
 #[tokio::test]
 async fn client_start_continues_with_identity_less_plugin_cleanup_block() {

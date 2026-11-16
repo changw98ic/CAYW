@@ -692,3 +692,99 @@ fn env_describe_isolated_process_resolution() {
         String::from_utf8_lossy(&output.stderr)
     );
 }
+
+#[test]
+fn default_vision_accepts_4k_handles_and_long_images_while_explicit_budgets_remain() {
+    let router = VisionRouter::new(
+        Arc::new(FixtureOcrEngine::new()),
+        Arc::new(CountingDescribeBackend::new()),
+    );
+    let sink = Arc::new(MockImageSink(std::sync::Mutex::new(
+        std::collections::HashMap::new(),
+    )));
+    sink.0
+        .lock()
+        .unwrap()
+        .insert("4k".into(), vec![0; 3840 * 2160 * 4]);
+    sink.0
+        .lock()
+        .unwrap()
+        .insert("long".into(), vec![0; 10000 * 4]);
+    let service = VisionService::with_router(router, Limits::default())
+        .unwrap()
+        .with_sink(sink);
+    let definition = definitions()
+        .into_iter()
+        .find(|d| d.name == "vision.crop")
+        .unwrap();
+    for (handle, width, height) in [("4k", 3840, 2160), ("long", 1, 10000)] {
+        let args = json!({"image":{"handle":handle,"width":width,"height":height},"x":0,"y":0,"width":1,"height":1});
+        cayw_ai::ArgumentValidator::new(&definition.parameters)
+            .unwrap()
+            .validate(&args)
+            .unwrap();
+        assert_eq!(
+            service
+                .execute_value("vision.crop", &args, &CancellationToken::new())
+                .unwrap()["width"],
+            1
+        );
+    }
+    assert!(
+        Limits {
+            max_image_bytes: Some(128 * 1024 * 1024),
+            ..Limits::default()
+        }
+        .validate()
+        .is_ok()
+    );
+    let image = sample();
+    let bounded = VisionService::with_router(
+        VisionRouter::new(
+            Arc::new(FixtureOcrEngine::new()),
+            Arc::new(CountingDescribeBackend::new()),
+        ),
+        Limits {
+            max_image_bytes: Some(image.rgba().len()),
+            ..Limits::default()
+        },
+    )
+    .unwrap();
+    assert!(
+        bounded
+            .execute_value(
+                "vision.colors",
+                &json!({"image":image_arg(&image)}),
+                &CancellationToken::new()
+            )
+            .is_ok()
+    );
+    let too_small = VisionService::with_router(
+        VisionRouter::new(
+            Arc::new(FixtureOcrEngine::new()),
+            Arc::new(CountingDescribeBackend::new()),
+        ),
+        Limits {
+            max_image_bytes: Some(image.rgba().len() - 1),
+            ..Limits::default()
+        },
+    )
+    .unwrap();
+    assert!(
+        too_small
+            .execute_value(
+                "vision.colors",
+                &json!({"image":image_arg(&image)}),
+                &CancellationToken::new()
+            )
+            .is_err()
+    );
+    assert!(
+        Limits {
+            input_bytes: Some(0),
+            ..Limits::default()
+        }
+        .validate()
+        .is_err()
+    );
+}

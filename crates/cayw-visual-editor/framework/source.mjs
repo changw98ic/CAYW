@@ -26,10 +26,6 @@ const VueNodeTypes = compilerDom.NodeTypes || {
   DIRECTIVE: 7,
 };
 
-const MAX_TEXT_BYTES = 256 * 1024;
-const MAX_ATTRIBUTE_VALUE_BYTES = 64 * 1024;
-const MAX_STYLE_VALUE_BYTES = 512;
-const MAX_STYLE_PROPERTIES = 32;
 
 // Tags that never own a closing tag in a template.
 const VOID_TAGS = new Set([
@@ -1763,9 +1759,6 @@ function validateStyleProperties(properties) {
   }
   const keys = Object.keys(properties);
   if (keys.length === 0) fail('invalid_style', 'style operation requires at least one property');
-  if (keys.length > MAX_STYLE_PROPERTIES) {
-    fail('invalid_style', `style operation is limited to ${MAX_STYLE_PROPERTIES} properties`);
-  }
   const updates = [];
   for (const rawName of keys) {
     const trimmed = rawName.trim();
@@ -1781,9 +1774,8 @@ function validateStyleProperties(properties) {
     if (typeof rawValue !== 'string') {
       fail('invalid_style', `style value for ${name} must be a string`);
     }
-    if (Buffer.byteLength(rawValue, 'utf8') > MAX_STYLE_VALUE_BYTES
-      || [...rawValue].some((character) => CONTROL_CHARS.test(character))) {
-      fail('invalid_style', `style value for ${name} exceeds the limit`);
+    if ([...rawValue].some((character) => CONTROL_CHARS.test(character))) {
+      fail('invalid_style', `style value for ${name} contains a control character`);
     }
     const [value, important] = stripImportant(rawValue.trim());
     if (!value || !safeCssValue(value)) {
@@ -1847,9 +1839,8 @@ function validateAttribute(record, name, value) {
   if (!ATTRIBUTE_NAMES.has(name)) {
     fail('invalid_attribute', `${name} is not an editable attribute`);
   }
-  if (Buffer.byteLength(value, 'utf8') > MAX_ATTRIBUTE_VALUE_BYTES
-    || [...value].some((character) => CONTROL_CHARS.test(character) || character === '\r')) {
-    fail('invalid_value', 'attribute value exceeds the limit or contains a control character');
+  if ([...value].some((character) => CONTROL_CHARS.test(character) || character === '\r')) {
+    fail('invalid_value', 'attribute value contains a control character');
   }
   const targetLower = normalizeTag(targetAttributeName(record, name));
   if (record.dynamicAttrNames
@@ -1949,9 +1940,6 @@ function validateAttribute(record, name, value) {
 }
 
 function validateText(text) {
-  if (Buffer.byteLength(text, 'utf8') > MAX_TEXT_BYTES) {
-    fail('invalid_value', `text exceeds the ${MAX_TEXT_BYTES}-byte limit`);
-  }
   if ([...text].some((character) => CONTROL_CHARS.test(character))) {
     fail('invalid_value', 'text contains an unsupported control character');
   }

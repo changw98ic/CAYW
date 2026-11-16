@@ -1,10 +1,5 @@
-//! Fixed historical JSON for the cross-component `AgentEvent` / `ToolResult`
-//! contracts.
-//!
-//! The fixture was generated once from pre-move baseline code and is sealed; the
-//! tests here only read it. It is the guard that proves moving the definitions
-//! kept the serialized bytes and field names unchanged. All timestamps in the
-//! fixture are explicit so the golden bytes do not depend on the wall clock.
+//! Canonical Core v4 event contract. The pre-v4 sample remains sealed for
+//! historical migration evidence; this sample pins incremental updates.
 
 use cayw_agent::{AgentEvent, ToolResult};
 use cayw_ai::{
@@ -22,7 +17,7 @@ struct Golden {
 }
 
 fn fixture_path() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/agent_events.golden.json")
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/agent_events.v4.golden.json")
 }
 
 fn usage() -> Usage {
@@ -105,11 +100,9 @@ fn fixtures() -> Golden {
         },
         AgentEvent::MessageStart { message: user },
         AgentEvent::MessageUpdate {
-            message: streaming.clone(),
             event: Box::new(AssistantEvent::TextDelta {
                 index: 0,
                 delta: "hi".into(),
-                partial: streaming.clone(),
             }),
         },
         AgentEvent::MessageEnd {

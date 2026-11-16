@@ -457,9 +457,11 @@ impl Agent {
             match &event {
                 AgentEvent::MessageStart {
                     message: Message::Assistant(message),
-                }
-                | AgentEvent::MessageUpdate { message, .. } => {
-                    state.streaming = Some(message.clone())
+                } => state.streaming = Some(message.clone()),
+                AgentEvent::MessageUpdate { event } => {
+                    event
+                        .apply_to(state.streaming.as_mut().expect("started assistant stream"))
+                        .expect("provider event was validated against the active message");
                 }
                 AgentEvent::MessageEnd {
                     message: Message::Assistant(message),
@@ -901,7 +903,15 @@ impl Agent {
                     );
                 }
             };
-            partial = event.message().clone();
+            if let Err(error) = event.apply_to(&mut partial) {
+                return with_duration(
+                    partial.failure(
+                        StopReason::Error,
+                        format!("Invalid provider event: {error}"),
+                    ),
+                    started,
+                );
+            }
             if event.is_terminal() {
                 if matches!(event, AssistantEvent::Error { .. })
                     && !partial.stop_reason.is_failure()
@@ -964,8 +974,7 @@ impl Agent {
             }
             self.emit(
                 AgentEvent::MessageUpdate {
-                    message: partial.clone(),
-                    event: Box::new(event.clone()),
+                    event: Box::new(event),
                 },
                 cancel,
             )

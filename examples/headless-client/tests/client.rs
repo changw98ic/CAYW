@@ -508,7 +508,26 @@ async fn check_two_turns(mode: &str) {
         requests.len() >= 3,
         "two user turns must include tool consumption; model request count differs from user turn count"
     );
-    let resumed = &requests.last().unwrap()["messages"].as_array().unwrap();
+    // SDK mode also performs background summaries; select the actual second
+    // user turn rather than assuming the final provider request is that turn.
+    let resumed = requests
+        .iter()
+        .rev()
+        .find_map(|request| {
+            let messages = request["messages"].as_array()?;
+            messages
+                .iter()
+                .any(|message| {
+                    message["role"] == "user"
+                        && message["content"].as_array().is_some_and(|parts| {
+                            parts.iter().any(|part| {
+                                part["text"] == "Use the previous saved fact and add one."
+                            })
+                        })
+                })
+                .then_some(messages)
+        })
+        .expect("second user turn reached the provider");
     assert_eq!(
         resumed
             .iter()
@@ -541,9 +560,9 @@ async fn ipc_two_turns_require_approval_and_preserve_history_and_cursor_across_p
     check_two_turns("ipc").await;
 }
 
-async fn check_unknown_rejection(mode: &str) {
-    // A missing RPC unknown suffix or a dropped client flag must not turn an
-    // unresolved original effect into a known failure that appears safe to retry.
+async fn check_unknown_cleanup(mode: &str) {
+    // Cleanup releases execution capacity while the original unknown facts
+    // and execution identity remain durable and are never replayed.
     let root = tempfile::tempdir().unwrap();
     std::fs::create_dir(root.path().join("workspace")).unwrap();
     let fixture = Fixture::start().await;
@@ -686,7 +705,7 @@ async fn check_unknown_rejection(mode: &str) {
             .success()
     );
     assert_eq!(terminal["task"]["state"], "outcome_unknown");
-    assert_eq!(terminal["session"]["state"], "needs_reconciliation");
+    assert_eq!(terminal["session"]["state"], "idle");
     for field in ["id", "attempt_id", "worker_id", "fence"] {
         assert_eq!(terminal["task"][field], before[field]);
     }
@@ -694,46 +713,80 @@ async fn check_unknown_rejection(mode: &str) {
     tasks.args(["tasks", "--session", &id]);
     let baseline = run(tasks).await;
     let baseline = last(&baseline, "result")["result"].clone();
-    let captured = fixture.requests.lock().unwrap().clone();
-    let request_count = captured.len();
-    assert_eq!(request_count, 1, "cancel fixture requests: {captured:?}");
-    let mut repeat = make();
-    repeat.args(["prompt", "--session", &id, "--text", "do not replay"]);
-    let rejected = tokio::time::timeout(WATCHDOG, repeat.output())
-        .await
-        .unwrap()
-        .unwrap();
-    assert!(!rejected.status.success());
-    let error: Value = serde_json::from_slice(&rejected.stderr).unwrap();
-    let peer = cayw_ipc::Client::connect(address, TOKEN).await.unwrap();
-    let rpc_error = peer
-        .request(
-            "task.enqueue",
-            json!({"session_id":id,"text":"do not replay"}),
-        )
-        .await
-        .unwrap_err();
+    assert_eq!(baseline.as_array().unwrap().len(), 1);
+    let store = cayw_core::SessionStore::open(root.path().join("session.sqlite")).unwrap();
+    let original_events = store.events(&id, 0, 1000).unwrap();
+    for pid in processes {
+        let process = Command::new("/bin/ps")
+            .env_clear()
+            .args(["-p", &pid.to_string(), "-o", "pid="])
+            .output()
+            .await
+            .unwrap();
+        assert!(
+            process.stdout.is_empty(),
+            "original process must be cleaned before accepting another task"
+        );
+    }
+    let mut next = make();
+    next.args(["prompt", "--session", &id, "--text", "do not replay"]);
+    let completed = run(next).await;
+    let finish = last(&completed, "prompt_finished");
+    assert_eq!(finish["task"]["state"], "completed");
+    assert_ne!(finish["task"]["id"], original["id"]);
     let mut tasks = make();
     tasks.args(["tasks", "--session", &id]);
     let after = run(tasks).await;
-    assert_eq!(last(&after, "result")["result"], baseline);
-    assert_eq!(fixture.requests.lock().unwrap().len(), request_count);
-    peer.close().await;
+    let tasks = last(&after, "result")["result"].as_array().unwrap();
+    assert_eq!(tasks.len(), 2);
+    assert_eq!(
+        tasks
+            .iter()
+            .find(|task| task["id"] == original["id"])
+            .unwrap(),
+        &baseline[0]
+    );
+    let events = store.events(&id, 0, 1000).unwrap();
+    assert_eq!(&events[..original_events.len()], original_events.as_slice());
+    let held_requests = fixture
+        .requests
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|request| {
+            request["messages"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .rev()
+                .find(|message| message["role"] == "user")
+                .and_then(|message| message["content"].as_array())
+                .and_then(|parts| parts.first())
+                .is_some_and(|part| part["text"] == "cancel a held process")
+        })
+        .count();
+    assert_eq!(
+        held_requests, 1,
+        "the original held operation must never be requested again"
+    );
+    assert_eq!(
+        finish["session"]["unresolved_calls"],
+        terminal["session"]["unresolved_calls"]
+    );
+    assert_eq!(
+        finish["session"]["unresolved_capabilities"],
+        terminal["session"]["unresolved_capabilities"]
+    );
     shutdown.cancel();
     server.await.unwrap().unwrap();
-    assert_eq!(error["session_id"], id);
-    assert_eq!(error["code"], rpc_error.code, "{mode}: {error}");
-    assert_eq!(error["outcome_unknown"], true, "{mode}: {error}");
-    assert_eq!(rpc_error.code, "needs_reconciliation_outcome_unknown");
-    assert!(rpc_error.outcome_unknown);
 }
 #[tokio::test]
-async fn sdk_unknown_rejection_preserves_identity_and_never_replays() {
-    check_unknown_rejection("sdk").await;
+async fn sdk_unknown_cleanup_allows_new_task_and_preserves_original_identity() {
+    check_unknown_cleanup("sdk").await;
 }
 #[tokio::test]
-async fn ipc_unknown_rejection_preserves_identity_and_never_replays() {
-    check_unknown_rejection("ipc").await;
+async fn ipc_unknown_cleanup_allows_new_task_and_preserves_original_identity() {
+    check_unknown_cleanup("ipc").await;
 }
 
 async fn check_ctrl_c_cancel(mode: &str) {

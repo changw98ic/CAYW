@@ -1,6 +1,6 @@
 //! Real loopback HTTP checks for the trace debug gateway.
 //!
-//! These tests exercise the listener, header policy, body bound and graceful
+//! These tests exercise the listener, header policy, large edit validation and graceful
 //! shutdown. They use an empty [`TraceStore`] and never start a Runtime task.
 
 use cayw_codeintel::{SymbolInput, SymbolVersionBridge, content_sha256};
@@ -329,11 +329,11 @@ async fn edits_reject_bad_input_without_touching_the_store() {
         reqwest::StatusCode::BAD_REQUEST
     );
 
-    // Oversized bodies are rejected before the store sees them.
+    // Large bodies reach normal store validation instead of an arbitrary body cap.
     let oversized = serde_json::json!({
         "expected_version": 0,
         "node_id": "n",
-        "source": "x".repeat(cayw_trace_debug::server::MAX_BODY_BYTES),
+        "source": "x".repeat(300 * 1024),
         "params": {},
         "input_pointer": "",
     });
@@ -342,7 +342,7 @@ async fn edits_reject_bad_input_without_touching_the_store() {
         .send()
         .await
         .unwrap();
-    assert_eq!(response.status(), reqwest::StatusCode::PAYLOAD_TOO_LARGE);
+    assert_eq!(response.status(), reqwest::StatusCode::UNPROCESSABLE_ENTITY);
 
     // Unknown routes and wrong methods have explicit JSON errors.
     assert_eq!(
@@ -606,7 +606,7 @@ async fn ingest_symbol_hangs_surface_through_http_state() {
         fence: 1,
     };
     let event = |cursor, event| EventRecord {
-        protocol_version: 3,
+        protocol_version: cayw_core::PROTOCOL_VERSION,
         session_id: "session".into(),
         cursor,
         timestamp: cayw_trace_debug::now_ms(),
@@ -736,7 +736,7 @@ async fn run_inspector_route_cross_page_pagination_is_equivalent_to_full_project
         fence: 1,
     };
     let rec = |cursor, ts, event: AgentEvent| EventRecord {
-        protocol_version: 3,
+        protocol_version: cayw_core::PROTOCOL_VERSION,
         session_id: session.into(),
         cursor,
         timestamp: ts,

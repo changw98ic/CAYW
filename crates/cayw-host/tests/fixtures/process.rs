@@ -46,6 +46,14 @@ fn main() {
     match std::env::args().nth(1).as_deref() {
         // Publish the effect marker before the pid readiness file so observers
         // that wait on effect.pid never race a missing "effect" path.
+        Some("read-count") => {
+            use std::io::Read;
+            let count: usize = std::env::args().nth(2).unwrap().parse().unwrap();
+            let mut data = vec![0; count];
+            std::io::stdin().read_exact(&mut data).unwrap();
+            assert!(data.iter().all(|byte| *byte == b'x'));
+            println!("{count}");
+        }
         Some("effect") => {
             fs::write("effect", "started").unwrap();
             fs::write("effect.pid", std::process::id().to_string()).unwrap();

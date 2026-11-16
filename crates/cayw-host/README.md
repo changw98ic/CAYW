@@ -72,11 +72,11 @@ A failed start prevents execution. A failed settlement or an interrupted call pe
 | `fs.patch` | `path`, `expected_sha256`, nonempty `old`, `new` | Committed `bytes`, `sha256`; exact old text must occur once |
 | `git.status` | `{}` | Process result with porcelain status in `stdout` |
 | `git.diff` | Optional `path`, `staged` | Process result with diff in `stdout` |
-| `git.log` | Optional `limit` (1–100, default 20) | Process result with full commit IDs and subjects in `stdout` |
+| `git.log` | Optional positive `limit`; omitted reads complete history | Process result with full commit IDs and subjects in `stdout` |
 | `git.show` | Full 40/64 hex `commit`, optional `path` | Commit or blob in `stdout` |
 | `git.blame` | `path`, optional full 40/64 hex `commit` | Process result with line attribution from the held worktree and object store |
-| `git.stage` | `paths` (1–256 unique), `expected_head`, `expected_index_tree` | Confirmed `head`, `index_tree`, `paths` |
-| `git.commit` | `message` (≤64 KiB), `expected_head`, `expected_index_tree` | Confirmed `commit`, `parent`, `tree`; host-owned identity |
+| `git.stage` | Nonempty unique `paths`, `expected_head`, `expected_index_tree` | Confirmed `head`, `index_tree`, `paths` |
+| `git.commit` | Nonempty NUL-free `message`, `expected_head`, `expected_index_tree` | Confirmed `commit`, `parent`, `tree`; host-owned identity |
 | `git.branch` | `action` (`create`, `delete`), `name`, `commit`, `expected_head` | Confirmed `action`, `name`, `commit` |
 | `git.worktree` | `action` (`create`, `remove`), `name`, `branch`/`commit` for create, `expected_head` | Confirmed in-root `action`, `name`, `path`, `branch`, `commit` |
 | `build.run` | Application `profile` name | Process result |
@@ -165,7 +165,7 @@ A configured process and optional external service retain the OS access granted 
 
 `HostConfig::terminal_handoffs: Option<TerminalConfig>` is an explicit opt-in. When it is `None`, neither `exec_command` nor `write_stdin` appears in the catalog. `TerminalConfig` contains application-defined `profiles: BTreeMap<String, Profile>` and `TerminalLimits`. The profile fixes the absolute program, argument vector, environment, working directory (the held root), I/O mode, timeout and output limit. A terminal profile may not set `allow_filter`. `ProcessIo::Pty` is accepted only on macOS and requires positive dimensions; `ProcessIo::Pipes` is also available. The model supplies only a profile name and, after the Host returns a session ID, operations addressed to that exact session.
 
-`TerminalLimits::default()` allows 4 concurrent sessions per Host and 64 sessions over the manager's lifetime, 64 KiB per `write`, 1 MiB of input and 1 MiB of output per session, a 64 KiB read page and a 30-second maximum wait. Construction rejects zero or out-of-range limits and requires `max_read_bytes * 4 + 4096` to fit the Host result budget. `max_sessions` is the concurrent limit; the total-session and byte counters are lifetime budgets for the manager. None is reset by a wait, read, close or cancel. The per-session output bound is also capped by the profile's `max_output_bytes`.
+`TerminalLimits::default()` allows 16 concurrent sessions per Host. Lifetime session count, input/output bytes and waits have no default quota; an omitted read size uses a 64 KiB page, with subsequent pages available by cursor. Explicit limits must be positive and representable. When both are configured, `max_read_bytes * 4 + 4096` must fit the Host result budget. `max_sessions` bounds concurrent execution; optional total-session and byte budgets accumulate over that manager and are not reset by a wait, read, close or cancel. A configured profile output budget continues to apply to its process.
 
 `exec_command {profile}` starts one process through Device and returns `session_id`, `profile`, `state`, `output_cursor`, `input_bytes` and `remaining_ms`. A startup cancellation or deadline that cannot prove cleanup returns unknown. `write_stdin` requires `session_id`, `action` and `request_id`; actions are:
 
@@ -194,3 +194,7 @@ Validation uses macOS with Rust 1.95.0. The commands above exercise this crate's
 ## Dependencies
 
 The directory libraries use `Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT`; SHA-256 (`sha2`) uses `MIT OR Apache-2.0`. The selected Apache-2.0/MIT terms are compatible with this workspace's Apache-2.0 license. No third-party implementation source is copied into this crate. The crate uses the workspace's existing async, JSON and runtime dependencies.
+
+`git.log` reads complete history by default. An explicit `limit` selects a prefix with no fixed 100-entry ceiling; results include `history_limited` and `requested_limit` so callers can distinguish that request from the complete-history path. Git staging paths and commit messages are passed in private input files, not a potentially oversized command argument list. The exact-path, HEAD/index precondition, permission and audit checks remain in force.
+
+Trusted process and terminal profiles no longer impose separate 256-argument or 8192-byte-per-argument restrictions. NUL and invalid environment names remain rejected, and the operating system reports its real command/environment representation limit before launch. Without an explicit terminal input budget, writes are not restricted by the 16 MiB stdout buffer size; a definite pre-write rejection is a known failure, not an unknown side effect.

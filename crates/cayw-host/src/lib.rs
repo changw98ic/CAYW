@@ -681,18 +681,9 @@ impl HostConfig {
                 timeout.is_zero() || Instant::now().checked_add(timeout).is_none()
             }) || profile.max_output_bytes == Some(0)
                 || (profile.allow_filter && profile.kind != ProfileKind::Test)
-                || profile.args.len() > 256
-                || profile
-                    .args
-                    .iter()
-                    .any(|arg| arg.contains('\0') || arg.len() > 8192)
-                || profile.env.len() > 256
+                || profile.args.iter().any(|arg| arg.contains('\0'))
                 || profile.env.iter().any(|(key, value)| {
-                    key.is_empty()
-                        || key.contains(['=', '\0'])
-                        || value.contains('\0')
-                        || key.len() > 1024
-                        || value.len() > 32768
+                    key.is_empty() || key.contains(['=', '\0']) || value.contains('\0')
                 })
             {
                 return Err(failure("invalid process profile"));
@@ -1548,7 +1539,7 @@ impl Host {
                     .workspace
                     .as_ref()
                     .and_then(|limits| limits.max_argument_bytes),
-                Executor::Vision => self.config.vision.map(|limits| limits.input_bytes),
+                Executor::Vision => self.config.vision.and_then(|limits| limits.input_bytes),
                 _ => None,
             };
             let argument_limit = min_opt(argument_limit, self.config.max_argument_bytes);

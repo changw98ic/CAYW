@@ -13,7 +13,7 @@
 
 ## External 协议 v1
 
-`ExternalConfig` 使用绝对 executable、独立 argv、宿主显式环境变量和可选绝对工作目录；不经 shell，默认清空继承环境。宿主声明完整预期 manifest，plugin 握手必须逐字段一致。握手和调用都有时限，协议行和 stdout + stderr 生命周期累计输出均有字节上限。stderr 仅计数并丢弃，不存储可能含凭据的日志。
+`ExternalConfig` 使用绝对 executable、独立 argv、宿主显式环境变量和可选绝对工作目录；不经 shell，默认清空继承环境。宿主声明完整预期 manifest，plugin 握手必须逐字段一致。握手和调用保留外部调用时限；协议行和 stdout + stderr 生命周期累计输出默认不设字节上限。可信宿主可在 `ExternalConfig.max_line_bytes` 和 `max_output_bytes` 显式设置 `Some(limit)`，预算耗尽仍明确失败。读取按缓冲流处理并校验完整协议帧。stderr 仅计数并丢弃，不存储可能含凭据的日志。
 
 每条消息是一行 JSON，以 LF 结束。请求编号从 1 递增，响应必须匹配当前请求，未知 envelope 字段和主动输出都导致终止。示例：
 
@@ -48,7 +48,7 @@ plugin 工具仅暴露 `strongflow.describe` 与 `strongflow.ready`。`WorkflowS
 默认 feature `evaluation` 提供真实离线适配和收集算法，不提供假模型分数，不运行付费调用。
 
 - `JevEvaluator` 由宿主明确注册；`PluginJevEvaluator` 可连接已授权的 Native / External 工具。没有评估器返回 Unavailable；概率要求有限、介于 0–1 且总和为 1。`JevReport` 永远是 provisional，不能替代 StrongFlow 执行证据。
-- `FusionCandidateSource` 接收相同 `FusionInput`，包含 question、canonical context、constraints、answer schema。`collect_fusion` 要求 3–16 个不同 provider ID，并发收集盲答；不会把其他回答传给候选源。宿主负责 provider 身份和独立性。
+- `FusionCandidateSource` 接收相同 `FusionInput`，包含 question、canonical context、constraints、answer schema。`collect_fusion` 接受任意非空的不同 provider ID 集合，并发收集盲答；不会把其他回答传给候选源。宿主负责 provider 身份和独立性。
 - 输入按递归排序 JSON object key 的确定性编码计算 SHA-256。它是本库定义的摘要格式，不宣称实现 RFC 8785 的所有数值规范。每条候选保留相同摘要、原回答或失败、可用的 usage，以及严格 schema 验证失败、取消或超时。无法获得的用量记为未知。
 - `FusionReport.disagreements` 只列出不同的有效答案供后续调查，不投票认定事实。冲突调查、真实模型服务、成本预算和高层产品接入未包含在本库。
 

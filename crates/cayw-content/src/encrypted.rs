@@ -102,11 +102,10 @@ impl EncryptedSnapshot {
         Ok(snapshot)
     }
     pub fn max_wire_bytes(max_content_bytes: u64) -> Result<u64> {
-        max_content_bytes
-            .checked_add(TAG_BYTES)
-            .and_then(|v| v.checked_mul(4))
-            .and_then(|v| v.checked_add(WIRE_OVERHEAD))
-            .ok_or(Error::ContentTooLarge)
+        Ok(max_content_bytes
+            .saturating_add(TAG_BYTES)
+            .saturating_mul(4)
+            .saturating_add(WIRE_OVERHEAD))
     }
     fn validate(&self, max_content_bytes: u64) -> Result<()> {
         let m = &self.manifest;

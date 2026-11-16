@@ -188,9 +188,14 @@ fn parse_entry(
         Some(Value::Number(number)) => {
             let minutes = number
                 .as_f64()
-                .filter(|value| *value >= 0.0 && *value <= 24.0 * 60.0)
-                .ok_or_else(|| "idleTimeout must be minutes in [0, 1440]".to_string())?;
-            Duration::from_secs_f64(minutes * 60.0)
+                .filter(|value| value.is_finite() && *value >= 0.0)
+                .ok_or_else(|| "idleTimeout must be finite nonnegative minutes".to_string())?;
+            let timeout = Duration::try_from_secs_f64(minutes * 60.0)
+                .map_err(|_| "idleTimeout exceeds the supported duration range".to_string())?;
+            if std::time::Instant::now().checked_add(timeout).is_none() {
+                return Err("idleTimeout exceeds the supported timer range".into());
+            }
+            timeout
         }
         _ => return Err("idleTimeout must be a number of minutes".into()),
     };
@@ -280,6 +285,22 @@ mod tests {
         );
         assert_eq!(report.skipped.len(), 1);
         assert_eq!(report.skipped[0].name, "remote");
+    }
+
+    #[test]
+    fn idle_timeout_accepts_two_days_and_rejects_unrepresentable_duration() {
+        let root = tempfile::tempdir().unwrap();
+        let program = root.path().join("server");
+        fs::write(&program, "#!/bin/sh\n").unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&program, fs::Permissions::from_mode(0o755)).unwrap();
+        let entry = serde_json::json!({"command":program,"idleTimeout":2880});
+        let server = parse_entry("local", &entry, None, root.path()).unwrap();
+        assert_eq!(server.spec.idle_timeout, Duration::from_secs(48 * 60 * 60));
+        for value in [-1.0, 1e300] {
+            let entry = serde_json::json!({"command":program,"idleTimeout":value});
+            assert!(parse_entry("local", &entry, None, root.path()).is_err());
+        }
     }
 
     #[test]

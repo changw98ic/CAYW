@@ -485,3 +485,45 @@ async fn register_into_bridge_and_invoke() {
 
     host.unload(&package).await.expect("unload");
 }
+
+struct SlowFixture(PiFixturePlugin);
+#[cayw_plugins::async_trait]
+impl cayw_plugins::Plugin for SlowFixture {
+    fn manifest(&self) -> &cayw_plugins::PluginManifest {
+        self.0.manifest()
+    }
+    async fn call(
+        &self,
+        method: &str,
+        arguments: serde_json::Value,
+        cancel: CancellationToken,
+    ) -> Result<serde_json::Value, cayw_plugins::PluginError> {
+        tokio::select! { biased;
+            _=cancel.cancelled()=>return Err(cayw_plugins::PluginError::Cancelled),
+            _=tokio::time::sleep(std::time::Duration::from_secs(6))=>{},
+        }
+        self.0.call(method, arguments, cancel).await
+    }
+}
+#[tokio::test]
+async fn pi_tool_can_finish_after_the_former_five_second_bridge_timeout() {
+    use cayw_plugins::{PluginContext, PluginRegistry};
+    let registry = std::sync::Arc::new(PluginRegistry::new());
+    registry
+        .load_native(
+            std::sync::Arc::new(SlowFixture(PiFixturePlugin::new())),
+            PluginContext::new([PiFixturePlugin::TOOL.into()], []),
+        )
+        .unwrap();
+    let host = PiCompatHost::with_registry(registry, true);
+    let result = host
+        .call_tool(
+            &PiFixturePlugin::package_id(),
+            PiFixturePlugin::TOOL,
+            json!({"text":"slow success"}),
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(result["echo"], "slow success");
+}

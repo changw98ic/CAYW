@@ -475,6 +475,8 @@ fn rejection_reader_rejects_skipped_inputs_changed_wire_or_changed_business_fact
         "missing-case",
         "raw-bytes",
         "raw-newline",
+        "supported-version",
+        "wrong-response-id",
         "after-state",
         "both-state",
         "raw-dispatch",
@@ -501,6 +503,22 @@ fn rejection_reader_rejects_skipped_inputs_changed_wire_or_changed_business_fact
                 let mut raw: Vec<u8> = serde_json::from_value(bytes["bytes"].clone()).unwrap();
                 raw.push(b'\n');
                 *bytes = json!({"bytes":raw,"length":raw.len(),"sha256":digest(&raw),"utf8":String::from_utf8(raw.clone()).unwrap()});
+            }
+            "supported-version" => {
+                let bytes = &mut observation(sample, "access_rejection", 1)["wire"]["sent"][0];
+                let mut frame: Value =
+                    serde_json::from_str(bytes["utf8"].as_str().unwrap()).unwrap();
+                frame["version"] = json!(cayw_ipc::PROTOCOL_VERSION);
+                let mut raw = serde_json::to_vec(&frame).unwrap();
+                raw.push(b'\n');
+                *bytes = json!({"bytes":raw,"length":raw.len(),"sha256":digest(&raw),"utf8":String::from_utf8(raw.clone()).unwrap()});
+            }
+            "wrong-response-id" => {
+                let wire = &mut observation(sample, "access_rejection", 1)["wire"];
+                wire["response"]["id"] = json!("unpaired-response");
+                let mut raw = serde_json::to_vec(&wire["response"]).unwrap();
+                raw.push(b'\n');
+                wire["received"] = json!({"bytes":raw,"length":raw.len(),"sha256":digest(&raw),"utf8":String::from_utf8(raw.clone()).unwrap()});
             }
             "after-state" => {
                 observation(sample, "access_rejection", 0)["after"]["session"]["cursor"] = json!(2)

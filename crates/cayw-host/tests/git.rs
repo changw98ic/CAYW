@@ -1015,3 +1015,44 @@ async fn interrupted_device_write_remains_unknown_and_is_not_retried() {
     assert_eq!(gate.calls.lock().unwrap().len(), permission_calls);
     assert_eq!(index_tree(tree.path()), staged_tree);
 }
+
+#[cfg(target_os = "macos")]
+#[tokio::test]
+async fn git_accepts_large_explicit_stage_sets_and_commit_messages() {
+    let tree = Tree::new();
+    let original = init_repo(tree.path());
+    let paths: Vec<_> = (0..257).map(|index| format!("file-{index}")).collect();
+    for path in &paths {
+        std::fs::write(tree.path().join(path), "content").unwrap();
+    }
+    let (host, _, _) = host(tree.path(), Some(policy()));
+    let result = call(&host,"git.stage",json!({"paths":paths,"expected_head":original,"expected_index_tree":index_tree(tree.path())})).await.unwrap();
+    assert_eq!(result["paths"].as_array().unwrap().len(), 257);
+    let message = format!("large message\n\n{}", "x".repeat(1024 * 1024));
+    call(&host,"git.commit",json!({"message":message,"expected_head":head(tree.path()),"expected_index_tree":result["index_tree"]})).await.unwrap();
+    assert_eq!(
+        git(tree.path(), &["log", "-1", "--format=%B"]).trim(),
+        message
+    );
+}
+
+#[cfg(target_os = "macos")]
+#[tokio::test]
+async fn git_log_defaults_to_complete_history_and_accepts_large_explicit_limits() {
+    let tree = Tree::new();
+    init_repo(tree.path());
+    for n in 0..101 {
+        git(
+            tree.path(),
+            &["commit", "--allow-empty", "-qm", &format!("step {n}")],
+        );
+    }
+    let (host, _, _) = host(tree.path(), None);
+    let all = call(&host, "git.log", json!({})).await.unwrap();
+    assert_eq!(all["stdout"].as_str().unwrap().lines().count(), 102);
+    assert_eq!(all["history_limited"], false);
+    let limited = call(&host, "git.log", json!({"limit":101})).await.unwrap();
+    assert_eq!(limited["stdout"].as_str().unwrap().lines().count(), 101);
+    assert_eq!(limited["history_limited"], true);
+    assert_eq!(limited["requested_limit"], 101);
+}

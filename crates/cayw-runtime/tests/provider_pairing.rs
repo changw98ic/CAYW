@@ -399,23 +399,28 @@ fn check_tool_events(events: &[AgentEvent]) {
     let mut started = [false; 2];
     let mut ended = [false; 2];
     let mut arguments_json = [String::new(), String::new()];
+    let mut current = None;
     for event in events {
-        let AgentEvent::MessageUpdate { message, event } = event else {
+        if let AgentEvent::MessageStart {
+            message: Message::Assistant(message),
+        } = event
+        {
+            current = Some(message.clone());
+        }
+        let AgentEvent::MessageUpdate { event } = event else {
             continue;
         };
-        let (index, partial) = match event.as_ref() {
-            AssistantEvent::ToolCallStart { index, partial }
-            | AssistantEvent::ToolCallDelta { index, partial, .. }
-            | AssistantEvent::ToolCallEnd { index, partial } => (*index, partial),
+        let partial = current.as_mut().expect("started message");
+        event.apply_to(partial).expect("valid incremental event");
+        let index = match event.as_ref() {
+            AssistantEvent::ToolCallStart { index, .. }
+            | AssistantEvent::ToolCallDelta { index, .. }
+            | AssistantEvent::ToolCallEnd { index, .. } => *index,
             _ => continue,
         };
         assert!(
             index < IDS.len(),
             "tool event index {index} has no original wire call"
-        );
-        assert_eq!(
-            message, partial,
-            "Agent must retain the indexed event snapshot"
         );
         let Some(Content::ToolCall(call)) = partial.content.get(index) else {
             panic!("tool event index {index} must point at its original call");

@@ -93,7 +93,7 @@ pub async fn collect_fusion(
     per_candidate_timeout: Duration,
     cancel: CancellationToken,
 ) -> Result<FusionReport, PluginError> {
-    if !(3..=16).contains(&sources.len())
+    if sources.is_empty()
         || per_candidate_timeout.is_zero()
         || input.question.trim().is_empty()
         || input
@@ -102,7 +102,7 @@ pub async fn collect_fusion(
             .any(|constraint| constraint.trim().is_empty())
     {
         return Err(PluginError::InvalidArguments(
-            "Fusion requires a question, 3–16 distinct providers and a nonzero timeout".into(),
+            "Fusion requires a question, at least one provider and a nonzero timeout".into(),
         ));
     }
     let mut ids = BTreeSet::new();

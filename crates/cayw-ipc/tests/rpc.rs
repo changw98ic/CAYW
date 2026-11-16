@@ -165,12 +165,12 @@ impl Raw {
     }
 
     async fn hello(&mut self) {
-        self.send(json!({"version":1,"id":"hello","method":"hello","params":{"token":TOKEN}}))
+        self.send(json!({"version":2,"id":"hello","method":"hello","params":{"token":TOKEN}}))
             .await;
         let response = self.receive().await.unwrap();
-        assert_eq!(response["version"], 1);
+        assert_eq!(response["version"], 2);
         assert_eq!(response["id"], "hello");
-        assert_eq!(response["result"]["version"], 1);
+        assert_eq!(response["result"]["version"], 2);
     }
 }
 
@@ -190,7 +190,7 @@ fn config() -> ServerConfig {
 }
 
 fn request(id: &str, method: &str, params: Value) -> Value {
-    json!({"version":1,"id":id,"method":method,"params":params})
+    json!({"version":2,"id":id,"method":method,"params":params})
 }
 
 #[tokio::test]
@@ -227,8 +227,8 @@ async fn hello_requires_authentication_and_current_version_before_handler() {
     assert!(!error.outcome_unknown);
     for (version, method, token, expected) in [
         (99, "hello", TOKEN, "unsupported_version"),
-        (1, "echo", TOKEN, "handshake_required"),
-        (1, "hello", "wrong", "unauthorized"),
+        (2, "echo", TOKEN, "handshake_required"),
+        (2, "hello", "wrong", "unauthorized"),
     ] {
         let mut raw = server.raw().await;
         raw.send(json!({"version":version,"id":"h","method":method,"params":{"token":token}}))
@@ -300,7 +300,7 @@ async fn cancel_frame_cancels_handler_once_and_preserves_connection() {
     raw.send(request("after", "echo", json!(42))).await;
     assert_eq!(
         raw.receive().await.unwrap(),
-        json!({"version":1,"id":"after","result":42})
+        json!({"version":2,"id":"after","result":42})
     );
     drop(raw);
     server.stop().await;
@@ -566,7 +566,7 @@ async fn client_timeout_reports_unknown_and_cancels_remote_work() {
 }
 
 #[tokio::test]
-async fn server_timeout_and_oversized_response_report_unknown_outcome() {
+async fn server_timeout_remains_unknown_and_large_responses_are_reassembled() {
     let server = Server::start(ServerConfig {
         request_timeout: Some(Duration::from_millis(100)),
         max_frame_bytes: 512,
@@ -578,30 +578,22 @@ async fn server_timeout_and_oversized_response_report_unknown_outcome() {
     assert_eq!(error.code, "timeout_outcome_unknown");
     assert!(error.outcome_unknown);
     signalled(&server.handler.cancelled).await;
-    let error = client.request("large", Value::Null).await.unwrap_err();
-    assert_eq!(error.code, "response_too_large_outcome_unknown");
-    assert!(error.outcome_unknown);
+    let result = client.request("large", Value::Null).await.unwrap();
+    assert!(result.as_str().unwrap().len() > 512);
     client.close().await;
     server.stop().await;
 }
 
 #[tokio::test]
-async fn oversized_read_response_is_a_known_transport_failure() {
+async fn oversized_read_response_is_reassembled_without_losing_the_connection() {
     let server = Server::start(ServerConfig {
         max_frame_bytes: 512,
         ..config()
     })
     .await;
     let client = Client::connect(server.addr, TOKEN).await.unwrap();
-    let error = client
-        .request("session.events", Value::Null)
-        .await
-        .unwrap_err();
-    assert_eq!(error.code, "response_too_large");
-    assert!(
-        !error.outcome_unknown,
-        "a failed read must not claim that an effect may have happened"
-    );
+    let result = client.request("session.events", Value::Null).await.unwrap();
+    assert!(result.as_str().unwrap().len() > 512);
     assert_eq!(client.request("echo", json!(7)).await.unwrap(), 7);
     client.close().await;
     server.stop().await;
@@ -637,8 +629,8 @@ async fn dropping_last_client_or_request_future_closes_transport() {
 async fn fake_hello(raw: &mut Raw) {
     let hello = raw.receive().await.unwrap();
     assert_eq!(hello["method"], "hello");
-    raw.send(json!({"version":1,"id":hello["id"],"result":{
-        "version":1,"max_frame_bytes":1048576,"max_in_flight":64,
+    raw.send(json!({"version":2,"id":hello["id"],"result":{
+        "version":2,"max_frame_bytes":1048576,"max_in_flight":64,
         "max_requests_per_connection":65536,"max_id_bytes":128
     }}))
     .await;
@@ -660,16 +652,16 @@ async fn invalid_response_id_version_or_shape_fails_all_pending_as_unknown() {
             let first = raw.receive().await.unwrap();
             let _second = raw.receive().await.unwrap();
             let value = match mode {
-                "version" => json!({"version":2,"id":first["id"],"result":1}),
+                "version" => json!({"version":99,"id":first["id"],"result":1}),
                 "both" => {
-                    json!({"version":1,"id":first["id"],"result":1,"error":{"code":"x","message":"x"}})
+                    json!({"version":2,"id":first["id"],"result":1,"error":{"code":"x","message":"x"}})
                 }
                 "duplicate" => {
-                    raw.send(json!({"version":1,"id":first["id"],"result":1}))
+                    raw.send(json!({"version":2,"id":first["id"],"result":1}))
                         .await;
-                    json!({"version":1,"id":first["id"],"result":2})
+                    json!({"version":2,"id":first["id"],"result":2})
                 }
-                _ => json!({"version":1,"id":"unknown","result":1}),
+                _ => json!({"version":2,"id":"unknown","result":1}),
             };
             raw.send(value).await;
             assert!(raw.receive().await.is_none());
@@ -702,15 +694,15 @@ async fn unsolicited_response_buffered_with_hello_is_not_discarded() {
             writer,
         };
         let hello = raw.receive().await.unwrap();
-        let mut bytes = serde_json::to_vec(&json!({"version":1,"id":hello["id"],"result":{
-            "version":1,"max_frame_bytes":1048576,"max_in_flight":64,
+        let mut bytes = serde_json::to_vec(&json!({"version":2,"id":hello["id"],"result":{
+            "version":2,"max_frame_bytes":1048576,"max_in_flight":64,
             "max_requests_per_connection":65536,"max_id_bytes":128
         }}))
         .unwrap();
-        bytes.extend_from_slice(b"\n{\"version\":1,\"id\":\"unsolicited\",\"result\":null}\n");
+        bytes.extend_from_slice(b"\n{\"version\":2,\"id\":\"unsolicited\",\"result\":null}\n");
         raw.writer.write_all(&bytes).await.unwrap();
         if let Some(request) = raw.receive().await {
-            let response = json!({"version":1,"id":request["id"],"result":1});
+            let response = json!({"version":2,"id":request["id"],"result":1});
             let mut bytes = serde_json::to_vec(&response).unwrap();
             bytes.push(b'\n');
             let _ = raw.writer.write_all(&bytes).await;
@@ -1022,11 +1014,11 @@ async fn client_local_capacity_and_precancelled_calls_never_dispatch() {
 async fn duplicate_json_fields_and_posthello_wrong_versions_are_rejected() {
     let server = Server::start(config()).await;
     for bytes in [
-        b"{\"version\":1,\"id\":\"a\",\"id\":\"b\",\"method\":\"echo\",\"params\":null}\n"
+        b"{\"version\":2,\"id\":\"a\",\"id\":\"b\",\"method\":\"echo\",\"params\":null}\n"
             .as_slice(),
-        b"{\"version\":1,\"id\":\"a\",\"method\":\"echo\",\"params\":null,\"extra\":1}\n"
+        b"{\"version\":2,\"id\":\"a\",\"method\":\"echo\",\"params\":null,\"extra\":1}\n"
             .as_slice(),
-        b"{\"version\":1,\"id\":\"a\",\"method\":\"echo\"}\n".as_slice(),
+        b"{\"version\":2,\"id\":\"a\",\"method\":\"echo\"}\n".as_slice(),
     ] {
         let mut raw = server.raw().await;
         raw.hello().await;
@@ -1035,7 +1027,7 @@ async fn duplicate_json_fields_and_posthello_wrong_versions_are_rejected() {
     }
     let mut raw = server.raw().await;
     raw.hello().await;
-    raw.send(json!({"version":2,"id":"v","method":"echo","params":null}))
+    raw.send(json!({"version":1,"id":"v","method":"echo","params":null}))
         .await;
     assert_eq!(
         raw.receive().await.unwrap()["error"]["code"],
@@ -1103,8 +1095,8 @@ async fn client_write_timeout_closes_socket_without_replaying() {
             writer,
         };
         let hello = raw.receive().await.unwrap();
-        raw.send(json!({"version":1,"id":hello["id"],"result":{
-            "version":1,"max_frame_bytes":67108864,"max_in_flight":64,
+        raw.send(json!({"version":2,"id":hello["id"],"result":{
+            "version":2,"max_frame_bytes":67108864,"max_in_flight":64,
             "max_requests_per_connection":65536,"max_id_bytes":128
         }}))
         .await;
@@ -1157,7 +1149,7 @@ async fn missing_cancellation_acknowledgment_expires_even_after_original_respons
         let cancel = raw.receive().await.unwrap();
         assert_eq!(cancel["method"], "rpc.cancel");
         assert_eq!(cancel["params"]["request_id"], request["id"]);
-        raw.send(json!({"version":1,"id":request["id"],"error":{
+        raw.send(json!({"version":2,"id":request["id"],"error":{
             "code":"cancelled_outcome_unknown","message":"cancelled"
         }}))
         .await;
@@ -1196,17 +1188,17 @@ async fn missing_cancellation_acknowledgment_expires_even_after_original_respons
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn premature_response_in_hello_write_is_rejected_before_connect_returns() {
     for tail in [
-        "{\"version\":1,\"id\":\"1\",\"result\":\"forged success\"}\n",
-        "{\"version\":1,\"id\":\"future-request\",\"result\":null}\n",
-        "{\"version\":1,\"id\":",
+        "{\"version\":2,\"id\":\"1\",\"result\":\"forged success\"}\n",
+        "{\"version\":2,\"id\":\"future-request\",\"result\":null}\n",
+        "{\"version\":2,\"id\":",
     ] {
         let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
         let addr = listener.local_addr().unwrap();
         let task = tokio::spawn(async move {
             let mut raw = Raw::connect_peer(listener).await;
             let hello = raw.receive().await.unwrap();
-            let mut bytes = serde_json::to_vec(&json!({"version":1,"id":hello["id"],"result":{
-                "version":1,"max_frame_bytes":1048576,"max_in_flight":64,
+            let mut bytes = serde_json::to_vec(&json!({"version":2,"id":hello["id"],"result":{
+                "version":2,"max_frame_bytes":1048576,"max_in_flight":64,
                 "max_requests_per_connection":65536,"max_id_bytes":128
             }}))
             .unwrap();
@@ -1234,8 +1226,8 @@ async fn response_before_the_full_request_is_written_is_rejected() {
     let task = tokio::spawn(async move {
         let mut raw = Raw::connect_peer(listener).await;
         let hello = raw.receive().await.unwrap();
-        raw.send(json!({"version":1,"id":hello["id"],"result":{
-            "version":1,"max_frame_bytes":67108864,"max_in_flight":64,
+        raw.send(json!({"version":2,"id":hello["id"],"result":{
+            "version":2,"max_frame_bytes":67108864,"max_in_flight":64,
             "max_requests_per_connection":65536,"max_id_bytes":128
         }}))
         .await;
@@ -1250,7 +1242,7 @@ async fn response_before_the_full_request_is_written_is_rejected() {
         assert_eq!(header.pop(), Some(b','));
         header.push(b'}');
         let prefix: Value = serde_json::from_slice(&header).unwrap();
-        raw.send(json!({"version":1,"id":prefix["id"],"result":"forged success"}))
+        raw.send(json!({"version":2,"id":prefix["id"],"result":"forged success"}))
             .await;
         // Keep backpressure until the request has produced its terminal outcome.
         // Draining sooner could let the writer finish before the response is checked.
@@ -1296,7 +1288,7 @@ async fn duplicate_keys_in_hello_and_nested_business_params_never_dispatch() {
         ),
     ] {
         let mut raw = server.raw().await;
-        let frame = format!(r#"{{"version":1,"id":"h","method":"hello","params":{params}}}"#);
+        let frame = format!(r#"{{"version":2,"id":"h","method":"hello","params":{params}}}"#);
         raw.writer.write_all(frame.as_bytes()).await.unwrap();
         raw.writer.write_all(b"\n").await.unwrap();
         assert!(
@@ -1311,7 +1303,7 @@ async fn duplicate_keys_in_hello_and_nested_business_params_never_dispatch() {
     ] {
         let mut raw = server.raw().await;
         raw.hello().await;
-        let frame = format!(r#"{{"version":1,"id":"d","method":"echo","params":{params}}}"#);
+        let frame = format!(r#"{{"version":2,"id":"d","method":"echo","params":{params}}}"#);
         raw.writer.write_all(frame.as_bytes()).await.unwrap();
         raw.writer.write_all(b"\n").await.unwrap();
         assert!(
@@ -1335,7 +1327,7 @@ async fn duplicate_cancel_target_is_rejected_before_cancelling_by_last_value() {
         raw.send(request("long", "hold", Value::Null)).await;
         signalled(&server.handler.started).await;
         let frame = format!(
-            r#"{{"version":1,"id":"cancel","method":"rpc.cancel","params":{{"request_id":"missing","{key}":"long"}}}}"#
+            r#"{{"version":2,"id":"cancel","method":"rpc.cancel","params":{{"request_id":"missing","{key}":"long"}}}}"#
         );
         raw.writer.write_all(frame.as_bytes()).await.unwrap();
         raw.writer.write_all(b"\n").await.unwrap();
@@ -1362,7 +1354,7 @@ async fn duplicate_limits_in_hello_response_are_rejected() {
             let mut raw = Raw::connect_peer(listener).await;
             let _hello = raw.receive().await.unwrap();
             let frame = format!(
-                r#"{{"version":1,"id":"h","result":{{"{field}":1,"version":1,"max_frame_bytes":1048576,"max_in_flight":64,"max_requests_per_connection":65536,"max_id_bytes":128}}}}"#
+                r#"{{"version":2,"id":"h","result":{{"{field}":1,"version":2,"max_frame_bytes":1048576,"max_in_flight":64,"max_requests_per_connection":65536,"max_id_bytes":128}}}}"#
             );
             raw.writer.write_all(frame.as_bytes()).await.unwrap();
             raw.writer.write_all(b"\n").await.unwrap();
@@ -1389,7 +1381,7 @@ async fn duplicate_keys_in_nested_response_fail_the_pending_call_as_unknown() {
         let request = raw.receive().await.unwrap();
         let id = serde_json::to_string(&request["id"]).unwrap();
         let frame = format!(
-            r#"{{"version":1,"id":{id},"result":{{"items":[{{"ok":false,"{}u006fk":true}}]}}}}"#,
+            r#"{{"version":2,"id":{id},"result":{{"items":[{{"ok":false,"{}u006fk":true}}]}}}}"#,
             char::from(92)
         );
         raw.writer.write_all(frame.as_bytes()).await.unwrap();
@@ -1455,7 +1447,7 @@ async fn fresh_request_and_cancel_ids_cannot_be_derived_from_an_observed_id() {
         assert_eq!(counter, "1");
         assert_eq!(nonce.len(), 32);
         assert!(nonce.bytes().all(|byte| byte.is_ascii_hexdigit()));
-        raw.send(json!({"version":1,"id":first["id"],"result":null}))
+        raw.send(json!({"version":2,"id":first["id"],"result":null}))
             .await;
         let held = raw.receive().await.unwrap();
         let held_id = held["id"].as_str().unwrap();
@@ -1468,9 +1460,9 @@ async fn fresh_request_and_cancel_ids_cannot_be_derived_from_an_observed_id() {
         let (_, cancel_nonce) = cancel["id"].as_str().unwrap().split_once('-').unwrap();
         assert_ne!(cancel_nonce, nonce);
         assert_ne!(cancel_nonce, held_nonce);
-        raw.send(json!({"version":1,"id":cancel["id"],"result":{"cancelled":true}}))
+        raw.send(json!({"version":2,"id":cancel["id"],"result":{"cancelled":true}}))
             .await;
-        raw.send(json!({"version":1,"id":held["id"],"error":{
+        raw.send(json!({"version":2,"id":held["id"],"error":{
             "code":"cancelled_outcome_unknown","message":"cancelled"
         }}))
         .await;
@@ -1533,7 +1525,7 @@ async fn legal_pipelined_frames_and_coalesced_responses_are_preserved() {
         for request in [two, one] {
             bytes.extend_from_slice(
                 &serde_json::to_vec(&json!({
-                    "version":1,"id":request["id"],"result":request["params"]
+                    "version":2,"id":request["id"],"result":request["params"]
                 }))
                 .unwrap(),
             );
@@ -1608,7 +1600,7 @@ async fn deep_results_are_accepted_and_unbounded_nesting_closes_the_connection()
         let mut raw = Raw::connect_peer(listener).await;
         fake_hello(&mut raw).await;
         let request = raw.receive().await.unwrap();
-        raw.send(json!({"version":1,"id":request["id"],"result":nested_arrays(200)}))
+        raw.send(json!({"version":2,"id":request["id"],"result":nested_arrays(200)}))
             .await;
         assert!(raw.receive().await.is_none());
     });
@@ -1656,4 +1648,43 @@ async fn separate_client_process_completes_authenticated_round_trip() {
     assert_eq!(value, json!({"process":"separate","value":23}));
     assert_eq!(server.handler.calls.load(Ordering::SeqCst), 1);
     server.stop().await;
+}
+
+#[tokio::test]
+async fn malformed_or_incomplete_response_chunks_never_complete_a_call() {
+    for mode in ["offset", "missing", "mixed", "wrong_id", "nested"] {
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let peer = tokio::spawn(async move {
+            let mut raw = Raw::connect_peer(listener).await;
+            fake_hello(&mut raw).await;
+            let request = raw.receive().await.unwrap();
+            let id = request["id"].as_str().unwrap();
+            let payload =
+                serde_json::to_vec(&json!({"version":2,"id":id,"result":{"complete":true}}))
+                    .unwrap();
+            match mode {
+                "offset" => raw.send(json!({"version":2,"id":id,"chunk":{"offset":1,"data":payload,"done":true}})).await,
+                "wrong_id" => raw.send(json!({"version":2,"id":"other","chunk":{"offset":0,"data":payload,"done":true}})).await,
+                "nested" => {
+                    let inner = serde_json::to_vec(&json!({"version":2,"id":id,"chunk":{"offset":0,"data":[],"done":true}})).unwrap();
+                    raw.send(json!({"version":2,"id":id,"chunk":{"offset":0,"data":inner,"done":true}})).await;
+                }
+                _ => {
+                    raw.send(json!({"version":2,"id":id,"chunk":{"offset":0,"data":payload[..8],"done":false}})).await;
+                    if mode == "mixed" { raw.send(json!({"version":2,"id":id,"result":"partial bypass"})).await; }
+                }
+            }
+        });
+        let client = Client::connect(addr, TOKEN).await.unwrap();
+        assert!(
+            client
+                .request("echo", Value::Null)
+                .await
+                .unwrap_err()
+                .outcome_unknown
+        );
+        client.close().await;
+        peer.await.unwrap();
+    }
 }

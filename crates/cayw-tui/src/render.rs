@@ -190,7 +190,8 @@ fn draw_history(frame: &mut Frame<'_>, app: &App, area: Rect) {
         );
         return;
     };
-    let mut lines = Vec::new();
+    let mut lines =
+        HistoryLines::new((inner.height as usize).saturating_add(session.scroll as usize));
     if session.frozen {
         let plugin_name = session
             .binding
@@ -207,7 +208,7 @@ fn draw_history(frame: &mut Frame<'_>, app: &App, area: Rect) {
             Some(r) => format!("Session frozen ({plugin_name}: {r}) · Ctrl+F fork · F1/? help"),
             None => format!("Session frozen ({plugin_name}) · Ctrl+F fork · F1/? help"),
         };
-        append(&mut lines, &summary, inner.width, Color::Yellow);
+        append_history(&mut lines, &summary, inner.width, Color::Yellow);
     }
     match app.view {
         ViewTab::Chat => {
@@ -225,24 +226,24 @@ fn draw_history(frame: &mut Frame<'_>, app: &App, area: Rect) {
                 } else {
                     role.to_owned()
                 };
-                append(&mut lines, &label, inner.width, Color::Cyan);
-                append(&mut lines, &body, inner.width, Color::Reset);
+                append_history(&mut lines, &label, inner.width, Color::Cyan);
+                append_history(&mut lines, &body, inner.width, Color::Reset);
                 if let Some(error) = message["error_message"].as_str() {
-                    append(&mut lines, error, inner.width, Color::Red);
+                    append_history(&mut lines, error, inner.width, Color::Red);
                 }
                 lines.push(Line::default());
             }
             if let Some(text) = &session.streaming_text {
-                append(
+                append_history(
                     &mut lines,
                     "assistant · streaming",
                     inner.width,
                     Color::Green,
                 );
-                append(&mut lines, text, inner.width, Color::Reset);
+                append_history(&mut lines, text, inner.width, Color::Reset);
             }
             if let Some(status) = &session.tool_status {
-                append(&mut lines, status, inner.width, Color::Gray);
+                append_history(&mut lines, status, inner.width, Color::Gray);
             }
             for approval in &session.approvals {
                 let id = string(approval, "id");
@@ -261,7 +262,7 @@ fn draw_history(frame: &mut Frame<'_>, app: &App, area: Rect) {
                     (false, true) => "询问 · 需要你的回答".to_owned(),
                     (false, false) => format!("询问 · {capability} · 需要你的回答"),
                 };
-                append(
+                append_history(
                     &mut lines,
                     &heading,
                     inner.width,
@@ -273,7 +274,7 @@ fn draw_history(frame: &mut Frame<'_>, app: &App, area: Rect) {
                 );
                 match question {
                     Some(question) => {
-                        append(
+                        append_history(
                             &mut lines,
                             string(question, "text"),
                             inner.width,
@@ -290,10 +291,10 @@ fn draw_history(frame: &mut Frame<'_>, app: &App, area: Rect) {
                                         .join(" / ")
                                 })
                                 .unwrap_or_default();
-                            append(&mut lines, &options, inner.width, Color::Yellow);
+                            append_history(&mut lines, &options, inner.width, Color::Yellow);
                         }
                     }
-                    None => append(
+                    None => append_history(
                         &mut lines,
                         "正在读取这条询问的完整选项…",
                         inner.width,
@@ -301,7 +302,7 @@ fn draw_history(frame: &mut Frame<'_>, app: &App, area: Rect) {
                     ),
                 }
                 if !is_model_auto {
-                    append(
+                    append_history(
                         &mut lines,
                         "Alt+O 允许一次 · Alt+T 本任务允许 · Alt+D 拒绝；也可直接输入选项后回车",
                         inner.width,
@@ -310,7 +311,7 @@ fn draw_history(frame: &mut Frame<'_>, app: &App, area: Rect) {
                 }
             }
             if lines.is_empty() {
-                append(
+                append_history(
                     &mut lines,
                     "Empty session · Enter prompt below (F1/? help)",
                     inner.width,
@@ -320,7 +321,7 @@ fn draw_history(frame: &mut Frame<'_>, app: &App, area: Rect) {
         }
         ViewTab::Files => {
             if session.files.is_empty() {
-                append(&mut lines, "No file records yet.", inner.width, Color::Gray);
+                append_history(&mut lines, "No file records yet.", inner.width, Color::Gray);
             } else {
                 for file in &session.files {
                     let color = if file.status == "failed" {
@@ -330,23 +331,23 @@ fn draw_history(frame: &mut Frame<'_>, app: &App, area: Rect) {
                     } else {
                         Color::Cyan
                     };
-                    append(
+                    append_history(
                         &mut lines,
                         &format!("{} [{} · {}]", file.path, file.action, file.status),
                         inner.width,
                         color,
                     );
-                    append(&mut lines, &file.preview, inner.width, Color::Reset);
+                    append_history(&mut lines, &file.preview, inner.width, Color::Reset);
                     lines.push(Line::default());
                 }
             }
         }
         ViewTab::Diff => {
             if session.diffs.is_empty() {
-                append(&mut lines, "No diff records yet.", inner.width, Color::Gray);
+                append_history(&mut lines, "No diff records yet.", inner.width, Color::Gray);
             } else {
                 for entry in &session.diffs {
-                    append(
+                    append_history(
                         &mut lines,
                         &format!("diff · {} [{}]", entry.path, entry.status),
                         inner.width,
@@ -362,7 +363,7 @@ fn draw_history(frame: &mut Frame<'_>, app: &App, area: Rect) {
                         } else {
                             Color::Reset
                         };
-                        append(&mut lines, raw_line, inner.width, color);
+                        append_history(&mut lines, raw_line, inner.width, color);
                     }
                     lines.push(Line::default());
                 }
@@ -370,7 +371,7 @@ fn draw_history(frame: &mut Frame<'_>, app: &App, area: Rect) {
         }
         ViewTab::Logs => {
             if session.logs.is_empty() {
-                append(&mut lines, "No log entries yet.", inner.width, Color::Gray);
+                append_history(&mut lines, "No log entries yet.", inner.width, Color::Gray);
             } else {
                 for entry in &session.logs {
                     let color = if entry.contains("failed") || entry.contains("error") {
@@ -383,18 +384,16 @@ fn draw_history(frame: &mut Frame<'_>, app: &App, area: Rect) {
                     } else {
                         Color::Reset
                     };
-                    append(&mut lines, entry, inner.width, color);
+                    append_history(&mut lines, entry, inner.width, color);
                 }
             }
         }
     }
-    let bottom = lines.len().saturating_sub(inner.height as usize);
-    let top = bottom.saturating_sub(session.scroll as usize);
     frame.render_widget(
         Paragraph::new(
             lines
+                .rows
                 .into_iter()
-                .skip(top)
                 .take(inner.height as usize)
                 .collect::<Vec<_>>(),
         ),
@@ -521,12 +520,57 @@ fn chat_message_summary(message: &serde_json::Value) -> String {
     raw
 }
 
-fn append(lines: &mut Vec<Line<'static>>, text: &str, width: u16, color: Color) {
-    lines.extend(
-        wrapped(&sanitize(text), width)
-            .into_iter()
-            .map(|line| Line::styled(line, Style::default().fg(color))),
-    );
+/// Retain only the rendered tail needed for the current viewport and scroll.
+/// Session data stays complete; drawing no longer copies every wrapped history row.
+struct HistoryLines {
+    rows: std::collections::VecDeque<Line<'static>>,
+    capacity: usize,
+}
+impl HistoryLines {
+    fn new(capacity: usize) -> Self {
+        Self {
+            rows: std::collections::VecDeque::new(),
+            capacity,
+        }
+    }
+    fn is_empty(&self) -> bool {
+        self.rows.is_empty()
+    }
+    fn push(&mut self, line: Line<'static>) {
+        if self.rows.len() == self.capacity {
+            self.rows.pop_front();
+        }
+        self.rows.push_back(line);
+    }
+}
+fn append_history(lines: &mut HistoryLines, text: &str, width: u16, color: Color) {
+    if width == 0 {
+        return;
+    }
+    let clean = sanitize(text);
+    let mut line = String::new();
+    let mut column = 0;
+    for grapheme in clean.graphemes(true) {
+        if grapheme == "\n" {
+            lines.push(Line::styled(
+                std::mem::take(&mut line),
+                Style::default().fg(color),
+            ));
+            column = 0;
+            continue;
+        }
+        let size = Line::from(grapheme).width();
+        if column > 0 && column + size > width as usize {
+            lines.push(Line::styled(
+                std::mem::take(&mut line),
+                Style::default().fg(color),
+            ));
+            column = 0;
+        }
+        line.push_str(grapheme);
+        column += size;
+    }
+    lines.push(Line::styled(line, Style::default().fg(color)));
 }
 
 fn wrapped(text: &str, width: u16) -> Vec<String> {

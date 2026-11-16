@@ -54,3 +54,7 @@ Host tools (when `HostConfig::codeintel` is set): `codeintel.refresh`,
 cargo test -p cayw-codeintel --locked
 cargo run -p cayw-codeintel --example offline_bridge --locked
 ```
+
+默认索引不设置单文件符号数、诊断总条数、路径、符号名或诊断正文的固定长度上限。宿主可用 `with_budgets` 显式设置符号和诊断配额，0 表示该项不接受记录。版本、摘要、合法相对路径与符号位置检查继续生效。
+
+`codeintel.refresh` 在配置 Workspace 时使用完整 Rust 大纲，解析失败直接报错；未配置 Workspace 时使用完整文件读取和轻量解析。不会把文件预览片段当成完整源码发布。索引仍是宿主共享的内存投影，规模增长会占用更多内存，不承担持久事件审计的职责。

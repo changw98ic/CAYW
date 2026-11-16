@@ -152,7 +152,7 @@ async fn invalid_web_limits_disable_web_tools_without_failing_host() {
 async fn invalid_vision_limits_disable_vision_without_failing_host() {
     let (_ws, host) = open(HostConfig {
         vision: Some(cayw_vision::Limits {
-            input_bytes: 0,
+            input_bytes: Some(0),
             ..Default::default()
         }),
         ..Default::default()

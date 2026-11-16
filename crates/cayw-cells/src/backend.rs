@@ -81,6 +81,18 @@ impl Drop for BackendResponse {
 pub trait CellBackend: Send + Sync {
     fn capabilities(&self) -> Vec<ToolDefinition>;
     fn created(&self, execution: &CellExecution) -> Result<(), CellError>;
+    /// A persisted cell is waiting for a VM execution permit.
+    fn queued(&self, _execution: &CellExecution) -> Result<(), CellError> {
+        Ok(())
+    }
+    /// Reacquire any enclosing task admission before starting this VM.
+    async fn dispatched(
+        &self,
+        _execution: &CellExecution,
+        _cancel: CancellationToken,
+    ) -> Result<(), CellError> {
+        Ok(())
+    }
     async fn call(
         &self,
         execution: &CellExecution,

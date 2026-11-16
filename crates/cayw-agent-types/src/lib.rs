@@ -2,7 +2,7 @@
 //!
 //! This crate only owns the existing shared event/result types. It is not an
 //! independent disk or wire format: both types still use `cayw-ai` message,
-//! stream and usage types, and Core keeps reading and writing Core v3 bytes.
+//! stream and usage types; Core owns the disk and wire protocol versions.
 
 use cayw_ai::{
     AssistantEvent, AssistantMessage, Content, Message, ToolCall, ToolResultMessage, Usage,
@@ -26,7 +26,6 @@ pub enum AgentEvent {
         message: Message,
     },
     MessageUpdate {
-        message: AssistantMessage,
         event: Box<AssistantEvent>,
     },
     MessageEnd {

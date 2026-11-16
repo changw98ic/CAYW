@@ -15,6 +15,16 @@ impl Provider for FragmentedProvider {
         tokio::spawn(async move {
             let mut message = AssistantMessage::new(&request.model);
             message.content.push(Content::text(""));
+            if sender
+                .send(AssistantEvent::TextStart {
+                    index: 0,
+                    partial: message.clone(),
+                })
+                .await
+                .is_err()
+            {
+                return;
+            }
             for _ in 0..512 {
                 if cancel.is_cancelled() {
                     return;
@@ -27,7 +37,6 @@ impl Provider for FragmentedProvider {
                     .send(AssistantEvent::TextDelta {
                         index: 0,
                         delta: "0123456789abcdef".into(),
-                        partial: message.clone(),
                     })
                     .await
                     .is_err()

@@ -11,7 +11,7 @@ const source = await readFile(new URL('../assets/app.js', import.meta.url), 'utf
 const html = await readFile(new URL('../assets/index.html', import.meta.url), 'utf8');
 const lease = (attempt = 'attempt-1') => ({ session_id: 's1', attempt_id: attempt, worker_id: 'worker-1', fence: 1 });
 const snapshot = (extra = {}) => ({ id: 's1', label: '会话', messages: [], cursor: 10, state: 'idle', attempt: null, pending_approvals: [], unresolved_calls: [], ...extra });
-const record = (cursor, event, attempt = lease()) => ({ protocol_version: 3, session_id: 's1', cursor, timestamp: 1, attempt, event });
+const record = (cursor, event, attempt = lease()) => ({ protocol_version: 4, session_id: 's1', cursor, timestamp: 1, attempt, event });
 const failure = (code, outcome_unknown = false) => ({ status: 502, error: { code, message: 'internal diagnostic is not the main user message', outcome_unknown } });
 
 test('shipped HTML pattern attributes compile with browser Unicode Sets rules', () => {
@@ -54,7 +54,7 @@ async function page(t, handler) {
     else if (call.method === 'task.get') result = await handler('task.get', call.params) ?? { id: 'original-task', session_id: 's1', state: 'running', worker_id: 'worker-1', attempt_id: 'attempt-1', fence: 7, dispatches: 1, holds_slot: true, cancel_requested: false };
     else result = await handler(call.method, call.params);
     if (result?.disconnect) { req.socket.destroy(); return; }
-    if (call.method === 'runtime.health') result = { status: 'ok', protocol_version: 3 };
+    if (call.method === 'runtime.health') result = { status: 'ok', protocol_version: 4 };
     const error = result?.error;
     res.writeHead(error ? result.status : 200, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify(error ? { error } : { result }));
@@ -669,4 +669,23 @@ test('an old snapshot with interrupted calls cannot lock or unsettle a ready ses
   assert.equal(app.ui['blocked-text'].textContent, '');
   assert.equal(app.ui['blocked-notice'].hidden, true);
   assert.equal(app.ui.prompt.disabled, false);
+});
+
+
+test('older messages can be loaded and long messages are not clipped', async t => {
+  const messages = Array.from({length:121}, (_,i)=>({role:'assistant',content:[{type:'text',text:i === 0 ? 'FIRST_MESSAGE' : i === 120 ? 'x'.repeat(70000)+'LAST_TAIL' : `message ${i}`}]}));
+  const current = snapshot({messages});
+  const app = await page(t, async method => {
+    if(method === 'session.list') return [current];
+    if(method === 'session.get') return current;
+    if(method === 'session.events') return [];
+  });
+  assert(!app.ui.messages.textContent.includes('FIRST_MESSAGE'));
+  assert(app.ui.messages.textContent.includes('LAST_TAIL'));
+  const load = app.ui['history-note'].children[0];
+  assert.equal(load.tagName,'button');
+  await load.dispatch('click');
+  assert(app.ui.messages.textContent.includes('FIRST_MESSAGE'));
+  assert(app.ui.messages.textContent.includes('LAST_TAIL'));
+  assert(!/id="prompt"[^>]*maxlength/.test(html));
 });

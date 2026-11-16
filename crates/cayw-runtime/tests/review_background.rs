@@ -53,7 +53,7 @@ fn base_config(max_retained_finished: usize) -> RuntimeConfig {
     config.codemode.timeout = Some(Duration::from_secs(20));
     config.max_run_time = Some(Duration::from_secs(30));
     config.background = Some(BackgroundConfig {
-        max_retained_finished,
+        max_retained_finished: Some(max_retained_finished),
         ..Default::default()
     });
     config.host.profiles = BTreeMap::from([
@@ -405,7 +405,7 @@ async fn rt04_cross_runtime_kill_active_task_terminates_via_device_and_records_c
     let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
     loop {
         let view = rt1.background_inspect(&started.id).unwrap().unwrap();
-        if view.status != BackgroundStatus::Running {
+        if view.status.is_terminal() {
             assert_eq!(view.status, BackgroundStatus::Killed);
             break;
         }

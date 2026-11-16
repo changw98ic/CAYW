@@ -301,8 +301,9 @@ fn invalid_and_unsupported_requests_leave_no_accepted_task_or_reservation() {
         usage(&owner, 0, 0);
     }
     let child = owner
-        .try_start_child("child", "fixed input", &TaskIntent::General, 8, 3)
+        .enqueue_child("child", "fixed input", &TaskIntent::General, 8, "tree", 2)
         .unwrap();
+    assert!(owner.admit(&child, 3).unwrap());
     assert_eq!(
         owner.get(&child.id).unwrap().resources,
         TaskResources::default()

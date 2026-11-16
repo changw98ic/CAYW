@@ -1031,7 +1031,7 @@ fn raw_rejection(
     let received = byte_record(&wire["received"])?;
     let hello_response = byte_record(&wire["hello_response_bytes"])?;
     let token = super::scenarios::ipc_config().token;
-    let expected_hello = json!({"version":if index == 1 {2} else {cayw_ipc::PROTOCOL_VERSION},"id":"access-hello","method":"hello",
+    let expected_hello = json!({"version":if index == 1 {super::access_scenarios::REJECTED_IPC_VERSION} else {cayw_ipc::PROTOCOL_VERSION},"id":"access-hello","method":"hello",
         "params":{"token":if index == 0 {"deliberately-wrong-offline-token"} else {&token}}});
     ensure(
         hello == expected_hello,

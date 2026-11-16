@@ -74,7 +74,7 @@ fn history_can_scroll_to_older_messages_and_new_stream_does_not_jump_back_to_bot
     assert!(text.contains("message-39"));
     assert!(!text.contains("message-00"));
     app.scroll_history(i16::MAX);
-    app.apply_events("s1",json!([{"cursor":1,"event":{"type":"agent","event":{"type":"message_update","message":{"content":[{"type":"text","text":"new streamed text"}]}}}}])).unwrap();
+    app.apply_events("s1",json!([{"cursor":1,"event":{"type":"agent","event":{"type":"message_update","event":{"type":"text_end","index":0,"partial":{"content":[{"type":"text","text":"new streamed text"}]}}}}}])).unwrap();
     terminal.draw(|frame| draw(frame, &app)).unwrap();
     let text = terminal
         .backend()

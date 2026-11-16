@@ -1150,21 +1150,19 @@ pub(crate) fn prepare_main_session_input_with_ranges(
         };
         !retained.contains(&range)
     });
-    let tokens = output
-        .iter()
-        .map(|message| u64::try_from(message.text().len()).unwrap_or(u64::MAX))
-        .fold(0_u64, u64::saturating_add);
-    if tokens > budget.input_limit {
-        return if budget.window_was_default {
-            Ok(main_session_fallback_input_with_spans(
-                block.as_deref(),
-                messages,
-                &spans,
-                forgotten,
-            ))
-        } else {
-            Err(RuntimeError::Budget("context input"))
-        };
+    if budget.window_was_default
+        && output
+            .iter()
+            .map(|message| message.text().len() as u64)
+            .fold(0_u64, u64::saturating_add)
+            > budget.input_limit
+    {
+        return Ok(main_session_fallback_input_with_spans(
+            block.as_deref(),
+            messages,
+            &spans,
+            forgotten,
+        ));
     }
     Ok(output)
 }
@@ -1711,6 +1709,15 @@ mod tests {
         assert!(!output.iter().any(|m| m.text().contains("old secret")));
         assert!(!output.iter().any(|m| m.text().contains("old answer")));
         assert_eq!(output.last().unwrap().text(), "current request");
+    }
+
+    #[test]
+    fn configured_window_does_not_reject_the_active_request_from_a_byte_estimate() {
+        let directory = tempfile::tempdir().unwrap();
+        let memory = MainMemory::open(directory.path());
+        let messages = vec![Message::user("z".repeat(20_000))];
+        let output = prepare_main_session_input(&memory, &messages, Some(2_000), 100, &[]).unwrap();
+        assert_eq!(output, messages);
     }
 
     #[test]

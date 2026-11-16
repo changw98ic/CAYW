@@ -12,9 +12,6 @@ use std::{
 /// deeply nested Lua table returns a clean `Script` error instead of exhausting
 /// the Rust stack. Cyclic tables are rejected separately by pointer tracking.
 const MAX_LUA_DEPTH: usize = 128;
-/// Host values are already parsed JSON. A configured payload budget also bounds
-/// their nesting, so an oversized value can be rejected before Lua conversion.
-const MAX_HOST_DEPTH: usize = 64;
 const MAX_SAFE_INTEGER: f64 = 9_007_199_254_740_991.0;
 
 fn conversion(message: impl Into<String>) -> Fault {
@@ -251,9 +248,9 @@ pub(crate) fn discard(value: Value) {
     }
 }
 
-/// A depth-first walk keeps at most one iterator per permitted nesting level.
-/// Only scalar values reach Serialize; unchecked containers never do. Depth and
-/// byte caps apply only when a payload budget is configured; numeric precision
+/// A depth-first walk keeps one iterator per nesting level. Only scalar values
+/// reach Serialize; unchecked containers never do. A configured payload budget
+/// checks bytes without changing accepted JSON depth; numeric precision
 /// is always checked because Luau cannot represent every host integer exactly.
 pub(crate) fn validate_host_value(value: &Value, limit: Option<usize>) -> Result<(), Fault> {
     enum Children<'a> {
@@ -270,7 +267,6 @@ pub(crate) fn validate_host_value(value: &Value, limit: Option<usize>) -> Result
             }
         }
     }
-    let bounded = limit.is_some();
     let mut budget = Budget { remaining: limit };
     let mut pending = vec![Children::Array(std::slice::from_ref(value).iter())];
     while let Some(children) = pending.last_mut() {
@@ -278,8 +274,10 @@ pub(crate) fn validate_host_value(value: &Value, limit: Option<usize>) -> Result
             pending.pop();
             continue;
         };
-        if bounded && pending.len() - 1 > MAX_HOST_DEPTH {
-            return Err(conversion("Host JSON nesting exceeds 64 levels"));
+        // Host conversion and Lua serialization share the same recursive
+        // conversion boundary, independent of any configured byte budget.
+        if pending.len() - 1 > MAX_LUA_DEPTH {
+            return Err(conversion("Host JSON nesting exceeds 128 levels"));
         }
         if let Some(key) = key {
             budget.value(key)?;

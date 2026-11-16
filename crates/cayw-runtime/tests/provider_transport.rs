@@ -104,7 +104,11 @@ async fn configured_transport_child() {
         1,
         "{events:?}"
     );
-    let message = events.last().unwrap().message();
+    let message = events
+        .last()
+        .unwrap()
+        .snapshot()
+        .expect("terminal snapshot");
     if status == 200 {
         assert_eq!(message.stop_reason, StopReason::Stop, "{events:?}");
     } else {

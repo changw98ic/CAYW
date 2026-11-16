@@ -238,7 +238,7 @@ fn seed<I: IntoIterator<Item = Value>>(
             .unwrap();
         for entry in records {
             cursor += 1;
-            let event = json!({"protocol_version":3,"session_id":session,"cursor":cursor,"timestamp":1,
+            let event = json!({"protocol_version":cayw_core::PROTOCOL_VERSION,"session_id":session,"cursor":cursor,"timestamp":1,
                 "attempt":lease,"event":{"type":"host","kind":"model_request","data":entry}});
             insert
                 .execute(params![
@@ -286,7 +286,7 @@ async fn unrelated_roots_do_not_share_request_record_capacity() {
 }
 
 #[tokio::test]
-async fn full_request_history_rejects_before_reserve_without_poisoning_existing_records() {
+async fn request_history_above_old_capacity_admits_and_preserves_original_records() {
     let root = root();
     let provider = Arc::new(Fixed::default());
     let rt = open(root.path(), provider.clone());
@@ -294,16 +294,15 @@ async fn full_request_history_rejects_before_reserve_without_poisoning_existing_
     rejections(&rt, &id, 4096);
     let before = rt.model_requests(&id).unwrap();
     prompt(&rt, &id).await;
-    assert_eq!(
-        provider.0.load(Ordering::SeqCst),
-        0,
-        "full history must reject before Provider::stream"
-    );
-    assert_eq!(rt.model_requests(&id).unwrap(), before);
-    assert_eq!(rt.tasks(&id).unwrap()[0].state, TaskState::Failed);
+    assert_eq!(provider.0.load(Ordering::SeqCst), 1);
+    let after = rt.model_requests(&id).unwrap();
+    assert_eq!(after.requests.len(), 4097);
+    assert_eq!(&after.requests[..4096], before.requests.as_slice());
+    assert_eq!(after.settled_tokens, 8);
+    assert_eq!(rt.tasks(&id).unwrap()[0].state, TaskState::Completed);
     drop(rt);
     let reopened = open(root.path(), provider);
-    assert_eq!(reopened.model_requests(&id).unwrap(), before);
+    assert_eq!(reopened.model_requests(&id).unwrap(), after);
 }
 
 #[tokio::test]

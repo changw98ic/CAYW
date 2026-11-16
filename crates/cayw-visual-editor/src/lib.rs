@@ -1396,7 +1396,8 @@ struct StateAudit {
 
 impl StateAudit {
     fn open(dir: &Path) -> Result<Self, EditorError> {
-        if dir.join(UNKNOWN_MARKER).exists() {
+        let repair_size_marker = audit::legacy_size_marker(dir)?;
+        if dir.join(UNKNOWN_MARKER).exists() && !repair_size_marker {
             return Err(EditorError::Unresolved(format!(
                 "{} is present in the state directory",
                 UNKNOWN_MARKER
@@ -1405,7 +1406,12 @@ impl StateAudit {
         let log = dir.join(EVENT_LOG);
         let file = match std::fs::File::open(&log) {
             Ok(file) => Some(file),
-            Err(error) if error.kind() == io::ErrorKind::NotFound => None,
+            Err(error) if error.kind() == io::ErrorKind::NotFound && !repair_size_marker => None,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                return Err(EditorError::Unresolved(format!(
+                    "{EVENT_LOG} is missing; cannot reconcile the size marker"
+                )));
+            }
             Err(error) => return Err(EditorError::Io(error)),
         };
         if let Some(file) = file {

@@ -225,3 +225,69 @@ async fn default_host_omits_codeintel_catalog() {
         "ordinary HostConfig::default() must not advertise codeintel.*"
     );
 }
+
+#[tokio::test]
+async fn refresh_hashes_full_large_source_and_keeps_tail_symbols() {
+    let root = Root::new();
+    let source = format!(
+        "/*{}*/\npub fn tail_symbol() {{}}\n",
+        "x".repeat(9 * 1024 * 1024)
+    );
+    fs::write(root.0.join("src/lib.rs"), &source).unwrap();
+    let bridge = SymbolVersionBridge::new();
+    let host = Host::new(
+        &root.0,
+        Arc::new(Gate),
+        Arc::new(Audit::default()),
+        HostConfig {
+            workspace: None,
+            codeintel: Some(bridge.clone()),
+            ..HostConfig::default()
+        },
+    )
+    .unwrap();
+    let result = call(
+        &host,
+        "codeintel.refresh",
+        json!({"path":"src/lib.rs","language":"rust"}),
+    )
+    .await;
+    assert_eq!(
+        result["file"]["content_sha256"],
+        cayw_codeintel::content_sha256(source.as_bytes())
+    );
+    assert!(
+        bridge
+            .symbols_for("src/lib.rs")
+            .unwrap()
+            .iter()
+            .any(|hit| hit.id.name == "tail_symbol")
+    );
+}
+
+#[tokio::test]
+async fn outline_failure_does_not_publish_a_fallback_as_success() {
+    let root = Root::new();
+    fs::write(root.0.join("src/lib.rs"), "pub fn broken( {").unwrap();
+    let bridge = SymbolVersionBridge::new();
+    let host = Host::new(
+        &root.0,
+        Arc::new(Gate),
+        Arc::new(Audit::default()),
+        HostConfig {
+            codeintel: Some(bridge.clone()),
+            ..HostConfig::default()
+        },
+    )
+    .unwrap();
+    assert!(
+        host.call(
+            "codeintel.refresh",
+            json!({"path":"src/lib.rs","language":"rust"}),
+            CancellationToken::new()
+        )
+        .await
+        .is_err()
+    );
+    assert!(bridge.file_version("src/lib.rs").unwrap().is_none());
+}

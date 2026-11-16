@@ -7,7 +7,7 @@ CAYW 的版本化本机通信库，Apache-2.0。只负责认证、请求/响应�
 ## 宿主接入 API
 
 ```rust
-pub const PROTOCOL_VERSION: u32 = 1;
+pub const PROTOCOL_VERSION: u32 = 2;
 
 #[async_trait::async_trait]
 pub trait RpcHandler: Send + Sync + 'static {
@@ -79,22 +79,22 @@ pub struct ClientError {
 
 处理器必须将工作包含在返回的 Future 中，不得自行分离有副作用的后台任务。取消、超时或断连会取消处理器 token，继续轮询最多 `cancellation_grace`，然后丢弃仍未完成的 Future。阻塞线程或不可取消的外部副作用不可能由丢弃 Future 撤销；这种情况必须通过运行时持久记录核对。
 
-## v1 行协议
+## v2 行协议
 
-每帧是一行 UTF-8 JSON，以一个 LF 字节结束。`max_frame_bytes` 不包括结尾 LF。读取使用固定大小缓冲区并在每次追加前检查长度；不会使用无限增长的 `read_line`。写入也在序列化过程中限制缓冲区大小。嵌套深度由 `serde_json` 自身的递归上限约束，本库不再另设更小的自定义深度限制。客户端在发送前检查本地帧大小；超出时返回 `request_too_large` 且结果已知；过大的处理器结果对只读方法返回 `response_too_large`，对可能产生副作用的方法返回 `response_too_large_outcome_unknown`。JSON 的字符串、数字、布尔值、null 和数组不会互相转换类型。
+每帧是一行 UTF-8 JSON，以一个 LF 字节结束。`max_frame_bytes` 不包括结尾 LF。读取使用固定大小缓冲区并在每次追加前检查长度；不会使用无限增长的 `read_line`。写入也在序列化过程中限制缓冲区大小。嵌套深度由 `serde_json` 自身的递归上限约束，本库不再另设更小的自定义深度限制。客户端在发送前检查本地帧大小；超出时返回 `request_too_large` 且结果已知；超出单帧的处理器结果通过有序响应分帧传输，SDK 自动重组后返回完整结果。JSON 的字符串、数字、布尔值、null 和数组不会互相转换类型。
 
 请求必须且只能包含 `version`、`id`、`method`、`params` 四个字段。ID 必须是非空字符串，按 UTF-8 字节数限制长度，不能含控制字符。method 同样非空、不含控制字符，最大 256 字节。
 
 ```json
-{"version":1,"id":"h","method":"hello","params":{"token":"host-provided-token"}}
-{"version":1,"id":"h","result":{"version":1,"max_frame_bytes":67108864,"max_in_flight":64,"max_requests_per_connection":null,"max_id_bytes":128}}
-{"version":1,"id":"1","method":"session.get","params":{"session_id":"example"}}
-{"version":1,"id":"1","result":null}
+{"version":2,"id":"h","method":"hello","params":{"token":"host-provided-token"}}
+{"version":2,"id":"h","result":{"version":2,"max_frame_bytes":67108864,"max_in_flight":64,"max_requests_per_connection":null,"max_id_bytes":128}}
+{"version":2,"id":"1","method":"session.get","params":{"session_id":"example"}}
+{"version":2,"id":"1","result":null}
 ```
 
 连接的第一帧必须是 `hello`，成功返回版本和服务端限制后才允许调用处理器。客户端将本地限制与服务端限制取较小值；`max_requests_per_connection` 为可选值：双方都为 `null` 时没有每连接请求数上限，只有一方配置时使用该值，双方都配置时取较小值。`hello` 和 `rpc.cancel` 是传输层保留方法，不能通过 `Client::request` 调用，也不会分派给宿主。
 
-响应必须且只能包含 `version`、`id` 和 `result` 或 `error` 其中之一。`result:null` 是有效成功响应。error 为 `{code,message}`。整帧 JSON 在转换为 `Value` 前先递归检查：任意对象中的重复字段都拒绝，包括 hello 的 token、取消目标、业务 params/result；字段名按 JSON 转义解码后比较，`"x"` 与 `"x"` 也算重复。同名字段位于不同对象内合法。额外协议字段、错误响应形状、无效 UTF-8、坏 JSON、尾随第二份 JSON、超大帧都拒绝。未知版本返回 `unsupported_version` 后断开；认证失败返回 `unauthorized`，先调用业务方法返回 `handshake_required`。
+响应必须且只能包含 `version`、`id` 和 `result`、`error`、`chunk` 其中之一。`chunk` 包含 `{offset,data,done}`；`data` 是完整响应 JSON 的 UTF-8 字节数组，`offset` 是字节偏移，`done` 标记最后一帧。客户端要求相同请求 ID、连续偏移和唯一终帧；缺帧、错序、嵌套分帧或中途改发普通响应均为协议错误。断连释放未完成的重组数据，并保留结果未知语义。服务端增量序列化到有界通道，不先复制完整响应 JSON；每个分帧仍遵守协商帧上限。此协议不兼容 v1 客户端，握手必须使用 v2。`result:null` 是有效成功响应。error 为 `{code,message}`。整帧 JSON 在转换为 `Value` 前先递归检查：任意对象中的重复字段都拒绝，包括 hello 的 token、取消目标、业务 params/result；字段名按 JSON 转义解码后比较，`"x"` 与 `"x"` 也算重复。同名字段位于不同对象内合法。额外协议字段、错误响应形状、无效 UTF-8、坏 JSON、尾随第二份 JSON、超大帧都拒绝。未知版本返回 `unsupported_version` 后断开；认证失败返回 `unauthorized`，先调用业务方法返回 `handshake_required`。
 
 所有请求帧（包括 hello、取消帧和被拒绝的业务请求）的 ID 在同一连接内都不能重复。服务端保留已见 ID 表；默认不限制每连接请求数，显式配置 `Some(n)` 后达到 `n` 时继续发帧会关闭连接，已有请求可能变为结果未知。客户端同样默认不限；显式配置后到达该预算时会在发送前返回 `connection_limit`，宿主可以等待已有调用终结后显式关闭，再显式打开新连接。不存在自动换连接或自动重放。
 
@@ -109,9 +109,9 @@ hello 响应之后，如果握手读取器已缓冲其他字节（包括未结�
 取消帧自身使用新的唯一 ID，其 `params.request_id` 指向本连接中曾接纳的业务请求。
 
 ```json
-{"version":1,"id":"2","method":"rpc.cancel","params":{"request_id":"1"}}
-{"version":1,"id":"2","result":{"cancelled":true}}
-{"version":1,"id":"1","error":{"code":"cancelled_outcome_unknown","message":"request cancelled; side effects may have happened"}}
+{"version":2,"id":"2","method":"rpc.cancel","params":{"request_id":"1"}}
+{"version":2,"id":"2","result":{"cancelled":true}}
+{"version":2,"id":"1","error":{"code":"cancelled_outcome_unknown","message":"request cancelled; side effects may have happened"}}
 ```
 
 取消帧和原请求各有一个终态；二者的响应顺序没有要求。原请求已结束时取消返回 `cancelled:false`，不重复生成其终态。不存在或属于其他连接的目标 ID 会关闭当前连接，不能取消其他连接的工作。处理器等待期间，服务端仍读取取消和其他请求。

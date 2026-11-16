@@ -180,7 +180,7 @@ fn v1_exact_approvals_migrate_transactionally_to_one_current_contract() {
         db.query_row("SELECT format FROM core_metadata", [], |r| r
             .get::<_, String>(0))
             .unwrap(),
-        "cayw-core/3"
+        format!("cayw-core/{SCHEMA_VERSION}")
     );
     let raw: String = db
         .query_row("SELECT projection FROM core_sessions", [], |r| r.get(0))
@@ -386,20 +386,20 @@ fn v2_migration_preserves_independent_effects_without_guessing_wait_bindings() {
     let migrated = store.events("v2-session", 0, 100).unwrap();
     for (actual, old) in migrated.iter().zip(&events) {
         let mut expected = old.clone();
-        expected["protocol_version"] = json!(3);
+        expected["protocol_version"] = json!(PROTOCOL_VERSION);
         assert_eq!(serde_json::to_value(actual).unwrap(), expected);
     }
     let db = Connection::open(database.path()).unwrap();
     assert_eq!(
         db.pragma_query_value(None, "user_version", |r| r.get::<_, u32>(0))
             .unwrap(),
-        3
+        SCHEMA_VERSION
     );
     assert_eq!(
         db.query_row("SELECT format FROM core_metadata", [], |r| r
             .get::<_, String>(0))
             .unwrap(),
-        "cayw-core/3"
+        format!("cayw-core/{SCHEMA_VERSION}")
     );
     let current: String = db
         .query_row("SELECT projection FROM core_sessions", [], |r| r.get(0))
@@ -531,5 +531,148 @@ fn migration_rejects_inconsistent_origins_or_missing_logs_without_changes() {
             Err(CoreError::CorruptStore(_))
         ));
         assert_v1_untouched(&database, &bytes, &projection, &events);
+    }
+}
+
+#[test]
+fn v3_stream_migration_retains_original_bytes_and_resumes_at_the_same_cursor() {
+    use cayw_agent_types::AgentEvent;
+    use cayw_ai::{AssistantEvent, AssistantMessage, Content, Message, Model};
+    let database = Database::new();
+    let store = SessionStore::open(database.path()).unwrap();
+    let id = store.create_session("retained v3 stream").unwrap().id;
+    let lease = store.begin_attempt(&id, "original-worker").unwrap();
+    let mut message = AssistantMessage::new(&Model::new("fixture", "migration"));
+    message.content.push(Content::text(""));
+    for event in [
+        AgentEvent::AgentStart,
+        AgentEvent::TurnStart,
+        AgentEvent::MessageStart {
+            message: Message::Assistant(message.clone()),
+        },
+    ] {
+        store.append_agent_event(&lease, &event).unwrap();
+    }
+    store
+        .append_agent_event(
+            &lease,
+            &AgentEvent::MessageUpdate {
+                event: Box::new(AssistantEvent::TextDelta {
+                    index: 0,
+                    delta: "original".into(),
+                }),
+            },
+        )
+        .unwrap();
+    message.content = vec![Content::text("original")];
+    let receipt = store
+        .append_host_event(
+            &lease,
+            "receipt",
+            json!({"outcome_unknown":true,"original_identity":lease}),
+        )
+        .unwrap();
+    let before = store.snapshot(&id).unwrap();
+    drop(store);
+    let db = Connection::open(database.path()).unwrap();
+    let records: Vec<(i64, String)> = db
+        .prepare("SELECT cursor,record FROM core_events ORDER BY cursor")
+        .unwrap()
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap();
+    db.execute_batch("DROP TRIGGER core_events_no_update; PRAGMA user_version=3; UPDATE core_metadata SET format='cayw-core/3';").unwrap();
+    let mut originals = Vec::new();
+    for (cursor, data) in records {
+        let mut raw: Value = serde_json::from_str(&data).unwrap();
+        raw["protocol_version"] = json!(3);
+        // Old producers could establish the text block only through delta.partial.
+        if raw["event"]["event"]["type"] == "message_start" {
+            raw["event"]["event"]["message"]["content"] = json!([]);
+        }
+        if raw["event"]["event"]["type"] == "message_update" {
+            raw["event"]["event"]["message"] = json!(message);
+            raw["event"]["event"]["event"]["partial"] = json!(message);
+        }
+        let original = format!("  {}  ", raw);
+        db.execute(
+            "UPDATE core_events SET record=?1 WHERE cursor=?2",
+            params![original, cursor],
+        )
+        .unwrap();
+        originals.push((cursor, original));
+    }
+    db.execute_batch("CREATE TRIGGER core_events_no_update BEFORE UPDATE ON core_events BEGIN SELECT RAISE(ABORT,'append only'); END;").unwrap();
+    // A v3 projection was complete through its last event.
+    let raw_projection: String = db
+        .query_row("SELECT projection FROM core_sessions", [], |row| row.get(0))
+        .unwrap();
+    let mut projection: Value = serde_json::from_str(&raw_projection).unwrap();
+    projection["cursor"] = json!(before.cursor);
+    projection["lifecycle"]["open_message"] = json!(Message::Assistant(message.clone()));
+    db.execute(
+        "UPDATE core_sessions SET projection=?1",
+        [projection.to_string()],
+    )
+    .unwrap();
+    let original_projection: String = db
+        .query_row("SELECT projection FROM core_sessions", [], |row| row.get(0))
+        .unwrap();
+    drop(db);
+    let migrated = SessionStore::open(database.path()).unwrap();
+    assert_eq!(migrated.snapshot(&id).unwrap(), before);
+    let events = migrated.events(&id, 0, 1000).unwrap();
+    assert_eq!(events.last().unwrap().cursor, receipt.cursor);
+    assert_eq!(events.last().unwrap().event, receipt.event);
+    assert!(events.iter().any(|record| matches!(&record.event, CoreEvent::Agent { event } if matches!(event.as_ref(), AgentEvent::MessageUpdate { event } if matches!(event.as_ref(), AssistantEvent::Snapshot { message: checkpoint } if checkpoint == &message)))));
+    assert!(
+        events
+            .iter()
+            .all(|event| event.protocol_version == PROTOCOL_VERSION)
+    );
+    migrated
+        .append_agent_event(
+            &lease,
+            &AgentEvent::MessageUpdate {
+                event: Box::new(AssistantEvent::TextDelta {
+                    index: 0,
+                    delta: " continued".into(),
+                }),
+            },
+        )
+        .unwrap();
+    drop(migrated);
+    for _ in 0..2 {
+        let reopened = SessionStore::open(database.path()).unwrap();
+        reopened.validate_lease(&lease).unwrap();
+        let db = Connection::open(database.path()).unwrap();
+        let archived: Vec<(i64,String)> = db.prepare("SELECT cursor,record FROM core_migration_events WHERE source_version=3 ORDER BY cursor").unwrap().query_map([], |row| Ok((row.get(0)?,row.get(1)?))).unwrap().collect::<Result<_,_>>().unwrap();
+        assert_eq!(archived, originals);
+        assert_eq!(
+            db.query_row(
+                "SELECT projection FROM core_migration_projections WHERE source_version=3",
+                [],
+                |row| row.get::<_, String>(0)
+            )
+            .unwrap(),
+            original_projection
+        );
+        assert!(db.execute("DELETE FROM core_migration_events", []).is_err());
+        assert!(db.execute("INSERT OR REPLACE INTO core_migration_events SELECT source_version,session_id,cursor,'{}' FROM core_migration_events LIMIT 1", []).is_err());
+        assert!(db.execute("INSERT OR REPLACE INTO core_migration_projections SELECT source_version,session_id,'{}' FROM core_migration_projections LIMIT 1", []).is_err());
+        assert!(
+            db.execute("UPDATE core_migration_projections SET projection='{}'", [])
+                .is_err()
+        );
+        let projection: String = db
+            .query_row("SELECT projection FROM core_sessions", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(
+            serde_json::from_str::<Value>(&projection).unwrap()["lifecycle"]["open_message"]["content"]
+                [0]["text"],
+            "original"
+        );
+        assert_eq!(reopened.snapshot(&id).unwrap().cursor, before.cursor + 1);
     }
 }

@@ -82,7 +82,7 @@ async fn check_saved_and_undone_results(a: &str, b: &str, context: Value, pointe
         terminal: None,
     };
     let event = |cursor, event| EventRecord {
-        protocol_version: 3,
+        protocol_version: cayw_core::PROTOCOL_VERSION,
         session_id: "session".into(),
         cursor,
         timestamp: 1000 + cursor,

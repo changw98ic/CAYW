@@ -365,6 +365,7 @@ fn build_message_update_plan(workload: usize) -> VecDeque<Op> {
         ops.push_back(Op::agent(AgentEvent::TurnStart));
         let mut text = String::new();
         let mut message = AssistantMessage::new(&model);
+        message.content.push(Content::text(""));
         ops.push_back(Op::agent(AgentEvent::MessageStart {
             message: Message::Assistant(message.clone()),
         }));
@@ -372,11 +373,9 @@ fn build_message_update_plan(workload: usize) -> VecDeque<Op> {
             text.push_str(DELTA);
             message.content = vec![Content::text(text.clone())];
             ops.push_back(Op::agent(AgentEvent::MessageUpdate {
-                message: message.clone(),
                 event: Box::new(AssistantEvent::TextDelta {
                     index: 0,
                     delta: DELTA.into(),
-                    partial: message.clone(),
                 }),
             }));
         }
@@ -449,6 +448,7 @@ fn build_mixed_plan(workload: usize) -> VecDeque<Op> {
         ops.push_back(Op::agent(AgentEvent::TurnStart));
         let mut text = String::new();
         let mut message = AssistantMessage::new(&model);
+        message.content.push(Content::text(""));
         ops.push_back(Op::agent(AgentEvent::MessageStart {
             message: Message::Assistant(message.clone()),
         }));
@@ -457,11 +457,9 @@ fn build_mixed_plan(workload: usize) -> VecDeque<Op> {
             text.push_str(DELTA);
             message.content = vec![Content::text(text.clone())];
             ops.push_back(Op::agent(AgentEvent::MessageUpdate {
-                message: message.clone(),
                 event: Box::new(AssistantEvent::TextDelta {
                     index: 0,
                     delta: DELTA.into(),
-                    partial: message.clone(),
                 }),
             }));
             remaining -= 1;

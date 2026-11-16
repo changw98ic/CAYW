@@ -86,7 +86,7 @@ impl Store {
             _ => "SELECT COUNT(*) FROM requests",
         };
         let count: i64 = self.db.query_row(sql, [], |r| r.get(0)).map_err(storage)?;
-        if count >= self.max_records as i64 {
+        if u64::try_from(count).map_err(|_| RemoteError::Storage)? >= self.max_records as u64 {
             return Err(RemoteError::Busy);
         }
         Ok(())
@@ -269,5 +269,45 @@ impl Store {
             )
             .map_err(storage)?;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn retained_history_crosses_previous_default_without_blocking_new_requests() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("remote.sqlite");
+        let operator = Secret::new("o".repeat(32)).unwrap();
+        let limits = Limits::default();
+        let store = Store::open(&path, &operator, &limits).unwrap();
+        let mut record = RequestRecord {
+            request_id: "first".into(),
+            device_id: "device".into(),
+            generation: 1,
+            state: RequestState::Completed,
+            value: Some(serde_json::json!({"kept":true})),
+            error: None,
+        };
+        let data = serde_json::to_string(&record).unwrap();
+        store.db.execute("WITH RECURSIVE rows(n) AS (VALUES(1) UNION ALL SELECT n+1 FROM rows WHERE n<100001) INSERT INTO requests SELECT 'device', CAST(n AS TEXT), 'hash', json_set(?1, '$.request_id', CAST(n AS TEXT)) FROM rows", [&data]).unwrap();
+        record.request_id = "next".into();
+        store.insert("hash", &record).unwrap();
+        drop(store);
+        let reopened = Store::open(&path, &operator, &limits).unwrap();
+        assert_eq!(reopened.request("device", "next").unwrap().1, record);
+        assert_eq!(
+            reopened.request("device", "1").unwrap().1.value,
+            record.value
+        );
+        assert_eq!(
+            reopened
+                .db
+                .query_row("SELECT count(*) FROM requests", [], |row| row
+                    .get::<_, i64>(0))
+                .unwrap(),
+            100002
+        );
     }
 }

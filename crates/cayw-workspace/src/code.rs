@@ -1,10 +1,14 @@
 //! Local parsed syntax outlines and pure unified-diff coordinates.
 use crate::search::{Lines, OutputBudget, bound};
 use crate::{CapabilityError, Context, Workspace, failure, filesystem, parse};
-use proc_macro2::Span;
+use proc_macro2::{Delimiter, Span, TokenStream, TokenTree};
 use serde::Deserialize;
 use serde_json::{Value, json};
-use syn::{ImplItem, Item, TraitItem, spanned::Spanned};
+use syn::{
+    ImplItem, Item, TraitItem,
+    parse::{Parse, Parser},
+    spanned::Spanned,
+};
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -73,7 +77,11 @@ pub(crate) fn execute(
                 context,
                 output: OutputBudget::new(workspace.limits.max_output_bytes),
             };
-            outline.items(&parsed.items, None, 0)?;
+            let tokens = text[source_offset..]
+                .parse::<TokenStream>()
+                .map_err(|error| failure(format!("Rust tokens: {error}")))?;
+            let locations = item_locations::<Item>(tokens, context)?;
+            outline.items(&parsed.items, &locations, None, 0)?;
             context.check()?;
             Ok(
                 json!({"path":args.path,"language":"rust","sha256":filesystem::hash(&bytes),"symbols":outline.symbols,"total_symbols":outline.total,"truncated":outline.total > outline.max,"syntax_only":true}),
@@ -96,15 +104,13 @@ pub(crate) fn execute(
     }
 }
 
-// Conservative shape bound before entering synchronous recursive Rust parsing.
-// Comments and literals are consumed iteratively; punctuation outside them bounds
-// both nested and flat recursive expressions. It is a resource refusal, not syntax validation.
+// Protect synchronous recursive parsing from deep nesting and consecutive
+// prefix operators. Binary operators and postfix calls are parsed iteratively.
 fn syntax_shape(text: &str, max_depth: usize, context: &Context) -> Result<(), CapabilityError> {
     let bytes = text.as_bytes();
     let mut at = 0;
     let mut nesting = 0usize;
-    let mut punctuation = 0usize;
-    let mut sequence = 0usize;
+    let mut prefix_steps = 0usize;
     while at < bytes.len() {
         context.check()?;
         if bytes[at..].starts_with(b"//") {
@@ -146,6 +152,7 @@ fn syntax_shape(text: &str, max_depth: usize, context: &Context) -> Result<(), C
                 quote += 1;
             }
             if bytes.get(quote) == Some(&b'"') {
+                prefix_steps = 0;
                 let hashes = quote - start;
                 at = quote + 1;
                 while at < bytes.len() {
@@ -164,6 +171,7 @@ fn syntax_shape(text: &str, max_depth: usize, context: &Context) -> Result<(), C
             }
         }
         if bytes[at] == b'"' {
+            prefix_steps = 0;
             at += 1;
             while at < bytes.len() {
                 context.check()?;
@@ -177,25 +185,138 @@ fn syntax_shape(text: &str, max_depth: usize, context: &Context) -> Result<(), C
             }
             continue;
         }
+        if bytes[at] == b'\'' {
+            let content = at + 1;
+            let mut end = content;
+            if bytes.get(content) == Some(&b'\\') {
+                end = content + 2;
+                if bytes.get(content + 1) == Some(&b'x') {
+                    end = content + 4;
+                }
+                if bytes.get(content + 1) == Some(&b'u') && bytes.get(content + 2) == Some(&b'{') {
+                    end = content + 3;
+                    while end < bytes.len() && bytes[end] != b'}' {
+                        context.check()?;
+                        end += 1;
+                    }
+                    end += 1;
+                }
+            } else if let Some(character) = text.get(content..).and_then(|rest| rest.chars().next())
+            {
+                end = content + character.len_utf8();
+            }
+            if bytes.get(end) == Some(&b'\'') {
+                at = end + 1;
+                prefix_steps = 0;
+                continue;
+            }
+            // A lifetime does not end a reference-type prefix chain (&'a &'a T).
+            if let Some(rest) = text.get(content..) {
+                let length: usize = rest
+                    .chars()
+                    .take_while(|c| c.is_alphanumeric() || *c == '_')
+                    .map(char::len_utf8)
+                    .sum();
+                if length > 0 {
+                    at = content + length;
+                    continue;
+                }
+            }
+        }
+        if bytes[at].is_ascii_alphabetic() || bytes[at] == b'_' {
+            let start = at;
+            while at < bytes.len() && (bytes[at].is_ascii_alphanumeric() || bytes[at] == b'_') {
+                at += 1;
+            }
+            // These qualifiers are part of recursive pointer/reference prefixes.
+            if !matches!(&text[start..at], "mut" | "const") {
+                prefix_steps = 0;
+            }
+            continue;
+        }
         if bytes[at].is_ascii_punctuation() {
-            punctuation += 1;
-            sequence += 1;
+            if matches!(bytes[at], b'!' | b'-' | b'*' | b'&') {
+                prefix_steps += 1;
+            } else {
+                prefix_steps = 0;
+            }
             if matches!(bytes[at], b'(' | b'[' | b'{' | b'<') {
                 nesting += 1;
             }
             if matches!(bytes[at], b')' | b']' | b'}' | b'>') {
                 nesting = nesting.saturating_sub(1);
             }
-            if bytes[at] == b';' {
-                sequence = 0;
-            }
-            if nesting > max_depth || punctuation > 4096 || sequence > 512 {
+            if nesting > max_depth || prefix_steps > 512 {
                 return Err(failure("Rust syntax complexity limit exceeded"));
             }
+        } else if !bytes[at].is_ascii_whitespace() {
+            prefix_steps = 0;
         }
         at += 1;
     }
     Ok(())
+}
+
+// Spanned::span() on a syn item serializes its entire AST back to tokens. A
+// large flat expression can overflow that recursive traversal even though syn's
+// parser and Drop both handle it. Capture boundaries from the parser cursor
+// instead, where a function body is one token group.
+struct ItemLocation {
+    span: Span,
+    body: Option<TokenStream>,
+}
+
+fn item_locations<T: Parse>(
+    tokens: TokenStream,
+    context: &Context,
+) -> Result<Vec<ItemLocation>, CapabilityError> {
+    let parser = |input: syn::parse::ParseStream<'_>| -> syn::Result<Vec<ItemLocation>> {
+        input.call(syn::Attribute::parse_inner)?;
+        let mut locations = Vec::new();
+        while !input.is_empty() {
+            context
+                .check()
+                .map_err(|error| input.error(error.message))?;
+            let begin = input.cursor();
+            let _: T = input.parse()?;
+            let end = input.cursor();
+            let mut cursor = begin;
+            let mut last = begin.span();
+            let mut body = None;
+            while cursor != end {
+                let (token, next) = cursor
+                    .token_tree()
+                    .ok_or_else(|| input.error("missing item boundary"))?;
+                last = token.span();
+                if let TokenTree::Group(group) = token
+                    && group.delimiter() == Delimiter::Brace
+                {
+                    body = Some(group.stream());
+                }
+                cursor = next;
+            }
+            let span = begin
+                .span()
+                .join(last)
+                .ok_or_else(|| input.error("disjoint source spans"))?;
+            locations.push(ItemLocation { span, body });
+        }
+        Ok(locations)
+    };
+    parser
+        .parse2(tokens)
+        .map_err(|error| failure(format!("Rust source ranges: {error}")))
+}
+
+fn body_locations<T: Parse>(
+    location: &ItemLocation,
+    context: &Context,
+) -> Result<Vec<ItemLocation>, CapabilityError> {
+    let body = location
+        .body
+        .clone()
+        .ok_or_else(|| failure("missing Rust item body"))?;
+    item_locations::<T>(body, context)
 }
 
 struct Outline<'a> {
@@ -243,13 +364,17 @@ impl Outline<'_> {
     fn items(
         &mut self,
         items: &[Item],
+        locations: &[ItemLocation],
         parent: Option<usize>,
         depth: usize,
     ) -> Result<(), CapabilityError> {
         if self.depth.is_some_and(|max| depth > max) {
             return Err(failure("outline nesting limit exceeded"));
         }
-        for item in items {
+        if items.len() != locations.len() {
+            return Err(failure("Rust item boundaries do not match parsed items"));
+        }
+        for (item, location) in items.iter().zip(locations) {
             self.context.check()?;
             let (name, kind) = match item {
                 Item::Const(i) => (i.ident.to_string(), "constant"),
@@ -282,15 +407,21 @@ impl Outline<'_> {
                 Item::Use(i) => (self.source(i.tree.span())?, "use"),
                 _ => return Err(failure("unsupported Rust outline item")),
             };
-            let id = self.add(name, kind, item.span(), parent)?;
+            let id = self.add(name, kind, location.span, parent)?;
             match item {
                 Item::Mod(i) => {
                     if let Some((_, items)) = &i.content {
-                        self.items(items, Some(id), depth + 1)?;
+                        self.items(
+                            items,
+                            &body_locations::<Item>(location, self.context)?,
+                            Some(id),
+                            depth + 1,
+                        )?;
                     }
                 }
                 Item::Impl(i) => {
-                    for member in &i.items {
+                    let member_locations = body_locations::<ImplItem>(location, self.context)?;
+                    for (member, member_location) in i.items.iter().zip(&member_locations) {
                         let (name, kind) = match member {
                             ImplItem::Fn(i) => (i.sig.ident.to_string(), "function"),
                             ImplItem::Const(i) => (i.ident.to_string(), "associated_constant"),
@@ -298,11 +429,12 @@ impl Outline<'_> {
                             ImplItem::Macro(i) => (self.source(i.mac.path.span())?, "macro"),
                             _ => return Err(failure("unsupported Rust impl item")),
                         };
-                        self.add(name, kind, member.span(), Some(id))?;
+                        self.add(name, kind, member_location.span, Some(id))?;
                     }
                 }
                 Item::Trait(i) => {
-                    for member in &i.items {
+                    let member_locations = body_locations::<TraitItem>(location, self.context)?;
+                    for (member, member_location) in i.items.iter().zip(&member_locations) {
                         let (name, kind) = match member {
                             TraitItem::Fn(i) => (i.sig.ident.to_string(), "function"),
                             TraitItem::Const(i) => (i.ident.to_string(), "associated_constant"),
@@ -310,11 +442,13 @@ impl Outline<'_> {
                             TraitItem::Macro(i) => (self.source(i.mac.path.span())?, "macro"),
                             _ => return Err(failure("unsupported Rust trait item")),
                         };
-                        self.add(name, kind, member.span(), Some(id))?;
+                        self.add(name, kind, member_location.span, Some(id))?;
                     }
                 }
                 Item::ForeignMod(i) => {
-                    for member in &i.items {
+                    let member_locations =
+                        body_locations::<syn::ForeignItem>(location, self.context)?;
+                    for (member, member_location) in i.items.iter().zip(&member_locations) {
                         let (name, kind) = match member {
                             syn::ForeignItem::Fn(i) => (i.sig.ident.to_string(), "function"),
                             syn::ForeignItem::Static(i) => (i.ident.to_string(), "static"),
@@ -324,7 +458,7 @@ impl Outline<'_> {
                             }
                             _ => return Err(failure("unsupported Rust foreign item")),
                         };
-                        self.add(name, kind, member.span(), Some(id))?;
+                        self.add(name, kind, member_location.span, Some(id))?;
                     }
                 }
                 _ => {}

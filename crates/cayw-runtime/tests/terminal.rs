@@ -489,3 +489,198 @@ async fn runtime_nonzero_terminal_exit_completes_after_reading_eof() {
     let task = rt.tasks(&id).unwrap().remove(0);
     assert_eq!(task.state, TaskState::Completed);
 }
+
+#[cfg(target_os = "macos")]
+#[tokio::test]
+async fn foreground_child_with_live_terminal_reports_deadlock_and_cancellation_reaps() {
+    let root = root();
+    let entered = Arc::new(Semaphore::new(0));
+    let release = Arc::new(Semaphore::new(0));
+    let provider = Arc::new(CompletionGate {
+        script: "local t=cayw.call('exec_command',{profile='terminal'}); local ok,err=pcall(function() return cayw.call('agent.run',{prompt='child'}) end); return {ok=ok,error=tostring(err)}",
+        entered: entered.clone(),
+        release,
+    });
+    let mut config = runtime_config(
+        profile(
+            fixture(),
+            &["leaf".into(), root.path().to_string_lossy().into_owned()],
+        ),
+        vec![
+            ScopedPermission::exact("exec_command", json!({"profile":"terminal"})),
+            ScopedPermission::exact("agent.run", json!({"prompt":"child"})),
+        ],
+    );
+    config.max_concurrent_runs = 1;
+    config.local_agents = Some(cayw_runtime::LocalAgents::default());
+    let rt = open(root.path(), provider, config);
+    let session = rt.create(None).unwrap().id;
+    let cancel = CancellationToken::new();
+    let _guard = cancel.clone().drop_guard();
+    let run = {
+        let rt = rt.clone();
+        let session = session.clone();
+        let cancel = cancel.clone();
+        tokio::spawn(async move {
+            rt.prompt(&session, "terminal then foreground child", cancel)
+                .await
+        })
+    };
+    let pid = ready(&root.path().join("leaf.pid")).await;
+    timeout(WATCHDOG, entered.acquire())
+        .await
+        .expect("foreground rejection must reach the next model response")
+        .unwrap()
+        .forget();
+    assert!(alive(pid));
+    let events = rt.events(&session, 0, 1000).unwrap();
+    assert!(events.iter().any(|record| matches!(&record.event, CoreEvent::CapabilitySettled { call } if call.name == "agent.run" && format!("{:?}",call.outcome).contains("close the terminal first or use mode='background'"))));
+    assert_eq!(
+        rt.list().unwrap().len(),
+        1,
+        "deadlock rejection must not create a child session"
+    );
+    cancel.cancel();
+    let _ = timeout(WATCHDOG, run)
+        .await
+        .expect("cancelled parent must finish cleanup")
+        .unwrap();
+    assert!(
+        !alive(pid),
+        "cancellation must reap the original terminal process"
+    );
+    let task = rt.tasks(&session).unwrap().remove(0);
+    assert_eq!(task.state, TaskState::Draining);
+    assert!(
+        task.holds_slot,
+        "stopping a live terminal does not prove rollback of its effects"
+    );
+}
+
+#[cfg(target_os = "macos")]
+#[tokio::test]
+async fn foreground_child_deadlock_error_allows_script_to_close_terminal() {
+    let root = root();
+    let provider = Arc::new(Script(
+        "local t=cayw.call('exec_command',{profile='terminal'}); local ok,err=pcall(function() return cayw.call('agent.run',{prompt='child'}) end); cayw.call('write_stdin',{session_id=t.session_id,action='close',request_id='close'}); cayw.call('write_stdin',{session_id=t.session_id,action='wait',wait_ms=10000,request_id='wait'}); return {ok=ok,error=tostring(err)}",
+    ));
+    let mut config = runtime_config(
+        profile("/bin/cat", &[]),
+        vec![
+            ScopedPermission::exact("exec_command", json!({"profile":"terminal"})),
+            ScopedPermission::exact("agent.run", json!({"prompt":"child"})),
+        ],
+    );
+    config.max_concurrent_runs = 1;
+    config.local_agents = Some(cayw_runtime::LocalAgents::default());
+    let rt = open(root.path(), provider, config);
+    let session = rt.create(None).unwrap().id;
+    let run = {
+        let rt = rt.clone();
+        let session = session.clone();
+        tokio::spawn(async move {
+            rt.prompt(
+                &session,
+                "terminal then child then close",
+                CancellationToken::new(),
+            )
+            .await
+        })
+    };
+    timeout(WATCHDOG, async {
+        while !run.is_finished() {
+            if let Some(approval) = rt.get(&session).unwrap().pending_approvals.first() {
+                assert_eq!(approval.input.capability, "write_stdin");
+                match rt.approve(
+                    &session,
+                    &approval.id,
+                    ApprovalChoice::AllowOnce,
+                    "terminal-child-test",
+                ) {
+                    Ok(_) | Err(RuntimeError::StaleApproval) => {}
+                    Err(error) => panic!("approval failed: {error}"),
+                }
+            }
+            tokio::time::sleep(Duration::from_millis(2)).await;
+        }
+    })
+    .await
+    .expect("deadlock rejection must let the script close its terminal");
+    let result = run.await.unwrap();
+    assert!(
+        matches!(
+            result,
+            Err(RuntimeError::RecoveryRequired {
+                outcome_unknown: true,
+                ..
+            })
+        ),
+        "closing a live terminal preserves unknown effects: {result:?}"
+    );
+    assert_eq!(rt.list().unwrap().len(), 1);
+    let events = rt.events(&session, 0, 1000).unwrap();
+    assert!(events.iter().any(|record| matches!(&record.event, CoreEvent::CapabilitySettled { call } if call.name=="agent.run" && format!("{:?}",call.outcome).contains("close the terminal first"))));
+    let task = rt.tasks(&session).unwrap().remove(0);
+    assert_eq!(task.state, TaskState::Draining);
+    assert!(task.holds_slot);
+    assert!(events.iter().any(|record| matches!(&record.event, CoreEvent::CapabilitySettled { call } if call.name == "write_stdin" && call.arguments["action"] == "close")));
+}
+
+#[cfg(target_os = "macos")]
+#[tokio::test]
+async fn foreground_ancestors_with_terminals_cannot_exhaust_two_slots() {
+    let root = root();
+    let provider = Arc::new(Script(
+        "local t=cayw.call('exec_command',{profile='terminal'}); local ok,err=pcall(function() return cayw.call('agent.run',{prompt='child'}) end); return {ok=ok,error=tostring(err)}",
+    ));
+    let permissions = vec![
+        ScopedPermission::exact("exec_command", json!({"profile":"terminal"})),
+        ScopedPermission::exact("agent.run", json!({"prompt":"child"})),
+    ];
+    let mut terminal = profile("/bin/cat", &[]);
+    terminal.timeout = None;
+    let mut config = runtime_config(terminal, permissions.clone());
+    config.max_concurrent_runs = 2;
+    config.max_run_time = None;
+    config.codemode.timeout = None;
+    config.host.call_timeout = None;
+    config.local_agents = Some(cayw_runtime::LocalAgents {
+        max_depth: 2,
+        max_children: 2,
+        permissions,
+        ..Default::default()
+    });
+    let rt = open(root.path(), provider, config);
+    let session = rt.create(None).unwrap().id;
+    let cancel = CancellationToken::new();
+    let _guard = cancel.clone().drop_guard();
+    let run = {
+        let rt = rt.clone();
+        let session = session.clone();
+        let cancel = cancel.clone();
+        tokio::spawn(async move { rt.prompt(&session, "nested terminal owners", cancel).await })
+    };
+    let observed=timeout(WATCHDOG,async {
+        loop {
+            for session in rt.list().unwrap() {
+                let found=rt.events(&session.id,0,1000).unwrap().iter().any(|record|matches!(&record.event,CoreEvent::CapabilitySettled {call} if call.name=="agent.run" && format!("{:?}",call.outcome).contains("close the terminal first")));
+                if found {return;}
+            }
+            tokio::task::yield_now().await;
+        }
+    }).await;
+    cancel.cancel();
+    let _ = timeout(WATCHDOG, run)
+        .await
+        .expect("ancestor cancellation must finish cleanup")
+        .unwrap();
+    assert!(
+        observed.is_ok(),
+        "two terminal-owning ancestors must report the dependency cycle"
+    );
+    assert_eq!(
+        rt.list().unwrap().len(),
+        2,
+        "blocked grandchild must not be created"
+    );
+}

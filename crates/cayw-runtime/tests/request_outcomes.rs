@@ -130,6 +130,7 @@ async fn fixed_provider_waits_for_a_terminal_cell_until_its_vm_is_stopped() {
             outputs: vec![],
             has_more: false,
             required_budget: None,
+            error_truncated: false,
             outcome_unknown: false,
             error: None,
             stop: None,
@@ -155,7 +156,11 @@ async fn fixed_provider_waits_for_a_terminal_cell_until_its_vm_is_stopped() {
             let events: Vec<_> =
                 futures::StreamExt::collect(provider.stream(request, CancellationToken::new()))
                     .await;
-            let message = events.last().unwrap().message();
+            let message = events
+                .last()
+                .unwrap()
+                .snapshot()
+                .expect("terminal snapshot");
             if vm_alive {
                 let calls = message.tool_calls();
                 assert_eq!(calls.len(), 1);

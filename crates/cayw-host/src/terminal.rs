@@ -121,18 +121,9 @@ pub(crate) fn validate_config(config: &TerminalConfig) -> Result<(), CapabilityE
         if profile.timeout.is_some_and(|timeout| {
             timeout.is_zero() || Instant::now().checked_add(timeout).is_none()
         }) || profile.max_output_bytes == Some(0)
-            || profile.args.len() > 256
-            || profile
-                .args
-                .iter()
-                .any(|argument| argument.contains('\0') || argument.len() > 8192)
-            || profile.env.len() > 256
+            || profile.args.iter().any(|argument| argument.contains('\0'))
             || profile.env.iter().any(|(key, value)| {
-                key.is_empty()
-                    || key.contains(['=', '\0'])
-                    || value.contains('\0')
-                    || key.len() > 1024
-                    || value.len() > 32768
+                key.is_empty() || key.contains(['=', '\0']) || value.contains('\0')
             })
         {
             return Err(failure("invalid terminal profile"));
@@ -608,7 +599,7 @@ impl TerminalManager {
         let interactive_limits = InteractiveLimits {
             max_write_bytes: limits
                 .max_input_bytes_per_write
-                .unwrap_or(INTERACTIVE_BUFFER_BYTES),
+                .unwrap_or(isize::MAX as usize),
             max_buffered_stdout_bytes: max_output.unwrap_or(INTERACTIVE_BUFFER_BYTES),
         };
         let start = runner.start_interactive_in_directory_with_permit(
@@ -1062,6 +1053,16 @@ impl TerminalSession {
         };
         drop(stdin);
         if let Err(error) = result {
+            if matches!(
+                error,
+                DeviceError::InvalidSpec(_)
+                    | DeviceError::Io {
+                        operation: "allocate interactive write",
+                        ..
+                    }
+            ) {
+                return Err(failure(format!("terminal write was not started: {error}")));
+            }
             if self.is_running() {
                 self.mark_unknown(format!("terminal write failed: {error}"));
                 return Err(CapabilityError::unknown(format!(

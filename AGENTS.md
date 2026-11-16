@@ -43,7 +43,7 @@ cargo test -p cayw-ai --test contracts validation_is_strict_and_local_only
 - 工具全部由宿主显式注册。参数严格校验，不隐式转换；有转换需要时实现工具自己的 `prepare_arguments`。工具可以进度更新，整批结果按调用原顺序入历史。
 - `outcome_unknown` 只表示副作用结果不明，不能被改写成取消、失败或成功。保留原始记录和工具调用配对；中断后等待实际执行清理完成，再允许后续任务，不把不明结果变成永久 Session 冻结。
 - `cayw-agent` 的运行 Future 被 Drop 时会取消令牌并释放其内存运行状态；这不证明外部副作用已撤销。持久化 Runtime 必须另外核对 Core/Cells/Requests 记录和原执行者身份，等待 Device 清理确认后才能释放执行名额；清理或持久化失败时保留未知状态，不自动重放。
-- Core 协议/存储当前为 v3；`cayw-ipc` 的帧协议当前为 v1。这是不同层的版本，不能为统一数字而修改。Core 能力序号从 0 开始，Cells 从 1 开始，转换必须检查边界。
+- Core 协议/存储当前为 v4（流式增量事件与完整检查点分离，旧库事务迁移并保留原始证据）；`cayw-ipc` 的帧协议当前为 v2，新增同一响应的有序分帧传输。这是不同层的版本，不能为统一数字而修改。Core 能力序号从 0 开始，Cells 从 1 开始，转换必须检查边界。
 - Workspace 执行器本身不是权限边界，不能直接暴露给模型；经 Host 完成严格校验、授权、调用开始、预算和终态记录后再执行。`fs.grep`/`fs.glob`/`code.outline`/`code.diff_hunks` 只有这一条实际分发路径。
 - 根目录句柄固定工作区；路径被重命名后不能重新按外部路径打开来换根。Unix 进程组不等于安全沙箱；macOS 的 PTY 与进程清理按对应 Issue 验收。Windows Job Objects 不在当前首发范围。
 

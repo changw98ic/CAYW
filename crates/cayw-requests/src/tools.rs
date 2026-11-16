@@ -55,8 +55,8 @@ impl RequestTools {
                     "type":"object","additionalProperties":false,
                     "required":["purpose","gap","operation_id","capability","arguments"],
                     "properties":{
-                        "purpose":{"type":"string","minLength":1,"maxLength":2048},
-                        "gap":{"type":"string","minLength":1,"maxLength":2048},
+                        "purpose":{"type":"string","minLength":1},
+                        "gap":{"type":"string","minLength":1},
                         "operation_id":{"type":"string","minLength":1,"maxLength":128,"pattern":"^[A-Za-z0-9_.:-]+$"},
                         "capability":{"type":"string","minLength":1,"maxLength":128,"pattern":"^[A-Za-z0-9_.:-]+$"},
                         "arguments":{"type":"object"}
@@ -87,7 +87,6 @@ impl RequestTools {
                 )
             })?;
         argument_bounds(&arguments)?;
-        bounded_json(&arguments, ARG_BYTES + 8192)?;
         self.validators[index].validate(&arguments).map_err(|_| {
             RequestError::InvalidInput(
                 "request tool arguments do not match the strict schema".into(),

@@ -60,11 +60,8 @@ fn streamed_projection_keeps_history_and_observes_peer_recovery_and_damage() {
     for index in 0..32 {
         message.content = vec![cayw_ai::Content::text(format!("chunk {index}"))];
         let event = AgentEvent::MessageUpdate {
-            message: message.clone(),
-            event: Box::new(AssistantEvent::TextDelta {
-                index: 0,
-                delta: format!("chunk {index}"),
-                partial: message.clone(),
+            event: Box::new(AssistantEvent::Snapshot {
+                message: message.clone(),
             }),
         };
         store.append_agent_event(&lease, &event).unwrap();
@@ -192,7 +189,6 @@ fn rejected_stream_update_rolls_back_and_valid_updates_survive_reopen() {
     let lease = store.begin_attempt(&id, "worker").unwrap();
     let message = AssistantMessage::new(&Model::new("fixture", "stream"));
     let update = AgentEvent::MessageUpdate {
-        message: message.clone(),
         event: Box::new(AssistantEvent::Start {
             message: message.clone(),
         }),
@@ -251,4 +247,115 @@ fn rejected_stream_update_rolls_back_and_valid_updates_survive_reopen() {
         SessionStore::open(&path).unwrap().snapshot(&id).unwrap(),
         store.snapshot(&id).unwrap()
     );
+}
+
+#[test]
+fn deltas_and_control_observations_do_not_rewrite_checkpoint_and_replay_across_peers() {
+    use cayw_ai::Content;
+    use rusqlite::Connection;
+    let directory = Database::new();
+    let path = directory.0.join("stream.db");
+    let store = SessionStore::open(&path).unwrap();
+    let id = store.create_session("checkpoint").unwrap().id;
+    let lease = store.begin_attempt(&id, "worker").unwrap();
+    let mut message = AssistantMessage::new(&Model::new("fixture", "stream"));
+    let prefix = "p".repeat(1024 * 1024);
+    message.content = vec![Content::text(&prefix)];
+    for event in [
+        AgentEvent::AgentStart,
+        AgentEvent::TurnStart,
+        AgentEvent::MessageStart {
+            message: Message::Assistant(message.clone()),
+        },
+    ] {
+        store.append_agent_event(&lease, &event).unwrap();
+    }
+    let database = Connection::open(&path).unwrap();
+    let checkpoint: String = database
+        .query_row("SELECT projection FROM core_sessions", [], |row| row.get(0))
+        .unwrap();
+    let base_cursor = store.snapshot(&id).unwrap().cursor;
+    database.execute_batch("CREATE TABLE projection_writes(bytes INTEGER NOT NULL); CREATE TRIGGER count_projection_writes AFTER UPDATE OF projection ON core_sessions BEGIN INSERT INTO projection_writes VALUES(length(NEW.projection)); END;").unwrap();
+    let peer = SessionStore::open(&path).unwrap();
+    for i in 0..200 {
+        let writer = if i % 2 == 0 { &store } else { &peer };
+        let event = writer
+            .append_agent_event(
+                &lease,
+                &AgentEvent::MessageUpdate {
+                    event: Box::new(AssistantEvent::TextDelta {
+                        index: 0,
+                        delta: "x".into(),
+                    }),
+                },
+            )
+            .unwrap();
+        writer
+            .append_control_event(
+                &id,
+                event.cursor,
+                Some(&lease),
+                "observer",
+                "stream_observed",
+                serde_json::json!({"fragment":i}),
+            )
+            .unwrap();
+    }
+    assert_eq!(
+        database
+            .query_row("SELECT count(*) FROM projection_writes", [], |row| row
+                .get::<_, i64>(0))
+            .unwrap(),
+        0
+    );
+    assert_eq!(
+        database
+            .query_row("SELECT projection FROM core_sessions", [], |row| row
+                .get::<_, String>(0))
+            .unwrap(),
+        checkpoint
+    );
+    let suffix_bytes: i64 = database
+        .query_row(
+            "SELECT sum(length(record)) FROM core_events WHERE cursor>?1",
+            [base_cursor as i64],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert!(
+        suffix_bytes < prefix.len() as i64,
+        "400 small updates must not repeat the 1 MiB prefix"
+    );
+    assert_eq!(store.snapshot(&id).unwrap().cursor, base_cursor + 400);
+    drop(peer);
+    drop(store);
+    let reopened = SessionStore::open(&path).unwrap();
+    assert_eq!(reopened.snapshot(&id).unwrap().cursor, base_cursor + 400);
+    // A checkpoint snapshot validates the fully reconstructed message on reopen.
+    let final_text = format!("{prefix}{}", "x".repeat(200));
+    message.content = vec![Content::text(final_text.clone())];
+    message.stop_reason = StopReason::Stop;
+    reopened
+        .append_agent_event(
+            &lease,
+            &AgentEvent::MessageEnd {
+                message: Message::Assistant(message),
+            },
+        )
+        .unwrap();
+    assert_eq!(
+        database
+            .query_row("SELECT count(*) FROM projection_writes", [], |row| row
+                .get::<_, i64>(0))
+            .unwrap(),
+        1
+    );
+    let snapshot = reopened.snapshot(&id).unwrap();
+    let Message::Assistant(assistant) = snapshot.messages.last().unwrap() else {
+        panic!("assistant terminal")
+    };
+    assert_eq!(assistant.content, vec![Content::text(final_text)]);
+    // Recovery observes the committed terminal and never replays its effects.
+    reopened.recover(&id).unwrap();
+    assert_eq!(reopened.snapshot(&id).unwrap().messages, snapshot.messages);
 }

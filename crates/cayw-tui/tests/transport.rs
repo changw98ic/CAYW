@@ -716,3 +716,54 @@ async fn stale_success_response_from_a_closed_connection_cannot_replace_reconnec
         .unwrap()
         .unwrap();
 }
+
+#[tokio::test]
+async fn saturated_prompts_queue_and_leave_control_requests_available() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let fixture = Arc::new(Fixture::default());
+    let (cancel, server) = server(listener, fixture.clone()).await;
+    let mut transport = Transport::start(address, "fixture-token".into());
+    connect(&mut transport).await;
+    for tag in 0..20 {
+        transport
+            .call(Request {
+                tag,
+                method: "session.prompt",
+                params: json!({"session_id":"s1","text":"fixture prompt"}),
+            })
+            .unwrap();
+    }
+    while fixture.prompts.load(Ordering::SeqCst) < 16 {
+        tokio::select! { _=fixture.changed.notified()=>{}, update=transport.next()=> {assert!(update.is_some());} }
+    }
+    transport
+        .call(Request {
+            tag: 100,
+            method: "approval.decide",
+            params: json!({"allowed":true}),
+        })
+        .unwrap();
+    assert_eq!(
+        response(&mut transport, 100).await.unwrap(),
+        json!({"allowed":true})
+    );
+    transport
+        .call(Request {
+            tag: 101,
+            method: "session.cancel",
+            params: json!({"session_id":"s1","task_id":"original-task"}),
+        })
+        .unwrap();
+    assert!(response(&mut transport, 101).await.is_ok());
+    // The queued prompts are admitted when earlier waits finish, rather than rejected.
+    while fixture.prompts.load(Ordering::SeqCst) < 20 {
+        if let Update::Response { result, .. } = next(&mut transport).await {
+            assert!(result.is_ok());
+        }
+    }
+    assert_eq!(fixture.prompts.load(Ordering::SeqCst), 20);
+    transport.shutdown().await;
+    cancel.cancel();
+    server.await.unwrap().unwrap();
+}

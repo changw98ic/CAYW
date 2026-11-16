@@ -195,15 +195,8 @@ impl CellManager {
             let session_vm_lock = self
                 .journal
                 .claim_session(&self.identity.session_id, false)?;
-            let permit = self.capacity.clone().try_acquire_owned().map_err(|_| {
-                CellError::capacity(
-                    CapacityKind::MaxRunning,
-                    None,
-                    None,
-                    self.limits.max_running,
-                    self.limits.max_running,
-                )
-            })?;
+            let permit = self.capacity.clone().try_acquire_owned().ok();
+            let queued = permit.is_none();
             let record = CellRecord {
                 cell_id: Uuid::new_v4().to_string(),
                 identity: self.identity.clone(),
@@ -264,6 +257,12 @@ impl CellManager {
                     return Err(CellError::Invalid(error.to_string()));
                 }
             };
+            if queued && let Err(error) = self.backend.queued(&run.execution) {
+                run.finish(Some(error.to_string()), false);
+                run.live.store(false, Ordering::Release);
+                return Err(error);
+            }
+            let capacity = self.capacity.clone();
             let task_run = run.clone();
             let completion = Completion {
                 run: task_run.clone(),
@@ -272,7 +271,27 @@ impl CellManager {
             };
             let abort = tasks.spawn(async move {
                 let _completion = completion;
-                let _permit = permit;
+                let permit = match permit {
+                    Some(permit) => Some(permit),
+                    None => tokio::select! {
+                        biased;
+                        _ = task_run.cancel.cancelled() => None,
+                        permit = capacity.acquire_owned() => permit.ok(),
+                    },
+                };
+                let Some(_permit) = permit else {
+                    task_run.finish(Some("cell cancelled while queued".into()), false);
+                    return;
+                };
+                if queued
+                    && let Err(error) = task_run
+                        .backend
+                        .dispatched(&task_run.execution, task_run.cancel.clone())
+                        .await
+                {
+                    task_run.finish(Some(error.to_string()), false);
+                    return;
+                }
                 if let Err(error) = task_run.update(|r| {
                     r.status = CellStatus::Running;
                     Ok(())
@@ -968,13 +987,8 @@ impl Run {
             required_budget: None,
             outcome_unknown: record.status == CellStatus::OutcomeUnknown,
             stop: record.stop,
-            error: record.error.as_ref().map(|error| {
-                let mut end = error.len().min(64);
-                while !error.is_char_boundary(end) {
-                    end -= 1;
-                }
-                error[..end].to_owned()
-            }),
+            error: record.error.clone(),
+            error_truncated: false,
         };
         for entry in record.outputs.iter().skip(cursor as usize) {
             page.outputs.push(entry.clone());
@@ -992,8 +1006,12 @@ impl Run {
             }
         }
         // required_budget itself adds bytes; reserve room without losing output.
-        if serde_json::to_vec(&page)?.len() > budget {
+        let full_metadata_bytes = serde_json::to_vec(&page)?.len();
+        if full_metadata_bytes > budget && page.error.is_some() {
             page.error = None;
+            page.error_truncated = true;
+            page.has_more = true;
+            page.required_budget = Some(page.required_budget.unwrap_or(0).max(full_metadata_bytes));
         }
         if serde_json::to_vec(&page)?.len() > budget {
             return Err(CellError::Invalid(

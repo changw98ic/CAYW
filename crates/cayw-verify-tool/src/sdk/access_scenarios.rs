@@ -32,6 +32,8 @@ use tokio::{
 
 const TOKEN: &str = "offline-verify-tool-loopback-fixture-token";
 const REJECTION_FRAME_BYTES: usize = 1024;
+// Deliberately unsupported by the current server, including after protocol upgrades.
+pub(super) const REJECTED_IPC_VERSION: u32 = cayw_ipc::PROTOCOL_VERSION + 1;
 
 pub(super) fn specification(name: &str) -> Value {
     let mut value = BuiltinScenario::IpcLifecycle.specification(NegativeControl::None);
@@ -459,7 +461,7 @@ async fn read_closed(reader: &mut BufReader<TcpStream>) -> Result<(Vec<u8>, Stri
 async fn raw_rejection(server: &Server, id: &str, case: &str) -> Result<Value> {
     tokio::time::timeout(DEADLINE, async {
         let mut reader = BufReader::new(TcpStream::connect(server.address).await?);
-        let hello = frame(&json!({"version":if case == "wrong-version" { 2 } else { cayw_ipc::PROTOCOL_VERSION },"id":"access-hello","method":"hello",
+        let hello = frame(&json!({"version":if case == "wrong-version" { REJECTED_IPC_VERSION } else { cayw_ipc::PROTOCOL_VERSION },"id":"access-hello","method":"hello",
             "params":{"token":if case == "wrong-token" { "deliberately-wrong-offline-token" } else { TOKEN }}}))?;
         let mut sent = vec![bytes_record(&hello)];
         let mut handshake = Vec::new();

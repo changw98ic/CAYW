@@ -2,7 +2,7 @@
 //! Reconnection never replays a mutation, including a prompt.
 use cayw_ipc::{Client, ClientConfig, ClientError};
 use serde_json::{Value, json};
-use std::{net::SocketAddr, time::Duration};
+use std::{collections::VecDeque, net::SocketAddr, time::Duration};
 use tokio::{
     sync::{mpsc, oneshot},
     task::{JoinHandle, JoinSet},
@@ -85,7 +85,7 @@ enum Finished {
 }
 
 pub struct Transport {
-    control: mpsc::Sender<Control>,
+    control: mpsc::UnboundedSender<Control>,
     updates: mpsc::UnboundedReceiver<Update>,
     task: Option<JoinHandle<()>>,
 }
@@ -100,7 +100,7 @@ impl Transport {
         token: String,
         workspace_id: Option<String>,
     ) -> Self {
-        let (control, controls) = mpsc::channel(64);
+        let (control, controls) = mpsc::unbounded_channel();
         let (updates, receiver) = mpsc::unbounded_channel();
         let task = tokio::spawn(run(address, token, workspace_id, controls, updates));
         Self {
@@ -112,20 +112,20 @@ impl Transport {
 
     pub fn call(&self, request: Request) -> Result<(), &'static str> {
         self.control
-            .try_send(Control::Call(request))
+            .send(Control::Call(request))
             .map_err(|_| "IPC request queue unavailable")
     }
 
     /// The UI supplies only a cursor it has successfully consumed.
     pub fn watch(&self, watch: Option<Watch>) -> Result<(), &'static str> {
         self.control
-            .try_send(Control::Watch(watch))
+            .send(Control::Watch(watch))
             .map_err(|_| "IPC request queue unavailable")
     }
 
     pub fn reconnect(&self) -> Result<(), &'static str> {
         self.control
-            .try_send(Control::Reconnect)
+            .send(Control::Reconnect)
             .map_err(|_| "IPC request queue unavailable")
     }
 
@@ -139,7 +139,7 @@ impl Transport {
         if self.task.is_none() {
             return;
         }
-        let _ = self.control.send(Control::Shutdown).await;
+        let _ = self.control.send(Control::Shutdown);
         if let Some(task) = self.task.take() {
             let _ = task.await;
         }
@@ -161,10 +161,11 @@ async fn run(
     address: SocketAddr,
     token: String,
     workspace_id: Option<String>,
-    mut controls: mpsc::Receiver<Control>,
+    mut controls: mpsc::UnboundedReceiver<Control>,
     updates: mpsc::UnboundedSender<Update>,
 ) {
     let mut jobs = JoinSet::new();
+    let mut pending: VecDeque<Request> = VecDeque::new();
     let (admissions, mut admitted) = mpsc::unbounded_channel::<TaskAdmission>();
     let mut client: Option<Client> = None;
     let mut connecting = false;
@@ -176,6 +177,52 @@ async fn run(
     let mut epoch = 0_u64;
 
     loop {
+        if client.is_none() {
+            for request in pending.drain(..) {
+                let _ = updates.send(Update::Response {
+                    request,
+                    result: Err("Disconnected; queued request was not sent.".into()),
+                });
+            }
+        }
+        while let Some(connection) = client.clone() {
+            let urgent = pending
+                .iter()
+                .position(|request| request.method != "session.prompt");
+            let index =
+                urgent.or_else(|| (jobs.len() < MAX_JOBS && !pending.is_empty()).then_some(0));
+            let Some(index) = index else {
+                break;
+            };
+            let request = pending.remove(index).expect("queued request index");
+            let admissions = admissions.clone();
+            let workspace_id = workspace_id.clone();
+            jobs.spawn(async move {
+                let result = if request.method == "session.prompt" {
+                    prompt_task(
+                        &connection,
+                        workspace_id.as_deref(),
+                        request.params.clone(),
+                        epoch,
+                        &admissions,
+                    )
+                    .await
+                } else {
+                    request_value(
+                        &connection,
+                        workspace_id.as_deref(),
+                        request.method,
+                        request.params.clone(),
+                    )
+                    .await
+                };
+                Finished::Call {
+                    epoch,
+                    request,
+                    result,
+                }
+            });
+        }
         tokio::select! {
             Some(admission) = admitted.recv() => {
                 let current = admission.epoch == epoch;
@@ -200,37 +247,11 @@ async fn run(
                     let _ = updates.send(Update::Disconnected("Reconnecting. Inspecting session state; requests will not be replayed.".into()));
                 }
                 Some(Control::Call(request)) => {
-                    let Some(connection) = client.clone() else {
+                    let Some(_) = client.as_ref() else {
                         let _ = updates.send(Update::Response { request, result: Err("Disconnected; request was not sent. Reconnect and inspect the session before trying again.".into()) });
                         continue;
                     };
-                    if jobs.len() >= MAX_JOBS {
-                        let _ = updates.send(Update::Response { request, result: Err("Too many pending requests; request was not sent.".into()) });
-                        continue;
-                    }
-                    let admissions = admissions.clone();
-                    let workspace_id = workspace_id.clone();
-                    jobs.spawn(async move {
-                        let result = if request.method == "session.prompt" {
-                            prompt_task(
-                                &connection,
-                                workspace_id.as_deref(),
-                                request.params.clone(),
-                                epoch,
-                                &admissions,
-                            )
-                            .await
-                        } else {
-                            request_value(
-                                &connection,
-                                workspace_id.as_deref(),
-                                request.method,
-                                request.params.clone(),
-                            )
-                            .await
-                        };
-                        Finished::Call { epoch, request, result }
-                    });
+                    pending.push_back(request);
                 }
             },
             _ = sleep_until(next_connect), if client.is_none() && !connecting => {

@@ -247,30 +247,13 @@ impl Api {
                     CancellationToken::new(),
                 )
                 .await?),
-            Self::Ipc(c) => {
-                let mut limit = limit;
-                loop {
-                    match c
-                        .request(
-                            "session.events",
-                            json!({"session_id":id,"after":after,"limit":limit,"wait_ms":wait_ms}),
-                        )
-                        .await
-                    {
-                        Ok(page) => return Ok(serde_json::from_value(page)?),
-                        // Only this read may repeat, at the same unconsumed cursor.
-                        Err(error)
-                            if matches!(
-                                error.code.as_str(),
-                                "response_too_large" | "response_too_large_outcome_unknown"
-                            ) && limit > 1 =>
-                        {
-                            limit /= 2;
-                        }
-                        Err(error) => return Err(error.into()),
-                    }
-                }
-            }
+            Self::Ipc(c) => Ok(serde_json::from_value(
+                c.request(
+                    "session.events",
+                    json!({"session_id":id,"after":after,"limit":limit,"wait_ms":wait_ms}),
+                )
+                .await?,
+            )?),
         }
     }
     pub async fn audit(&self, id: &str, after: u64, limit: usize) -> Result<Value> {

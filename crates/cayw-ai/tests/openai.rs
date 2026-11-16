@@ -371,7 +371,7 @@ async fn contradictory_usage_is_invalid_and_retains_reported_fields() {
 }
 
 #[tokio::test]
-async fn usage_only_frames_emit_a_snapshot_before_the_terminal() {
+async fn usage_only_frames_emit_metadata_before_the_terminal() {
     let report = json!({"prompt_tokens":20,"completion_tokens":3,"total_tokens":23});
     let body = data(chunk(json!({"content":"ok"}), Value::Null))
         + &data(json!({"choices":[],"usage":report}))
@@ -385,13 +385,13 @@ async fn usage_only_frames_emit_a_snapshot_before_the_terminal() {
         .iter()
         .find(|event| serde_json::to_value(event).unwrap()["type"] == "usage_update")
         .expect("usage-only frame must be observable before waiting for more HTTP data");
+    let mut observed = cayw_ai::AssistantMessage::new(&request().model);
+    update.apply_to(&mut observed).unwrap();
+    assert!(update.snapshot().is_none());
     assert!(!update.is_terminal());
-    assert_eq!(update.message().usage.total_tokens, 23);
-    assert_eq!(update.message().usage_fields["prompt_tokens"], 20);
-    assert_eq!(
-        update.message().usage_status,
-        cayw_ai::UsageStatus::Reported
-    );
+    assert_eq!(observed.usage.total_tokens, 23);
+    assert_eq!(observed.usage_fields["prompt_tokens"], 20);
+    assert_eq!(observed.usage_status, cayw_ai::UsageStatus::Reported);
     assert!(matches!(events.last(), Some(AssistantEvent::Done { .. })));
 }
 
@@ -799,7 +799,12 @@ async fn already_cancelled_request_never_connects() {
     let events = provider.stream(request(), cancel).collect::<Vec<_>>().await;
     assert_eq!(events.len(), 2);
     assert_eq!(
-        events.last().unwrap().message().stop_reason,
+        events
+            .last()
+            .unwrap()
+            .snapshot()
+            .expect("snapshot boundary")
+            .stop_reason,
         StopReason::Aborted
     );
     assert!(
@@ -896,7 +901,7 @@ async fn terminal_event_releases_the_response_even_if_the_stream_is_retained() {
             }
         };
         assert_eq!(
-            terminal.message().stop_reason,
+            terminal.snapshot().expect("snapshot boundary").stop_reason,
             match outcome {
                 "success" => StopReason::Stop,
                 "cancel" => StopReason::Aborted,
@@ -1133,14 +1138,20 @@ async fn invalid_unpaired_tool_history_is_rejected_before_network_io() {
         .collect::<Vec<_>>()
         .await;
     assert_eq!(
-        events.last().unwrap().message().stop_reason,
+        events
+            .last()
+            .unwrap()
+            .snapshot()
+            .expect("snapshot boundary")
+            .stop_reason,
         StopReason::Error
     );
     assert!(
         events
             .last()
             .unwrap()
-            .message()
+            .snapshot()
+            .expect("snapshot boundary")
             .error_message
             .as_deref()
             .unwrap()
@@ -1191,7 +1202,7 @@ async fn offline_regression_live04_fragmented_arguments_finish_with_usage() {
         }
         let Some(AssistantEvent::Done { message }) = terminal else {
             let failure = terminal.as_ref().map(|event| {
-                let message = event.message();
+                let message = event.snapshot().expect("snapshot boundary");
                 (message.stop_reason, message.error_message.as_deref())
             });
             panic!(
@@ -1201,7 +1212,7 @@ async fn offline_regression_live04_fragmented_arguments_finish_with_usage() {
         assert_eq!(message.stop_reason, StopReason::ToolUse);
         assert_eq!((starts, argument_bytes, ends), (1, 7938, 1));
         assert_eq!(emitted_arguments, expected_arguments);
-        assert!((1..=32).contains(&argument_fragments));
+        assert!(argument_fragments > 0);
         assert_eq!(message.usage_status, UsageStatus::Reported);
         assert_eq!(message.usage.total_tokens, 32300);
         assert_eq!(message.usage.output, 7832);
@@ -1229,7 +1240,7 @@ async fn offline_regression_live04_fragmented_arguments_finish_with_usage() {
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn cancellation_interrupts_small_buffered_tool_arguments_before_completion() {
+async fn cancellation_preserves_received_tool_arguments_before_completion() {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let provider =
         OpenAiProvider::new(format!("http://{}/v1", listener.local_addr().unwrap()), "").unwrap();
@@ -1251,13 +1262,18 @@ async fn cancellation_interrupts_small_buffered_tool_arguments_before_completion
     let cancel = CancellationToken::new();
     let mut stream = provider.stream(request(), cancel.clone());
     let mut tool_started = false;
+    let mut received_arguments = String::new();
+    let mut view = cayw_ai::AssistantMessage::new(&request().model);
     loop {
         let event = tokio::time::timeout(Duration::from_secs(5), stream.next())
             .await
             .unwrap()
             .unwrap();
         assert!(!event.is_terminal());
-        assert!(!matches!(&event, AssistantEvent::ToolCallDelta { .. }));
+        event.apply_to(&mut view).unwrap();
+        if let AssistantEvent::ToolCallDelta { delta, .. } = &event {
+            received_arguments.push_str(delta);
+        }
         if matches!(&event, AssistantEvent::ToolCallStart { .. }) {
             tool_started = true;
         }
@@ -1266,6 +1282,12 @@ async fn cancellation_interrupts_small_buffered_tool_arguments_before_completion
             break;
         }
     }
+    assert_eq!(received_arguments, "{\"a\":");
+    assert_eq!(
+        view.tool_calls()[0].arguments,
+        Value::String(received_arguments.clone())
+    );
+    assert!(view.tool_calls()[0].arguments_error.is_some());
     cancel.cancel();
     let events = tokio::time::timeout(Duration::from_secs(5), stream.collect::<Vec<_>>())
         .await
@@ -1276,6 +1298,11 @@ async fn cancellation_interrupts_small_buffered_tool_arguments_before_completion
     };
     assert_eq!(message.stop_reason, StopReason::Aborted);
     assert_eq!(message.usage_status, UsageStatus::Unknown);
+    assert_eq!(
+        message.tool_calls()[0].arguments,
+        Value::String(received_arguments)
+    );
+    assert!(message.tool_calls()[0].arguments_error.is_some());
     assert!(!events.iter().any(|event| matches!(
         event,
         AssistantEvent::ToolCallEnd { .. } | AssistantEvent::Done { .. }

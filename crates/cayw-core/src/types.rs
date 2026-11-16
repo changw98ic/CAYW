@@ -4,8 +4,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 /// One canonical wire/storage contract. Older storage is migrated atomically.
-pub const PROTOCOL_VERSION: u32 = 3;
-pub const SCHEMA_VERSION: u32 = 3;
+pub const PROTOCOL_VERSION: u32 = 4;
+pub const SCHEMA_VERSION: u32 = 4;
 pub const MAX_EVENT_PAGE: usize = 1_000;
 /// Soft pagination budget: a page stops before it would exceed this many
 /// serialized bytes, but always returns at least one record. This only batches

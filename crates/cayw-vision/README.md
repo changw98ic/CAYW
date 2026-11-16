@@ -64,3 +64,5 @@ cargo run -p cayw-vision --example offline_vision --locked
 ```
 
 未配置真实模型与 CLI 时，显式注入 fixture / counting 后端保证离线测试完全确定。
+
+`Limits.input_bytes`、`output_bytes`、`max_image_bytes` 为可选宿主预算，默认 `None`，不另设 32/64 MiB 配置硬顶。显式 `Some(limit)` 继续拒绝超预算数据。尺寸沿用 `ImageBuffer` 的正 `u32` 表示范围，不再额外限制为 8192；像素长度和尺寸乘法仍严格核对。图像身份摘要分块更新，不额外复制整张图像。实际分配仍受本机内存约束，大图优先使用内容句柄。

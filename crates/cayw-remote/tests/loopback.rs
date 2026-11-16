@@ -1124,7 +1124,7 @@ fn invalid_resource_limits_return_errors_without_allocation_or_panics() {
             ..Default::default()
         },
         Limits {
-            max_records: usize::MAX,
+            max_records: 0,
             ..Default::default()
         },
         Limits {

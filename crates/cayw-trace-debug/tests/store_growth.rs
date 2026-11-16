@@ -42,7 +42,7 @@ fn malformed_large_store_is_an_error_not_an_empty_capture() {
 
 fn event(cursor: u64, event: cayw_core::CoreEvent) -> cayw_core::EventRecord {
     cayw_core::EventRecord {
-        protocol_version: 3,
+        protocol_version: cayw_core::PROTOCOL_VERSION,
         session_id: "session".into(),
         cursor,
         timestamp: cursor,

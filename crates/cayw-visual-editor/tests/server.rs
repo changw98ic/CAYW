@@ -509,12 +509,13 @@ async fn preview_rejects_traversal_dotfiles_reserved_directories_symlinks_and_ba
     let (status, _) = raw(addr, &request).await;
     assert_eq!(status, 403);
 
-    // The allowed asset still works through the same raw path.
-    let request =
-        format!("GET /styles.css HTTP/1.1\r\nHost: {authority}\r\nConnection: close\r\n\r\n");
-    let (status, body) = raw(addr, &request).await;
-    assert_eq!(status, 200);
-    assert_eq!(body, STYLES);
+    // Decode the streamed HTTP body with the client; raw requests above preserve
+    // traversal bytes that URL normalization would otherwise remove.
+    let response = reqwest::get(format!("http://{authority}/styles.css"))
+        .await
+        .expect("asset response");
+    assert_eq!(response.status(), 200);
+    assert_eq!(response.text().await.expect("asset body"), STYLES);
 }
 
 #[tokio::test(flavor = "multi_thread")]

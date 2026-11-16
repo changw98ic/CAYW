@@ -16,8 +16,8 @@ fn image_schema() -> Value {
     json!({
         "type": "object",
         "properties": {
-            "width": {"type":"integer","minimum":1,"maximum":8192},
-            "height": {"type":"integer","minimum":1,"maximum":8192},
+            "width": {"type":"integer","minimum":1,"maximum":u32::MAX},
+            "height": {"type":"integer","minimum":1,"maximum":u32::MAX},
             "rgba_base64": {"type":"string","minLength":1},
             "handle": {"type":"string","minLength":1}
         },

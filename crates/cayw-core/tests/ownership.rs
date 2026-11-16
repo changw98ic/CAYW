@@ -383,13 +383,15 @@ fn injected_projection_failure_rolls_back_the_event_insert() {
     let db = rusqlite::Connection::open(database.path()).unwrap();
     db.execute_batch("CREATE TRIGGER fail_projection BEFORE UPDATE ON core_sessions BEGIN SELECT RAISE(ABORT,'injected projection failure'); END;").unwrap();
     assert!(matches!(
-        store.append_host_event(&lease, "write", json!({})),
+        store.append_agent_event(&lease, &AgentEvent::AgentStart),
         Err(CoreError::Database(_))
     ));
     assert_eq!(store.snapshot(&id).unwrap(), before);
     assert!(store.events(&id, before.cursor, 100).unwrap().is_empty());
     db.execute_batch("DROP TRIGGER fail_projection").unwrap();
-    let event = store.append_host_event(&lease, "write", json!({})).unwrap();
+    let event = store
+        .append_agent_event(&lease, &AgentEvent::AgentStart)
+        .unwrap();
     assert_eq!(event.cursor, before.cursor + 1);
 }
 

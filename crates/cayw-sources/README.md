@@ -271,3 +271,7 @@ reasons. Optional `lifecycle` and `idleTimeout` (minutes) map onto `ServerSpec`.
 Prompt templates are discovered through `prompts/list` and fetched with
 `mcp.prompts.get`. Listing is metadata-only and never grants execution.
 Server-driven elicitation / forms are outside this local adapter.
+
+`max_pending` limits active stdio requests. Further requests wait cancellably for a slot; replies, cancellation, or shutdown release it. Imported `idleTimeout` accepts finite nonnegative minutes representable by `Duration`, including values above 24 hours.
+
+`max_received_frames` is an optional explicit lifetime budget and defaults to `None`. Observation and stderr retention caps affect diagnostics only, with omitted/discarded counters; they never stop successful tool execution.

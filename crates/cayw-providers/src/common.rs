@@ -8,35 +8,6 @@ use std::collections::{BTreeMap, BTreeSet};
 
 pub(crate) type Result<T> = std::result::Result<T, String>;
 
-// Byte limits alone cannot bound work or the number of full-message snapshots.
-// Count content fragments (including empty ones) and calls over the whole reply.
-const MAX_FRAGMENTS: usize = 65_536;
-const MAX_TOOL_CALLS: usize = 1024;
-
-#[derive(Default)]
-pub(crate) struct ResponseLimits {
-    fragments: usize,
-    calls: usize,
-}
-
-impl ResponseLimits {
-    pub fn fragment(&mut self) -> Result<()> {
-        if self.fragments == MAX_FRAGMENTS {
-            return Err("Provider response exceeds the content fragment limit".into());
-        }
-        self.fragments += 1;
-        Ok(())
-    }
-
-    pub fn tool_call(&mut self) -> Result<()> {
-        if self.calls == MAX_TOOL_CALLS {
-            return Err("Provider response exceeds the tool call limit".into());
-        }
-        self.calls += 1;
-        Ok(())
-    }
-}
-
 pub(crate) fn check_cancel(cancel: &CancellationToken) -> Result<()> {
     if cancel.is_cancelled() {
         Err("Request cancelled".into())
@@ -521,7 +492,6 @@ pub(crate) fn text_delta(
     AssistantEvent::TextDelta {
         index,
         delta: delta.to_owned(),
-        partial: message.clone(),
     }
 }
 

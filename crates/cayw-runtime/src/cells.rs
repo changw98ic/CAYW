@@ -236,16 +236,13 @@ impl CallScope {
     }
 }
 pub(crate) fn bounded(message: &str) -> String {
-    let mut end = message.len().min(4096);
-    while !message.is_char_boundary(end) {
-        end -= 1;
-    }
-    if end == 0 {
+    if message.is_empty() {
         "capability failed".into()
     } else {
-        message[..end].into()
+        message.to_owned()
     }
 }
+
 fn known(error: impl std::fmt::Display) -> CapabilityError {
     CapabilityError::new(error.to_string())
 }
@@ -487,6 +484,25 @@ impl CellBackend for Backend {
         }
         self.context.inner.changed.notify_waiters();
         Ok(())
+    }
+    fn queued(&self, execution: &CellExecution) -> Result<(), CellError> {
+        self.verify(execution)?;
+        self.context
+            .activity
+            .waiting_dependency(&self.context, &execution.cell_id)
+            .map_err(|error| record_cell_error(&self.context, error))
+    }
+    async fn dispatched(
+        &self,
+        execution: &CellExecution,
+        cancel: CancellationToken,
+    ) -> Result<(), CellError> {
+        self.verify(execution)?;
+        self.context
+            .activity
+            .resume_cell(&self.context, &execution.cell_id, &cancel)
+            .await
+            .map_err(|error| record_cell_error(&self.context, error))
     }
     async fn call(
         &self,

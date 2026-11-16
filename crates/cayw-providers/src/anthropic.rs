@@ -102,14 +102,11 @@ fn history_content(assistant: &AssistantMessage) -> Result<Vec<Value>> {
         .filter(|content| !content.is_empty())
         .ok_or("Invalid Anthropic history content")?;
     let mut normalized = Vec::new();
-    let mut limits = common::ResponseLimits::default();
     for block in content {
-        limits.fragment()?;
         validate_block(block, true)?;
         match common::string(block, "type")? {
             "text" => normalized.push(Content::text(common::string(block, "text")?)),
             "tool_use" => {
-                limits.tool_call()?;
                 normalized.push(Content::ToolCall(ToolCall::new(
                     common::string(block, "id")?,
                     common::string(block, "name")?,
@@ -231,7 +228,6 @@ pub(crate) struct State {
     started: bool,
     stopped: bool,
     finish: Option<StopReason>,
-    limits: common::ResponseLimits,
     usage: common::UsageReport,
 }
 
@@ -254,7 +250,6 @@ impl State {
             started: false,
             stopped: false,
             finish: None,
-            limits: common::ResponseLimits::default(),
             usage: common::UsageReport::default(),
         }
     }
@@ -304,9 +299,7 @@ impl State {
             }
             self.usage(message.get("usage").ok_or("Missing Anthropic usage")?)?;
             self.started = true;
-            return Ok(vec![AssistantEvent::UsageUpdate {
-                partial: self.message.clone(),
-            }]);
+            return Ok(vec![AssistantEvent::usage_update(&self.message)]);
         }
         if !self.started {
             return Err("Anthropic event arrived before message_start".into());
@@ -317,7 +310,6 @@ impl State {
         let mut events = Vec::new();
         match kind {
             "content_block_start" => {
-                self.limits.fragment()?;
                 let wire_index = index(&value)?;
                 if wire_index != self.seen_blocks.len() as u64
                     || !self.seen_blocks.insert(wire_index)
@@ -345,7 +337,6 @@ impl State {
                         }
                     }
                     "tool_use" => {
-                        self.limits.tool_call()?;
                         let id = common::string(block, "id")?;
                         let name = common::string(block, "name")?;
                         if id.trim().is_empty()
@@ -391,7 +382,6 @@ impl State {
                 }
             }
             "content_block_delta" => {
-                self.limits.fragment()?;
                 let wire_index = index(&value)?;
                 let delta = value.get("delta").ok_or("Missing content delta")?;
                 let block = self
@@ -425,11 +415,12 @@ impl State {
                         }
                         let fragment = common::string(delta, "partial_json")?;
                         json.push_str(fragment);
-                        events.push(AssistantEvent::ToolCallDelta {
+                        let event = AssistantEvent::ToolCallDelta {
                             index: *index,
                             delta: fragment.to_owned(),
-                            partial: self.message.clone(),
-                        });
+                        };
+                        event.apply_to(&mut self.message)?;
+                        events.push(event);
                     }
                     (Block::Thinking { signature_started }, "thinking_delta") => {
                         if *signature_started {
@@ -542,9 +533,7 @@ impl State {
                 }
                 if let Some(usage) = value.get("usage") {
                     self.usage(usage)?;
-                    events.push(AssistantEvent::UsageUpdate {
-                        partial: self.message.clone(),
-                    });
+                    events.push(AssistantEvent::usage_update(&self.message));
                 }
             }
             "message_stop" => {
