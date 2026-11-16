@@ -380,3 +380,45 @@ test('usage and tool deltas keep text and unconfirmed raw arguments', () => {
   assert.equal(view.liveMessage.content[1].arguments,'{"x":1}');
   assert.equal(view.liveMessage.content[1].arguments_error,'tool argument stream is incomplete');
 });
+
+test('opening an active stream resumes text, thinking, tool arguments and usage at the snapshot cursor', () => {
+  const open = {role:'assistant',content:[
+    {type:'text',text:'Hello'},
+    {type:'thinking',thinking:'Consider'},
+    {type:'toolCall',id:'call-1',name:'execute_code',arguments:'{"code":'},
+  ]};
+  let view = initial({state:'running',open_message:open,messages:[{role:'assistant',content:[{type:'text',text:'Earlier answer'}]}]});
+  assert.equal(view.liveText,'Hello');
+  const update = (cursor,event) => ({cursor,event:{type:'message_update',event}});
+  view = consumeEvents(view,[
+    update(11,{type:'text_delta',index:0,delta:' world'}),
+    update(12,{type:'thinking_delta',index:1,delta:' this'}),
+    update(13,{type:'tool_call_delta',index:2,delta:'"return 1"}'}),
+    update(14,{type:'usage_update',usage:{input:7},usage_status:'reported',usage_fields:{input:true},response_id:'r',response_model:'m'}),
+  ]);
+  assert.equal(view.cursor,14);
+  assert.equal(view.liveText,'Hello world');
+  assert.equal(view.liveMessage.content[1].thinking,'Consider this');
+  assert.equal(view.liveMessage.content[2].arguments,'{"code":"return 1"}');
+  assert.deepEqual(view.liveMessage.usage,{input:7});
+  assert.equal(messageText(view.snapshot.messages[0]),'Earlier answer');
+  assert.equal(open.content[0].text,'Hello');
+  view = consumeEvents(view,[{cursor:15,event:{type:'message_end',message:view.liveMessage}}]);
+  assert.equal(view.liveMessage,null);
+  assert.equal(view.liveText,'');
+});
+
+test('a snapshot ahead of consumed events never reinitializes the active stream', () => {
+  let view = initial({state:'running',open_message:{role:'assistant',content:[{type:'text',text:'A'}]}});
+  view = applySnapshot(view,snapshot({cursor:12,state:'running',open_message:{role:'assistant',content:[{type:'text',text:'ABC'}]}}));
+  assert.equal(view.cursor,10);
+  assert.equal(view.liveText,'A');
+  view = consumeEvents(view,[{cursor:11,event:{type:'message_update',event:{type:'text_delta',index:0,delta:'B'}}},{cursor:12,event:{type:'message_update',event:{type:'text_delta',index:0,delta:'C'}}}]);
+  assert.equal(view.liveText,'ABC');
+});
+
+test('committed history is never used as an active stream checkpoint', () => {
+  const view = initial({messages:[{role:'assistant',content:[{type:'text',text:'Done'}]}]});
+  assert.equal(view.liveMessage,null);
+  assert.equal(view.liveText,'');
+});

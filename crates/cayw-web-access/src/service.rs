@@ -13,7 +13,8 @@ use crate::types::{
     capabilities,
 };
 
-/// Bounds for one WebAccess service instance.
+/// Optional host bounds for one WebAccess service instance.
+/// Defaults use the representable maxima rather than product-specific size caps.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Limits {
@@ -26,10 +27,10 @@ pub struct Limits {
 impl Default for Limits {
     fn default() -> Self {
         Self {
-            max_body_bytes: 2 * 1024 * 1024,
-            max_extract_chars: 100_000,
+            max_body_bytes: usize::MAX,
+            max_extract_chars: usize::MAX,
             default_search_limit: 5,
-            max_search_limit: 20,
+            max_search_limit: u32::MAX,
         }
     }
 }
@@ -156,7 +157,7 @@ impl WebAccess {
             ));
         }
         let mut response = self.search.search(q, limit).await?;
-        let truncated = response.hits.len() as u32 >= limit;
+        let truncated = response.truncated || response.hits.len() as u32 > limit;
         if response.hits.len() as u32 > limit {
             response.hits.truncate(limit as usize);
         }

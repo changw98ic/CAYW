@@ -390,6 +390,10 @@ export function applySnapshot(view, snapshot, initial = false, requestedAfter = 
     snapshotAfter: Math.max(view.snapshotAfter, requestedAfter),
     snapshotEpoch: Math.max(view.snapshotEpoch, requestedEpoch),
     cursor: initial ? snapshot.cursor : view.cursor,
+    // Bootstrap only when adopting this cursor; later snapshots can be ahead of
+    // the event stream and must not cause its pending deltas to be applied twice.
+    liveMessage: initial ? (snapshot.open_message?.role === 'assistant' ? snapshot.open_message : null) : view.liveMessage,
+    liveText: initial ? (snapshot.open_message?.role === 'assistant' ? textOnly(snapshot.open_message) : '') : view.liveText,
   });
 }
 

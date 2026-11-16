@@ -14,6 +14,9 @@ pub struct SessionView {
     pub id: String,
     pub label: String,
     pub messages: Vec<cayw_ai::Message>,
+    /// In-progress message at `cursor`, separate from committed history.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub open_message: Option<cayw_ai::Message>,
     pub cursor: u64,
     pub state: SessionState,
     pub attempt: Option<AttemptLease>,
@@ -168,6 +171,7 @@ impl SessionView {
             id: snapshot.id,
             label: snapshot.label,
             messages: snapshot.messages,
+            open_message: snapshot.open_message,
             cursor: snapshot.cursor,
             state: snapshot.state,
             attempt: snapshot.attempt,
@@ -380,6 +384,23 @@ mod tests {
     use super::*;
     use cayw_core::SessionStore;
     use std::cell::RefCell;
+
+    #[test]
+    fn session_view_preserves_open_message_separately_from_history() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = SessionStore::open(directory.path().join("sessions.db")).unwrap();
+        let mut snapshot = store.create_session("active stream").unwrap();
+        let mut assistant =
+            cayw_ai::AssistantMessage::new(&cayw_ai::Model::new("fixture", "stream"));
+        assistant.content.push(cayw_ai::Content::text("partial"));
+        snapshot.open_message = Some(cayw_ai::Message::Assistant(assistant));
+        let view = SessionView::from_snapshot(snapshot.clone(), None);
+        assert_eq!(view.open_message, snapshot.open_message);
+        assert_eq!(view.cursor, snapshot.cursor);
+        assert!(view.messages.is_empty());
+        let wire = serde_json::to_value(&view).unwrap();
+        assert_eq!(wire["open_message"]["content"][0]["text"], "partial");
+    }
 
     const FIXTURE_PLUGIN_PROTOCOL_VERSION: u32 = 1;
 

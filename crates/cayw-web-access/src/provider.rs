@@ -205,7 +205,8 @@ impl SearchProvider for FixtureSearch {
                     })
                 })
                 .unwrap_or_default();
-            if hits.len() as u32 > limit {
+            let truncated = hits.len() as u32 > limit;
+            if truncated {
                 hits.truncate(limit as usize);
             }
             if hits.is_empty() {
@@ -219,7 +220,9 @@ impl SearchProvider for FixtureSearch {
                     }),
                 ))
             } else {
-                Ok(SearchResponse::new(hits))
+                let mut response = SearchResponse::new(hits);
+                response.truncated = truncated;
+                Ok(response)
             }
         })
     }

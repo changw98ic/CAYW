@@ -98,6 +98,9 @@ pub struct SearchResult {
 #[serde(deny_unknown_fields)]
 pub struct SearchResponse {
     pub hits: Vec<SearchHit>,
+    /// The provider stopped before establishing that its result set was exhausted.
+    #[serde(default)]
+    pub truncated: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub empty_reason: Option<SearchEmptyReason>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -108,6 +111,7 @@ impl SearchResponse {
     pub fn new(hits: Vec<SearchHit>) -> Self {
         Self {
             hits,
+            truncated: false,
             empty_reason: None,
             evidence: None,
         }
@@ -116,6 +120,7 @@ impl SearchResponse {
     pub fn empty(reason: SearchEmptyReason, evidence: Option<SearchEvidence>) -> Self {
         Self {
             hits: Vec::new(),
+            truncated: false,
             empty_reason: Some(reason),
             evidence,
         }

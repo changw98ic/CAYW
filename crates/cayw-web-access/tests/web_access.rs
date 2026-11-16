@@ -527,3 +527,127 @@ async fn configured_search_limit_and_long_urls_pass_the_tool_catalog() {
         FailureClass::InvalidRequest
     );
 }
+
+#[tokio::test]
+async fn defaults_preserve_large_bodies_and_extracted_text() {
+    let text = "界".repeat(800_000);
+    let transport = FixtureTransport::new().insert_bytes(
+        "https://example.com/large",
+        "text/plain",
+        text.as_bytes().to_vec(),
+    );
+    let access = WebAccess::with_fixtures(transport, FixtureSearch::new());
+    let fetched = access.fetch("https://example.com/large").await.unwrap();
+    assert_eq!(access.store().get_text(&fetched.content.id).unwrap(), text);
+    let extracted = access
+        .extract_url("https://example.com/large")
+        .await
+        .unwrap();
+    assert_eq!(extracted.text, text);
+    assert!(!extracted.truncated);
+}
+
+#[tokio::test]
+async fn defaults_allow_requested_search_count_above_twenty() {
+    let hits = (1..=25)
+        .map(|rank| hit(rank, &format!("https://example.com/{rank}"), "Result", "s"))
+        .collect();
+    let access = WebAccess::with_fixtures(
+        FixtureTransport::new(),
+        FixtureSearch::new().insert("many", hits),
+    );
+    let all = access.search("many", Some(25)).await.unwrap();
+    assert_eq!(all.hits.len(), 25);
+    assert!(!all.truncated);
+    let default_page = access.search("many", None).await.unwrap();
+    assert_eq!(default_page.hits.len(), 5);
+    assert!(default_page.truncated);
+}
+
+#[tokio::test]
+async fn explicit_host_bounds_remain_effective() {
+    let access = WebAccess::new(
+        std::sync::Arc::new(FixtureTransport::new().insert_bytes(
+            "https://example.com/small",
+            "text/plain",
+            b"abcdef".to_vec(),
+        )),
+        std::sync::Arc::new(FixtureSearch::new()),
+        ContentStore::new(),
+        Limits {
+            max_body_bytes: 5,
+            max_extract_chars: 3,
+            max_search_limit: 20,
+            ..Limits::default()
+        },
+    );
+    assert_eq!(
+        access
+            .fetch("https://example.com/small")
+            .await
+            .unwrap_err()
+            .diagnostic
+            .class,
+        FailureClass::BodyTooLarge
+    );
+    assert_eq!(
+        access
+            .search("many", Some(21))
+            .await
+            .unwrap_err()
+            .diagnostic
+            .class,
+        FailureClass::InvalidRequest
+    );
+    let extracted = access
+        .extract_bytes(
+            "https://example.com/small",
+            "https://example.com/small",
+            Some("text/plain"),
+            b"abcdef",
+        )
+        .unwrap();
+    assert_eq!(extracted.text, "abc");
+    assert!(extracted.truncated);
+}
+
+#[tokio::test]
+async fn ddg_default_does_not_reject_large_search_pages() {
+    let url = "https://html.duckduckgo.com/html/?q=large";
+    let html = format!(
+        "<html><body><!--{}--><a class=\"result__a\" href=\"https://example.com/\">Result</a></body></html>",
+        "x".repeat(2 * 1024 * 1024)
+    );
+    let search = DuckDuckGoHtmlSearch::new(std::sync::Arc::new(
+        FixtureTransport::new().insert_html(url, html),
+    ));
+    assert_eq!(search.search("large", 25).await.unwrap().hits.len(), 1);
+}
+
+#[tokio::test]
+async fn ddg_next_page_is_visible_as_incomplete_through_service() {
+    let html = r#"<html><body>
+      <a class="result__a" href="https://example.com/">Result</a>
+      <form><input type="submit" value="Next"></form>
+    </body></html>"#;
+    let transport = std::sync::Arc::new(
+        FixtureTransport::new().insert_html("https://html.duckduckgo.com/html/?q=pages", html),
+    );
+    let access = WebAccess::new(
+        transport.clone(),
+        std::sync::Arc::new(DuckDuckGoHtmlSearch::new(transport)),
+        ContentStore::new(),
+        Limits::default(),
+    );
+    let result = access.search("pages", Some(50)).await.unwrap();
+    assert_eq!(result.hits.len(), 1);
+    assert!(result.truncated);
+    assert!(
+        result
+            .evidence
+            .unwrap()
+            .source_summary
+            .unwrap()
+            .contains("next-page")
+    );
+}

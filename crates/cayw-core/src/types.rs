@@ -323,6 +323,9 @@ pub struct SessionSnapshot {
     pub id: String,
     pub label: String,
     pub messages: Vec<Message>,
+    /// In-progress message at `cursor`, separate from committed history.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub open_message: Option<Message>,
     pub cursor: u64,
     pub state: SessionState,
     pub attempt: Option<AttemptLease>,

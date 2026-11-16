@@ -75,13 +75,17 @@ impl WebAccessOptions {
         };
         let search: Arc<dyn SearchProvider> = match self.search {
             SearchBackend::Fixture => Arc::new(FixtureSearch::new()),
-            SearchBackend::DuckDuckGoHtml => {
-                Arc::new(DuckDuckGoHtmlSearch::new(Arc::clone(&transport)))
-            }
+            SearchBackend::DuckDuckGoHtml => Arc::new(
+                DuckDuckGoHtmlSearch::new(Arc::clone(&transport))
+                    .with_max_fetch_bytes(options.limits.max_body_bytes),
+            ),
             SearchBackend::BraveOrDuckDuckGo => {
-                let ddg: Arc<dyn SearchProvider> =
-                    Arc::new(DuckDuckGoHtmlSearch::new(Arc::clone(&transport)));
-                let brave = BraveSearch::from_env()?;
+                let ddg: Arc<dyn SearchProvider> = Arc::new(
+                    DuckDuckGoHtmlSearch::new(Arc::clone(&transport))
+                        .with_max_fetch_bytes(options.limits.max_body_bytes),
+                );
+                let brave = BraveSearch::from_env()?
+                    .map(|search| search.with_max_fetch_bytes(options.limits.max_body_bytes));
                 Arc::new(BraveOrFallback::new(brave, ddg))
             }
         };

@@ -142,6 +142,10 @@ impl StoredSession {
             id: self.id.clone(),
             label: self.label.clone(),
             messages: self.messages(),
+            open_message: self
+                .lifecycle
+                .as_ref()
+                .and_then(|state| state.open_message.clone()),
             cursor: self.cursor,
             state: self.state(),
             attempt: self.attempt.clone(),

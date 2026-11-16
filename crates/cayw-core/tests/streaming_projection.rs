@@ -359,3 +359,70 @@ fn deltas_and_control_observations_do_not_rewrite_checkpoint_and_replay_across_p
     reopened.recover(&id).unwrap();
     assert_eq!(reopened.snapshot(&id).unwrap().messages, snapshot.messages);
 }
+
+#[test]
+fn snapshot_carries_open_message_at_its_cursor_without_committing_history() {
+    let directory = Database::new();
+    let path = directory.0.join("session.db");
+    let store = SessionStore::open(&path).unwrap();
+    let id = store.create_session("join active stream").unwrap().id;
+    let lease = store.begin_attempt(&id, "worker").unwrap();
+    let mut message = AssistantMessage::new(&Model::new("fixture", "stream"));
+    for event in [
+        AgentEvent::AgentStart,
+        AgentEvent::TurnStart,
+        AgentEvent::MessageStart {
+            message: Message::Assistant(message.clone()),
+        },
+    ] {
+        store.append_agent_event(&lease, &event).unwrap();
+    }
+    message.content.push(cayw_ai::Content::text(""));
+    store
+        .append_agent_event(
+            &lease,
+            &AgentEvent::MessageUpdate {
+                event: Box::new(AssistantEvent::TextStart {
+                    index: 0,
+                    partial: message.clone(),
+                }),
+            },
+        )
+        .unwrap();
+    let record = store
+        .append_agent_event(
+            &lease,
+            &AgentEvent::MessageUpdate {
+                event: Box::new(AssistantEvent::TextDelta {
+                    index: 0,
+                    delta: "partial".into(),
+                }),
+            },
+        )
+        .unwrap();
+    message.content = vec![cayw_ai::Content::text("partial")];
+    let snapshot = store.snapshot(&id).unwrap();
+    assert_eq!(snapshot.cursor, record.cursor);
+    assert_eq!(
+        snapshot.open_message,
+        Some(Message::Assistant(message.clone()))
+    );
+    assert!(snapshot.messages.is_empty());
+    assert_eq!(
+        SessionStore::open(&path).unwrap().snapshot(&id).unwrap(),
+        snapshot
+    );
+    message.stop_reason = StopReason::Stop;
+    let terminal = Message::Assistant(message);
+    store
+        .append_agent_event(
+            &lease,
+            &AgentEvent::MessageEnd {
+                message: terminal.clone(),
+            },
+        )
+        .unwrap();
+    let snapshot = store.snapshot(&id).unwrap();
+    assert!(snapshot.open_message.is_none());
+    assert_eq!(snapshot.messages, vec![terminal]);
+}

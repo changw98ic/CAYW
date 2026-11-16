@@ -22,7 +22,7 @@ impl DuckDuckGoHtmlSearch {
     pub fn new(transport: Arc<dyn HttpTransport>) -> Self {
         Self {
             transport,
-            max_fetch_bytes: 2 * 1024 * 1024,
+            max_fetch_bytes: usize::MAX,
         }
     }
 
@@ -70,6 +70,7 @@ impl SearchProvider for DuckDuckGoHtmlSearch {
             let html = String::from_utf8_lossy(&raw.body);
             let mut response = parse_duckduckgo_response(Some(&html), Some(raw.status));
             if response.hits.len() as u32 > limit {
+                response.truncated = true;
                 response.hits.truncate(limit as usize);
             }
             for (i, hit) in response.hits.iter_mut().enumerate() {
@@ -157,7 +158,18 @@ pub fn parse_duckduckgo_response(html: Option<&str>, status: Option<u16>) -> Sea
     // Parse result anchors (`result__a`)
     let hits = extract_ddg_hits(raw_html);
     if !hits.is_empty() {
-        return SearchResponse::new(hits);
+        let mut response = SearchResponse::new(hits);
+        if has_next_page(raw_html) {
+            response.truncated = true;
+            response.evidence = Some(SearchEvidence {
+                http_status: Some(status_code),
+                source_summary: Some(
+                    "DuckDuckGo returned a next-page control; only this page was retrieved".into(),
+                ),
+                response_snippet: None,
+            });
+        }
+        return response;
     }
 
     // Hits are empty: classify into 真空 / 挑战 / 结构失配
@@ -284,6 +296,30 @@ fn extract_structural_mismatch_summary(html: &str) -> Option<String> {
         }
     }
     Some("structural mismatch: unexpected page layout without search result anchors".to_string())
+}
+
+fn has_next_page(html: &str) -> bool {
+    html5gum::Tokenizer::new(html).any(|token| {
+        let Ok(html5gum::Token::StartTag(tag)) = token else {
+            return false;
+        };
+        let attr = |name: &str| {
+            tag.attributes.iter().find_map(|(key, value)| {
+                if String::from_utf8_lossy(key).eq_ignore_ascii_case(name) {
+                    Some(String::from_utf8_lossy(&value.value).into_owned())
+                } else {
+                    None
+                }
+            })
+        };
+        let tag_name = String::from_utf8_lossy(&tag.name);
+        (tag_name.eq_ignore_ascii_case("input")
+            && attr("type").is_some_and(|v| v.eq_ignore_ascii_case("submit"))
+            && attr("value").is_some_and(|v| v.trim().eq_ignore_ascii_case("next")))
+            || (tag_name.eq_ignore_ascii_case("a")
+                && attr("rel")
+                    .is_some_and(|v| v.split_whitespace().any(|r| r.eq_ignore_ascii_case("next"))))
+    })
 }
 
 /// Parse DuckDuckGo HTML result anchors (`result__a`) into hits.

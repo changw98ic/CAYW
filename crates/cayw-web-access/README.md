@@ -68,3 +68,7 @@ cargo run -p cayw-web-access --example offline_web_access --locked
 默认单测走 fixture / 解析单元测试，无外网、无 Brave 计费。
 
 工具目录不再独立限制搜索为 20 条或 URL 为 2048 字符。搜索数量由服务使用宿主配置校验，URL 使用 HTTP/HTTPS 解析规则校验；具体供应商的返回数量仍由供应商能力决定，并通过 `truncated` 标记说明。
+
+默认不再设置网页正文 2 MiB、提取正文 100,000 字符和搜索 20 条的业务上限；未指定搜索数量仍默认返回至多 5 条。宿主显式配置的上限继续生效，正文上限也传递给搜索后端。供应商自身的分页/返回能力不因此扩大。
+
+Brave 大结果请求使用固定 `count`（至多 20）和 `offset=0..9` 分页，并按 URL 去重。只有 `query.more_results_available=true` 才请求下一页；供应商明确耗尽时结束。达到供应商页数边界、响应缺少分页信号或仍有结果未返回时，通过 `truncated` 和 `evidence` 说明，不把少返回当作完整结果。接口依据：[Brave 官方分页说明](https://api-dashboard.search.brave.com/app/documentation/web-search)。

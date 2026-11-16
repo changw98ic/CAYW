@@ -39,9 +39,14 @@ impl BraveSearch {
         Ok(Self {
             client,
             api_key: api_key.into(),
-            max_fetch_bytes: 2 * 1024 * 1024,
+            max_fetch_bytes: usize::MAX,
             endpoint: ENDPOINT.to_string(),
         })
+    }
+
+    pub fn with_max_fetch_bytes(mut self, max: usize) -> Self {
+        self.max_fetch_bytes = max;
+        self
     }
 
     /// Returns `Ok(None)` when the env key is unset/empty (caller should fall back).
@@ -64,50 +69,103 @@ impl SearchProvider for BraveSearch {
         limit: u32,
     ) -> BoxFuture<'a, Result<SearchResponse, WebAccessError>> {
         Box::pin(async move {
-            let mut url = url::Url::parse(&self.endpoint).map_err(|e| {
-                WebAccessError::new(FailureClass::InvalidUrl, format!("brave endpoint: {e}"))
-                    .with_provider(PROVIDER)
-            })?;
-            url.query_pairs_mut()
-                .append_pair("q", query)
-                .append_pair("count", &limit.clamp(1, 20).to_string());
-            let response = self
-                .client
-                .get(url)
-                .header("X-Subscription-Token", &self.api_key)
-                .header("Accept", "application/json")
-                .send()
-                .await
-                .map_err(|e| {
-                    WebAccessError::new(FailureClass::Offline, format!("brave GET failed: {e}"))
+            if limit == 0 {
+                return Err(WebAccessError::new(
+                    FailureClass::InvalidRequest,
+                    "Brave search limit must be positive",
+                ));
+            }
+            // Brave offsets are pages, so keep count fixed across every request.
+            let count = limit.min(20);
+            let mut hits = Vec::new();
+            let mut seen = std::collections::HashSet::new();
+            for offset in 0..=9 {
+                let mut url = url::Url::parse(&self.endpoint).map_err(|e| {
+                    WebAccessError::new(FailureClass::InvalidUrl, format!("brave endpoint: {e}"))
                         .with_provider(PROVIDER)
                 })?;
-            let (status, body) =
-                crate::provider::read_bounded_body(response, self.max_fetch_bytes, None, PROVIDER)
-                    .await?;
-            if !(200..300).contains(&status) {
-                return Err(WebAccessError::new(
-                    FailureClass::HttpStatus,
-                    format!("brave HTTP {status}"),
+                url.query_pairs_mut()
+                    .append_pair("q", query)
+                    .append_pair("count", &count.to_string())
+                    .append_pair("offset", &offset.to_string());
+                let response = self
+                    .client
+                    .get(url)
+                    .header("X-Subscription-Token", &self.api_key)
+                    .header("Accept", "application/json")
+                    .send()
+                    .await
+                    .map_err(|e| {
+                        WebAccessError::new(FailureClass::Offline, format!("brave GET failed: {e}"))
+                            .with_provider(PROVIDER)
+                    })?;
+                let (status, body) = crate::provider::read_bounded_body(
+                    response,
+                    self.max_fetch_bytes,
+                    None,
+                    PROVIDER,
                 )
-                .with_provider(PROVIDER)
-                .with_status(status));
+                .await?;
+                if !(200..300).contains(&status) {
+                    return Err(WebAccessError::new(
+                        FailureClass::HttpStatus,
+                        format!("brave HTTP {status}"),
+                    )
+                    .with_provider(PROVIDER)
+                    .with_status(status));
+                }
+                let page = parse_brave_json(&body, count)?;
+                let value: serde_json::Value = serde_json::from_slice(&body).map_err(|e| {
+                    WebAccessError::new(FailureClass::ExtractFailed, format!("brave JSON: {e}"))
+                        .with_provider(PROVIDER)
+                })?;
+                let more = value
+                    .pointer("/query/more_results_available")
+                    .and_then(|v| v.as_bool());
+                let mut omitted = false;
+                for mut hit in page {
+                    if !seen.insert(hit.url.clone()) {
+                        continue;
+                    }
+                    if hits.len() >= limit as usize {
+                        omitted = true;
+                        continue;
+                    }
+                    hit.rank = hits.len() as u32 + 1;
+                    hits.push(hit);
+                }
+                if hits.len() >= limit as usize || more != Some(true) || offset == 9 {
+                    let truncated = omitted || more != Some(false);
+                    let mut result = if hits.is_empty() {
+                        SearchResponse::empty(
+                            if more == Some(false) {
+                                SearchEmptyReason::TrueEmpty
+                            } else {
+                                SearchEmptyReason::Unattributed
+                            },
+                            None,
+                        )
+                    } else {
+                        SearchResponse::new(hits)
+                    };
+                    result.truncated = truncated;
+                    if truncated {
+                        result.evidence = Some(SearchEvidence {
+                            http_status: Some(status),
+                            source_summary: Some(if offset == 9 && more == Some(true) {
+                                "Brave pagination reached its final supported offset (9); more results are available".into()
+                            } else if more.is_none() {
+                                "Brave did not report whether more results are available; pagination stopped".into()
+                            } else {
+                                "Requested result count reached; additional Brave results are available".into()
+                            }),
+                            response_snippet: None,
+                        });
+                    }
+                    return Ok(result);
+                }
             }
-            let hits = parse_brave_json(&body, limit)?;
-            if hits.is_empty() {
-                let snippet = String::from_utf8_lossy(&body);
-                let bounded_snippet = snippet.chars().take(1024).collect::<String>();
-                Ok(SearchResponse::empty(
-                    SearchEmptyReason::TrueEmpty,
-                    Some(SearchEvidence {
-                        http_status: Some(status),
-                        source_summary: Some("brave search produced no results".into()),
-                        response_snippet: Some(bounded_snippet),
-                    }),
-                ))
-            } else {
-                Ok(SearchResponse::new(hits))
-            }
+            unreachable!("the final supported page always returns a response")
         })
     }
 }
@@ -322,5 +380,120 @@ mod tests {
         assert_eq!(hits[0].title.as_deref(), Some("Rust Programming Language"));
         assert_eq!(hits[0].url, "https://www.rust-lang.org/");
         assert_eq!(hits[0].rank, 1);
+    }
+
+    async fn paged_fixture(
+        limit: u32,
+        pages: Vec<(Vec<u32>, Option<bool>)>,
+    ) -> crate::types::SearchResult {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let server = thread::spawn(move || {
+            for (offset, (ids, more)) in pages.into_iter().enumerate() {
+                let deadline = std::time::Instant::now() + Duration::from_secs(10);
+                let mut stream = loop {
+                    match listener.accept() {
+                        Ok((stream, _)) => break stream,
+                        Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                            assert!(
+                                std::time::Instant::now() < deadline,
+                                "missing page {offset}"
+                            );
+                            thread::sleep(Duration::from_millis(1));
+                        }
+                        Err(e) => panic!("accept: {e}"),
+                    }
+                };
+                stream
+                    .set_read_timeout(Some(Duration::from_secs(10)))
+                    .unwrap();
+                let mut request = Vec::new();
+                let mut byte = [0];
+                while !request.ends_with(b"\r\n\r\n") {
+                    stream.read_exact(&mut byte).unwrap();
+                    request.push(byte[0]);
+                }
+                let request = String::from_utf8(request).unwrap();
+                assert!(request.contains(&format!("count={}", limit.min(20))));
+                assert!(request.contains(&format!("offset={offset}")));
+                let results: Vec<_> = ids.into_iter().map(|id| serde_json::json!({
+                    "url": format!("https://example.com/{id}"), "title": format!("Result {id}")
+                })).collect();
+                let body = serde_json::json!({
+                    "query": {"more_results_available": more},
+                    "web": {"results": results}
+                })
+                .to_string();
+                write!(stream, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}", body.len(), body).unwrap();
+            }
+        });
+        let mut brave = BraveSearch::new("fixture-key").unwrap();
+        brave.endpoint = format!("http://{address}/search");
+        let access = crate::WebAccess::new(
+            Arc::new(crate::FixtureTransport::new()),
+            Arc::new(brave),
+            crate::ContentStore::new(),
+            crate::Limits::default(),
+        );
+        let result = access.search("pages", Some(limit)).await;
+        server.join().unwrap();
+        result.unwrap()
+    }
+
+    #[tokio::test]
+    async fn paginates_past_twenty_with_fixed_page_size_and_deduplicates() {
+        let response = paged_fixture(
+            50,
+            vec![
+                ((0..20).collect(), Some(true)),
+                ((19..39).collect(), Some(true)),
+                ((39..59).collect(), Some(false)),
+            ],
+        )
+        .await;
+        assert_eq!(response.hits.len(), 50);
+        assert_eq!(response.hits.last().unwrap().url, "https://example.com/49");
+        assert_eq!(response.hits.last().unwrap().rank, 50);
+        assert!(response.truncated);
+    }
+
+    #[tokio::test]
+    async fn stops_when_provider_reports_exhaustion() {
+        let response = paged_fixture(50, vec![((0..7).collect(), Some(false))]).await;
+        assert_eq!(response.hits.len(), 7);
+        assert!(!response.truncated);
+    }
+
+    #[tokio::test]
+    async fn provider_page_limit_is_reported_as_incomplete() {
+        let pages = (0..10)
+            .map(|page| ((page * 20..page * 20 + 20).collect(), Some(true)))
+            .collect();
+        let response = paged_fixture(250, pages).await;
+        assert_eq!(response.hits.len(), 200);
+        assert!(response.truncated);
+        assert!(
+            response
+                .evidence
+                .unwrap()
+                .source_summary
+                .unwrap()
+                .contains("offset (9)")
+        );
+    }
+
+    #[tokio::test]
+    async fn absent_pagination_signal_is_not_reported_as_complete() {
+        let response = paged_fixture(50, vec![((0..20).collect(), None)]).await;
+        assert_eq!(response.hits.len(), 20);
+        assert!(response.truncated);
+    }
+
+    #[tokio::test]
+    async fn exact_requested_count_with_exhaustion_is_complete_through_service() {
+        let response = paged_fixture(20, vec![((0..20).collect(), Some(false))]).await;
+        assert_eq!(response.hits.len(), 20);
+        assert!(!response.truncated);
     }
 }
