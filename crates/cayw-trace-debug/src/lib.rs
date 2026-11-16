@@ -14,14 +14,11 @@ use cayw_core::EventRecord;
 use std::{
     env,
     fs::{File, OpenOptions},
-    io::{Read, Write},
+    io::{BufReader, BufWriter, Write},
     os::unix::fs::OpenOptionsExt,
     path::{Path, PathBuf},
     sync::{Arc, Mutex},
 };
-
-const MAX_STORE_BYTES: usize = 32 * 1024 * 1024;
-const MAX_HISTORY: usize = 256;
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
@@ -32,7 +29,16 @@ pub enum Error {
     #[error("本地追踪文件：{0}")]
     Io(#[from] std::io::Error),
     #[error("追踪数据格式：{0}")]
-    Json(#[from] serde_json::Error),
+    Json(serde_json::Error),
+}
+
+impl From<serde_json::Error> for Error {
+    fn from(error: serde_json::Error) -> Self {
+        match error.io_error_kind() {
+            Some(kind) => Self::Io(std::io::Error::new(kind, error)),
+            None => Self::Json(error),
+        }
+    }
 }
 
 pub struct TraceStore {
@@ -111,15 +117,7 @@ impl TraceStore {
             .map_err(|_| Error::Conflict("追踪文件正由另一个插件进程使用".into()))?;
         reject_symlink(&path)?;
         let document: Document = match File::open(&path) {
-            Ok(file) => {
-                if file.metadata()?.len() > MAX_STORE_BYTES as u64 {
-                    return Err(Error::Invalid("追踪文件超过 32 MiB 上限".into()));
-                }
-                let mut bytes = Vec::new();
-                file.take(MAX_STORE_BYTES as u64 + 1)
-                    .read_to_end(&mut bytes)?;
-                serde_json::from_slice(&bytes)?
-            }
+            Ok(file) => serde_json::from_reader(BufReader::new(file))?,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => Document::default(),
             Err(error) => return Err(error.into()),
         };
@@ -218,23 +216,19 @@ impl TraceStore {
     }
 
     fn persist(&self, document: &Document) -> Result<(), Error> {
-        let bytes = serde_json::to_vec(document)?;
-        if bytes.len() > MAX_STORE_BYTES {
-            return Err(Error::Invalid(
-                "追踪文件达到 32 MiB 上限；请为新的采集选择另一文件".into(),
-            ));
-        }
         let temp = self
             .path
             .with_extension(format!("{}.tmp", uuid::Uuid::new_v4()));
         let result = (|| -> Result<(), Error> {
-            let mut file = OpenOptions::new()
+            let file = OpenOptions::new()
                 .write(true)
                 .create_new(true)
                 .mode(0o600)
                 .open(&temp)?;
-            file.write_all(&bytes)?;
-            file.sync_all()?;
+            let mut writer = BufWriter::new(file);
+            serde_json::to_writer(&mut writer, document)?;
+            writer.flush()?;
+            writer.get_ref().sync_all()?;
             std::fs::rename(&temp, &self.path)?;
             File::open(
                 self.path
@@ -301,11 +295,6 @@ impl TraceStore {
                     event.cursor
                 )));
             }
-            if next.events.len() >= 100_000 {
-                return Err(Error::Invalid(
-                    "本文件达到十万条事件上限，请新建追踪文件".into(),
-                ));
-            }
             capture::apply(&mut next, event)?;
             next.events.push(event.clone());
             let session = next.sessions.entry(event.session_id.clone()).or_default();
@@ -314,11 +303,6 @@ impl TraceStore {
             changed = true;
         }
         if changed {
-            if next.projects.len() > 256 {
-                return Err(Error::Invalid(
-                    "本文件达到 256 次执行上限，请新建追踪文件".into(),
-                ));
-            }
             for project in next.projects.values_mut() {
                 link_project(project, &self.linker, self.workspace_root.as_deref())?;
             }
@@ -594,11 +578,6 @@ fn check_revision(project: &Project, expected: u64) -> Result<(), Error> {
             "当前内容版本为 {}，请重新载入后保存",
             project.version()
         )));
-    }
-    if project.revisions.len() >= MAX_HISTORY || project.evaluations.len() >= MAX_HISTORY {
-        return Err(Error::Invalid(
-            "本次运行达到 256 个版本上限，请使用新的追踪文件".into(),
-        ));
     }
     Ok(())
 }
