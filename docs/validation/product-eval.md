@@ -1,8 +1,8 @@
-# 真实产品效果 Eval（待真实运行）
+# 真实产品效果 Eval
 
-本方案补充现有协议、管道与固定响应测试，回答：**真实模型在 CAYW 中能否把任务做对、交付是否好用、人在执行中能否理解并控制它？** 本 PR 提供可复跑任务、离线准备/评分工具及操作规程，不包含真实模型通过声明。这是受控代表性任务集，不代表用户生产任务成功率。测试脚本运行成功、工具返回成功、模型自述完成，都不能代替产品结果。
+本方案补充现有协议、管道与固定响应测试，回答：**真实模型在 CAYW 中能否把任务做对、交付是否好用、人在执行中能否理解并控制它？** 本文提供可复跑任务、离线准备/评分工具及操作规程。已执行的 C02 单次真实运行见[2026-11-16 记录](real-coding-20261116.md)，其余范围不能据此判定通过。这是受控代表性任务集，不代表用户生产任务成功率。测试脚本运行成功、工具返回成功、模型自述完成，都不能代替产品结果。
 
-核对基线：`43a44949c5a3eae05fc125763921adef19ad83f7`。实际运行必须记录本 PR 合入或检出后的完整 SHA 和二进制摘要，不能用此基线冒充被测构建。首发只验收 **macOS arm64**；其他 macOS 架构未运行则标未验证，不为 Linux/Windows 做桌面验收。
+最初方案核对基线：`43a44949c5a3eae05fc125763921adef19ad83f7`。实际运行必须记录所用源码的完整 SHA 和二进制摘要，不能用此基线冒充被测构建。首发只验收 **macOS arm64**；其他 macOS 架构未运行则标未验证，不为 Linux/Windows 做桌面验收。
 
 ## 1. 交付和判定边界
 
@@ -43,9 +43,23 @@ C01–C04 同时保留客观产物检查与人工质量评分。L01/U01 的关�
 - 日志原件私有保留，发布前脱敏；数据库、`models.json`、`config.json`、`ipc.token`、`client.json` 不直接作为 PR artifact。保留一份去密钥配置及其非秘密字段摘要即可，不公布低熵秘密的摘要。
 - 不用 `--offline`、`--demo-authorized` 跑真实效果。它们只证明固定回复链路。
 - `max_output_tokens` 是每请求输出限制；`max_total_tokens` 是 Runtime 账本预算，**不是服务端硬金额上限**。没有可信输入上界，实际输入可能超过预留；未知用量必须保留为 unknown，不能记为零费用。服务侧额度/请求限额和人工停止仍需独立设置。
-- 建议首轮每 run 最多 12 个模型回合、32768 总 token、300 秒；这只是起步预算，须先获运行者批准，固定后再比较。人工审批等待及超时也记录。L01 如需更长时间，事先单独声明，不在失败后悄悄加预算再覆盖原结果。
+- 准备任务不选择执行预算：`host.template.json` 的 `budgets` 为空。用户未配置时，Runtime 不设 token、模型回合、任务时长或能力累计用量上限。若本次有明确预算，由运行者在启动前写入配置并记录来源；失败后修改预算必须另记干预与原始失败，不能覆盖记录。
+- 外部调用的单次时限仍由 Host 负责。下方真实编码入口复用原验收的120秒单次 Host 调用时限，不叠加进程或中间等待时限；这不是整题执行时限。
 
-准备脚本的 `host.template.json` 提供更宽的候选预算（普通 20 回合/60000 token/15 分钟，L01 40 回合/120000 token/30 分钟），不等于授权。上面的保守冒烟额度与该模板二选一并记录实际生效配置，不混称同一条件。本 PR 不执行真实调用，也不替运行者选择付费服务。
+### C02 一次完整真实运行
+
+当次真实调用已获授权后，可使用以下入口。它运行现有 C02 题，经本地唯一 Client 的 ModelAuto 路径审批操作，使用固定 Cargo 配置执行真实测试，再独立核对代码和产物范围。它不设置任务总 token、模型回合或任务时长预算，不自动重试任务，也不自动给说明文字打分。`MAGPIE_API_KEY` 对免密 localhost 不是必填项。
+
+```sh
+python3 scripts/validate-live-coding.py \
+  --runtime target/debug/cayw \
+  --client examples/headless-client/target/debug/cayw-client \
+  --out /absolute/new/coding-run
+```
+
+入口在首个模型请求前解析 Rust 1.95.0 工具链的 Cargo、rustc 和 rustdoc，并运行完整 Cargo 预检。测试配置的 PATH 包含该工具链与系统工具目录，构建缓存位于模型工作区之外。模型配置中的单次回复额度取自所选服务的 `/models` 目录，不另定更小的值；目录缺少所需信息时明确报错。任务过程不依赖人工逐条审批；SDK 直接调用者的默认 Explicit 语义不变。
+
+`review/summary.json`的`machine_passed`只表示原Task正常完成、名额释放、模型实际运行完整测试、独立代码与产物检查通过。说明中的事实、首次通过与干预次数仍须独立检查；不能把该字段当作完整人工验收结论。启动和模型失败保留原始日志，不更换模型或悄悄重放。
 
 ## 4. 本地产品主线的可运行命令
 
@@ -67,28 +81,20 @@ export CAYW_HOME="$RUN/private/cayw-home"
 "$BIN/cayw" conf --workspace "$RUN/workspace"
 ```
 
-`conf` 交互填写实际获准的模型。没有模型也能启动、创建 Session，但不能执行任务。选中模型保存在该工作区私有 `models.json`，不靠旧环境变量选模型。需要预算时，在启动前由可信运行者编辑刚初始化的 `$CAYW_HOME/config.json`，保留 `permissions: []`，添加以下真实字段；不要覆盖或手工伪造工作区 `models.json`：
+`conf` 交互填写实际获准的模型。没有模型也能启动、创建 Session，但不能执行任务。模型方案保存在设备级 `<CAYW_HOME>/models.json`，工作区只保存 `model-selection.json` 选用，不读取旧工作区模型目录。需要预算时，在启动前由可信运行者编辑刚初始化的 `$CAYW_HOME/config.json`，保留 `permissions: []`，添加以下真实字段；不要覆盖或手工伪造工作区 `models.json`：
 
 ```json
 {
   "permissions": [],
-  "budgets": {
-    "max_turns": 12,
-    "max_total_tokens": 32768,
-    "max_run_time_ms": 300000,
-    "max_capability_calls": 80,
-    "max_capability_bytes": 1048576,
-    "host_wait_ms": 120000,
-    "host_call_timeout_ms": 120000
-  }
+  "budgets": {}
 }
 ```
 
-以上预算是本次选择，不是默认值或费用保证。C02/C03/L01 需要模型运行测试时，由可信运行者预先配置固定 `profiles`，模板结构见 [`host.example.json`](../../examples/headless-client/host.example.json)。`program` 必须是已核对的绝对可执行路径，固定 `args`、`env`、超时和输出限额；只运行本 case 的离线测试，不允许任意过滤器或任意命令。profile 并不授予权限。若尚无可信测试 profile，模型内测试标 blocked；运行结束后人工跑测试可作为产物检查，但不能声称模型自主验证过。
+以上配置没有选择执行用量上限。C02/C03/L01 需要模型运行测试时，由可信运行者预先配置固定 `profiles`，模板结构见 [`host.example.json`](../../examples/headless-client/host.example.json)。`program` 必须是已核对的绝对可执行路径，固定 `args`、`env`；只运行本 case 的离线测试，不允许任意过滤器或任意命令。profile 并不授予权限。PATH 须包含该工具链及系统链接器目录；RUSTC 和 RUSTDOC 使用同一工具链的绝对路径，并在调用模型前预检完整 Cargo 测试。外部调用时限由 Host 统一设置；有明确输出限额时记录其来源。若尚无可信测试 profile，模型内测试标 blocked；运行结束后人工跑测试可作为产物检查，但不能声称模型自主验证过。
 
 ### C02/C03 的固定构建缓存
 
-fixture `2026-11-09.v2` 预置不可修改的 `Cargo.lock`。工作区没有目录豁免：`target/extra`、`target/debug/extra` 和任何未列出的文件都会产生 scope 失败；不能只因路径位于 target 就认定它是构建产物。
+fixture `2026-11-09.v2` 预置不可修改的 `Cargo.lock`。 根目录中由Host保留的`.cayw-host-lock`、`.cayw-host-read-fence`、`.cayw-host-read-state`单独报告为宿主协调文件。仅这三个根路径不作为任务产物；符号链接、同名前缀的其他文件、嵌套路径和整个target目录仍按原规则核对。工作区没有目录豁免：`target/extra`、`target/debug/extra` 和任何未列出的文件都会产生 scope 失败；不能只因路径位于 target 就认定它是构建产物。
 
 可信运行者在上述固定测试 profile 中设置已核对的 Cargo 绝对路径，并固定参数 `test --locked --offline --target-dir /absolute/run/private/cargo-target`（替换为本次 run 的实际缓存路径），`allow_filter=false`。目录由运行者事前创建，只是已授权测试进程的缓存，不是模型文件工具可访问的新工作区。不授予任意路径/命令参数；模型不能用删除额外文件来掩盖范围违规，评分前保留原始最终树和 diff。独立评分器仍在自己的临时目录编译，不写任务的 target。
 
@@ -120,15 +126,13 @@ export PROMPT="$(cat "$RUN/review/prompt.txt")"
   > "$RUN/review/evidence/prompt.jsonl" 2> "$RUN/review/evidence/prompt.stderr.jsonl"
 ```
 
-第三个终端处理审批。先查原 Session 中的真实 pending approval，核对 capability、完整参数、Task 身份及工作区；每次明确决定，不能循环自动 allow：
+本地 Client 使用 ModelAuto，模型自行查询并决定待审批操作。第三个终端可查看原 Session 的实际审批状态：
 
 ```sh
 "$BIN/cayw-client" --workspace "$RUN/workspace" get --session "$SESSION"
-"$BIN/cayw-client" --workspace "$RUN/workspace" approve \
-  --session "$SESSION" --approval '实际-approval-id' --decision allow_once
 ```
 
-不安全操作改为 `--decision deny`，记录理由。人工解释任务、提示遗漏或帮模型修文件均计为干预；不要只记录审批点击。UI 主线用 `cayw tui --workspace "$RUN/workspace"` 或 `cayw --ui web --no-open --workspace "$RUN/workspace"`，详见交互手册。绝不使用 `--lan` 暴露 eval 环境。
+SDK 的 Explicit 模式由调用者核对 capability、完整参数、Task 身份和工作区后决定，并记录理由。人工解释任务、提示遗漏或帮模型修文件均计为干预；不要只记录审批点击。UI 主线用 `cayw tui --workspace "$RUN/workspace"` 或 `cayw --ui web --no-open --workspace "$RUN/workspace"`，详见交互手册。绝不使用 `--lan` 暴露 eval 环境。
 
 ### 独立 Headless 补充 lane
 

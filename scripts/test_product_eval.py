@@ -62,6 +62,40 @@ class ScorerTests(unittest.TestCase):
         self.assertEqual(config["permissions"], [])
         self.assertFalse((self.root / "workspace/review").exists())
 
+    def test_prepared_host_has_no_implicit_execution_budgets(self):
+        for case in pe.CASES:
+            root = Path(self.temp.name) / (case + "-budgets")
+            pe.prepare(case, root)
+            config = pe.read_json(root / "review/host.template.json")
+            self.assertEqual(config["budgets"], {})
+
+    def test_scope_distinguishes_root_host_metadata_from_task_files(self):
+        self.outputs()
+        self.reviewed_record()
+        workspace = self.root / "workspace"
+        for name in (".cayw-host-lock", ".cayw-host-read-fence", ".cayw-host-read-state"):
+            (workspace / name).write_text("host-owned fixture")
+        self.assertEqual(self.score()["outcome"], "accepted")
+
+        for name in (".cayw-host-notes", "output/.cayw-host-lock", "target/extra"):
+            path = workspace / name
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text("unapproved task file")
+        checks = self.score()["machine_checks"]
+        failures = {c["criterion"] for c in checks if c["status"] == "failed"}
+        self.assertEqual(failures, {
+            "scope:.cayw-host-notes", "scope:output/.cayw-host-lock", "scope:target/extra",
+        })
+
+    def test_reserved_host_metadata_symlink_still_fails_scope(self):
+        self.outputs()
+        self.reviewed_record()
+        (self.root / "workspace/.cayw-host-lock").symlink_to(
+            self.root / "review/prompt.txt"
+        )
+        checks = self.score()["machine_checks"]
+        self.assertIn(pe.check("no_symlink:.cayw-host-lock", False), checks)
+
     def test_all_cases_prepare_offline(self):
         for case in pe.CASES:
             path = Path(self.temp.name) / case

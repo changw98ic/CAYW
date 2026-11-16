@@ -31,6 +31,10 @@ OUTCOMES = ["accepted", "failed", "unverified", "blocked", "not_run", "invalid"]
 COUNTERS = ["input_tokens", "output_tokens", "model_requests", "repair_attempts", "human_interventions", "human_repairs"]
 METRICS = ["wall_seconds", "active_seconds", "approval_seconds", *COUNTERS, "cost"]
 USAGE_STATUSES = ["unknown", "partial", "reported", "invalid"]
+# Exact root entries reserved by cayw-host's filesystem/read_fence modules.
+# They coordinate Host operations and cannot be written via its file capabilities.
+# Other .cayw-* files and nested entries remain ordinary task files.
+HOST_METADATA = {".cayw-host-lock", ".cayw-host-read-fence", ".cayw-host-read-state"}
 
 
 def digest(data):
@@ -133,12 +137,8 @@ def prepare(case, out):
     write_json(review / "run.json", manifest)
     write_json(review / "record.template.json", template(case, run_id))
     (review / "prompt.txt").write_text(prompt, encoding="utf-8")
-    host = {"budgets": {"max_turns": 40 if case == "L01" else 20,
-                        "max_total_tokens": 120000 if case == "L01" else 60000,
-                        "max_run_time_ms": 1800000 if case == "L01" else 900000,
-                        "max_capability_calls": 240 if case == "L01" else 100,
-                        "max_capability_bytes": 16777216, "host_wait_ms": 300000,
-                        "host_call_timeout_ms": 120000}, "permissions": []}
+    # Preparing a task must not silently choose the user's execution budget.
+    host = {"budgets": {}, "permissions": []}
     write_json(review / "host.template.json", host)
     return {"run": str(out), "case": case, "workspace": str(workspace),
             "prompt": str(review / "prompt.txt"), "model_called": False,
@@ -249,6 +249,8 @@ def machine_checks(root, meta, files, outputs, expected, allow_exec=False, rustc
         rel = path.relative_to(workspace).as_posix()
         if path.is_symlink():
             checks.append(check("no_symlink:" + rel, False))
+        elif path.is_file() and rel in HOST_METADATA:
+            checks.append(check("host_metadata:" + rel, True, "reserved Host coordination file"))
         elif path.is_file() and rel not in allowed:
             checks.append(check("scope:" + rel, False, "unexpected file"))
     for name in outputs:

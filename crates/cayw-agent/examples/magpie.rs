@@ -37,6 +37,7 @@ fn report_message(case: &str, message: &AssistantMessage) {
             "text": content_text(&message.content),
             "tool_calls": message.tool_calls(),
             "usage": message.usage,
+            "usage_status": message.usage_status,
             "duration_ms": message.duration_ms,
             "error": message.error_message,
         })
@@ -313,15 +314,19 @@ async fn cancel_stream(provider: Arc<dyn Provider>, model: &Model) -> TestResult
 async fn main() -> TestResult {
     let base =
         std::env::var("MAGPIE_BASE_URL").unwrap_or_else(|_| "http://127.0.0.1:3425/v1".into());
-    let key = std::env::var("MAGPIE_API_KEY").map_err(|_| {
-        io::Error::other("Set MAGPIE_API_KEY explicitly; this example sends real requests")
-    })?;
-    check(!key.trim().is_empty(), "MAGPIE_API_KEY must not be empty")?;
+    let provider = match std::env::var("MAGPIE_API_KEY") {
+        Ok(key) => {
+            check(!key.trim().is_empty(), "MAGPIE_API_KEY must not be empty")?;
+            providers::OpenAiProvider::new(&base, key)?
+        }
+        Err(std::env::VarError::NotPresent) => providers::OpenAiProvider::without_auth(&base)?,
+        Err(error) => return Err(error.into()),
+    };
     let model = Model::new(
         "magpie",
-        std::env::var("MAGPIE_MODEL").unwrap_or_else(|_| "group/auto-deepseek-v4-1-flash".into()),
+        std::env::var("MAGPIE_MODEL").unwrap_or_else(|_| "opencode-go/deepseek-v4.1-flash".into()),
     );
-    let provider: Arc<dyn Provider> = Arc::new(providers::OpenAiProvider::new(&base, key)?);
+    let provider: Arc<dyn Provider> = Arc::new(provider);
     println!(
         "{}",
         json!({"event":"live_test_start", "timestamp_ms":timestamp_ms(),

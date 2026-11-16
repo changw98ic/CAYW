@@ -36,7 +36,7 @@ cargo test -p cayw-ai --test contracts validation_is_strict_and_local_only
 
 `cargo fmt` 需要 rustfmt，`cargo clippy` 需要 Clippy。当前开发机默认 stable 没有 Clippy，但已安装的 `1.95.0` 工具链有，可执行 `cargo +1.95.0 clippy ...`。如 PATH 没有 Cargo，可在命令环境中加入 `$HOME/.cargo/bin`；不要误判为 Rust 未安装。
 
-真实模型检查是独立示例：`cargo run -p cayw-agent --example magpie --locked`。需先获当次真实调用授权并在环境中设置 `MAGPIE_API_KEY`，可选 `MAGPIE_BASE_URL`（默认 `http://127.0.0.1:3425/v1`）和 `MAGPIE_MODEL`（默认 `group/auto-deepseek-v4-1-flash`）。普通 `cargo test` 不会运行它。配置和已验证范围见 `docs/validation/rust-pi-core-magpie.md`；不打印凭据，不将中途取消的用量零值当作零费用。
+真实模型检查是独立示例：`cargo run -p cayw-agent --example magpie --locked`。需先获当次真实调用授权。免密本机服务无需设置 `MAGPIE_API_KEY`；需要认证的服务通过该环境变量传入密钥。可选 `MAGPIE_BASE_URL`（默认 `http://127.0.0.1:3425/v1`）和 `MAGPIE_MODEL`（默认 `opencode-go/deepseek-v4.1-flash`）。普通 `cargo test` 不会运行它。配置和已验证范围见 `docs/validation/rust-pi-core-magpie.md`；不打印凭据，不将中途取消的用量零值当作零费用。
 
 - `cayw-ai::Provider` 接收请求和取消令牌，返回可消费的事件流；错误必须有终态。HTTP 适配不读取本机模型凭据，默认不重试或跟随跳转。
 - `cayw-agent::Agent` 维护内存中的历史；`AgentControl` 可在运行中读取快照、插入消息和取消。事件订阅按注册顺序等待；回调不要等待同一次运行的 `wait_for_idle()`，以免等待自身。
