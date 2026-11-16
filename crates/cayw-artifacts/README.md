@@ -70,3 +70,5 @@ cargo run -p cayw-artifacts --example offline_artifacts --locked
 ```
 
 测试覆盖 host 桥实调、磁盘恢复与渲染投影；无网络、无 Provider、无真实 UI。
+
+产物正文保留非空校验，不设置固定的 1 MiB 上限。正文、预览和恢复快照仍完整读入内存；跨系统传输仍遵循所用接口的帧大小约定。

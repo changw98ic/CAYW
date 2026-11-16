@@ -11,10 +11,6 @@ import { readdir, realpath, stat } from 'node:fs/promises';
 import { createServer as createTcpServer } from 'node:net';
 import path from 'node:path';
 
-const MAX_LINE_BYTES = 32 * 1024 * 1024;
-const MAX_FILES = 256;
-const MAX_SOURCE_BYTES = 16 * 1024 * 1024;
-const MAX_FILE_BYTES = 8 * 1024 * 1024;
 const DEFAULT_FS_DENY = ['.env', '.env.*', '*.{crt,pem}', '**/.git/**'];
 const BRIDGE_PATH = '/__cayw_bridge.js';
 const SOURCE_EXTENSIONS = new Set(['.js', '.jsx', '.ts', '.tsx', '.vue']);
@@ -90,11 +86,7 @@ function normalizeFiles(files) {
   if (!Array.isArray(files)) {
     throw coded('invalid_request', 'files must be an array');
   }
-  if (files.length > MAX_FILES) {
-    throw coded('invalid_request', `files exceeds the ${MAX_FILES}-file limit`);
-  }
   const seen = new Set();
-  let total = 0;
   const output = [];
   for (const file of files) {
     if (file === null || typeof file !== 'object') {
@@ -108,14 +100,6 @@ function normalizeFiles(files) {
       throw coded('invalid_request', `duplicate file path ${relative}`);
     }
     seen.add(relative);
-    const bytes = Buffer.byteLength(file.source, 'utf8');
-    if (bytes > MAX_FILE_BYTES) {
-      throw coded('invalid_request', `${relative} exceeds the ${MAX_FILE_BYTES}-byte file limit`);
-    }
-    total += bytes;
-    if (total > MAX_SOURCE_BYTES) {
-      throw coded('invalid_request', `files exceeds the ${MAX_SOURCE_BYTES}-byte limit`);
-    }
     output.push({ path: relative, source: file.source });
   }
   return output;
@@ -280,7 +264,6 @@ async function scan(params) {
   const page = normalizeRelative(params.page, 'page');
   const framework = requireFramework(params.framework);
   const files = [];
-  let total = 0;
 
   async function add(relative) {
     const absolute = path.join(root, ...relative.split('/'));
@@ -288,13 +271,6 @@ async function scan(params) {
     if (details === null || !details.isFile()) return;
     if (files.includes(relative)) return;
     files.push(relative);
-    total += details.size;
-    if (files.length > MAX_FILES) {
-      throw coded('scan_limit', `project exceeds the ${MAX_FILES}-file scan limit`);
-    }
-    if (total > MAX_SOURCE_BYTES) {
-      throw coded('scan_limit', `project exceeds the ${MAX_SOURCE_BYTES}-byte scan limit`);
-    }
   }
 
   // The configured page is always part of the manifest even when it lives in a
@@ -878,13 +854,6 @@ function writeLine(value) {
       reject(error);
       return;
     }
-    if (Buffer.byteLength(line, 'utf8') > MAX_LINE_BYTES) {
-      const fallback = `${JSON.stringify(
-        errorFor(value.id ?? null, coded('response_too_large', 'response exceeds the 32 MiB line limit')),
-      )}\n`;
-      process.stdout.write(fallback, (error) => (error ? reject(error) : resolve()));
-      return;
-    }
     process.stdout.write(line, (error) => (error ? reject(error) : resolve()));
   });
 }
@@ -951,18 +920,11 @@ function onData(chunk) {
       const rest = chunk.subarray(start);
       pending.push(rest);
       pendingBytes += rest.length;
-      if (pendingBytes > MAX_LINE_BYTES) {
-        failFatal(coded('request_too_large', 'request exceeds the 32 MiB line limit'));
-      }
       return;
     }
     const piece = chunk.subarray(start, newline);
     pending.push(piece);
     pendingBytes += piece.length;
-    if (pendingBytes > MAX_LINE_BYTES) {
-      failFatal(coded('request_too_large', 'request exceeds the 32 MiB line limit'));
-      return;
-    }
     const line = Buffer.concat(pending, pendingBytes);
     pending = [];
     pendingBytes = 0;

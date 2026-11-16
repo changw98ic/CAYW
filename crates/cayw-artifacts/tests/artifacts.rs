@@ -647,3 +647,28 @@ fn foreign_session_cannot_update_artifact() {
         .unwrap_err();
     assert!(matches!(err, ArtifactError::SessionMismatch { .. }));
 }
+
+#[test]
+fn large_artifacts_preserve_body_through_preview_update_and_disk_recovery() {
+    let ws = ArtifactWorkspace::new();
+    let body = format!("<p>{}</p>", "x".repeat(2 * 1024 * 1024));
+    put_card(&ws, "large", "session", &body, 1);
+    assert_eq!(ws.store.preview("large").unwrap().html, body);
+    let updated = format!("{body}<footer>updated</footer>");
+    ws.store
+        .update(UpdateArtifactRequest {
+            artifact_id: "large".into(),
+            session_id: "session".into(),
+            title: None,
+            body: Some(updated.clone()),
+            at_ms: 2,
+            expected_content_version: Some(1),
+        })
+        .unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    ws.save_to_disk(dir.path()).unwrap();
+    let recovered =
+        ArtifactWorkspace::load_from_disk(dir.path(), Arc::new(RecordingHostDispatch::new()))
+            .unwrap();
+    assert_eq!(recovered.store.preview("large").unwrap().html, updated);
+}

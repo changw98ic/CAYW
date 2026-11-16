@@ -32,13 +32,10 @@ pub fn validate_title(value: &str) -> Result<String, String> {
     Ok(trimmed.to_owned())
 }
 
-/// HTML / chart body: non-empty UTF-8, ≤1 MiB.
+/// HTML / chart body: non-empty UTF-8.
 pub fn validate_body(value: &str) -> Result<(), String> {
     if value.is_empty() {
         return Err("body is empty".into());
-    }
-    if value.len() > 1024 * 1024 {
-        return Err("body exceeds 1 MiB".into());
     }
     Ok(())
 }

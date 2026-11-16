@@ -27,7 +27,6 @@ use std::{
 /// URL path where the preview injects the parent/iframe bridge.
 pub const BRIDGE_PATH: &str = "/__cayw_bridge.js";
 
-const MAX_PAGE_BYTES: usize = 4 * 1024 * 1024;
 const MAX_ASSET_BYTES: usize = 8 * 1024 * 1024;
 const MAX_COMPONENTS: usize = 16;
 const MAX_PATH_BYTES: usize = 512;
@@ -241,7 +240,7 @@ fn page(state: &PreviewState, query: Option<&str>) -> Response {
             true,
         )
     } else {
-        match read_relative(&state.root, &state.page, MAX_PAGE_BYTES) {
+        match read_relative(&state.root, &state.page, None) {
             Ok(bytes) => (bytes, false),
             Err(error) => return preview_error(error),
         }
@@ -286,7 +285,7 @@ fn asset(state: &PreviewState, decoded: &str) -> Response {
     let Some(mime) = mime(relative) else {
         return text(StatusCode::NOT_FOUND, "resource type is not served");
     };
-    let bytes = match read_relative(&state.root, relative, MAX_ASSET_BYTES) {
+    let bytes = match read_relative(&state.root, relative, Some(MAX_ASSET_BYTES)) {
         Ok(bytes) => bytes,
         Err(error) => return preview_error(error),
     };
@@ -431,7 +430,11 @@ fn normalize_page(page: &str) -> Result<String, PreviewError> {
     Ok(page.to_owned())
 }
 
-fn read_relative(root: &Dir, relative: &str, limit: usize) -> Result<Vec<u8>, PreviewError> {
+fn read_relative(
+    root: &Dir,
+    relative: &str,
+    limit: Option<usize>,
+) -> Result<Vec<u8>, PreviewError> {
     let components = validate_components(relative)?;
     let (name, parents) = components.split_last().ok_or(PreviewError::InvalidPath)?;
     let mut dir = root.try_clone().map_err(PreviewError::Root)?;
@@ -449,16 +452,20 @@ fn read_relative(root: &Dir, relative: &str, limit: usize) -> Result<Vec<u8>, Pr
     if !metadata.is_file() {
         return Err(PreviewError::Missing);
     }
-    if metadata.len() > limit as u64 {
-        return Err(PreviewError::TooLarge);
-    }
-    let mut bytes = Vec::with_capacity(metadata.len().min(limit as u64) as usize);
-    file.by_ref()
-        .take(limit as u64 + 1)
-        .read_to_end(&mut bytes)
-        .map_err(PreviewError::Root)?;
-    if bytes.len() > limit {
-        return Err(PreviewError::TooLarge);
+    let mut bytes = Vec::new();
+    if let Some(limit) = limit {
+        if metadata.len() > limit as u64 {
+            return Err(PreviewError::TooLarge);
+        }
+        file.by_ref()
+            .take(limit as u64 + 1)
+            .read_to_end(&mut bytes)
+            .map_err(PreviewError::Root)?;
+        if bytes.len() > limit {
+            return Err(PreviewError::TooLarge);
+        }
+    } else {
+        file.read_to_end(&mut bytes).map_err(PreviewError::Root)?;
     }
     Ok(bytes)
 }

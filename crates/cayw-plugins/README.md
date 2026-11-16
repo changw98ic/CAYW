@@ -39,7 +39,7 @@ plugin 工具仅暴露 `strongflow.describe` 与 `strongflow.ready`。`WorkflowS
 
 ## Observer
 
-默认 feature `observer` 提供 `Observer::channel`。宿主同步调用 `publish`，内部只用 `try_send`；慢读者队列满时丢弃并计数，读者关闭或失败不阻塞主执行。事件数量与单条脱敏后体积均有上限，过大或无效事件有独立计数。`ObservationReader` 单独消费或关闭通道。plugin 只提供 `observer.stats`，卸载后停止接受发布。
+默认 feature `observer` 提供 `Observer::channel`。宿主异步调用 `publish(...).await`；队列满时等待读取者，不丢弃正常事件。`capacity` 只决定内存缓冲条数，沿用默认值 128；单个事件不设置字节上限。容量接受 1 到 Tokio `Semaphore::MAX_PERMITS`，这是底层通道可表示的范围；不再另外设置一百万条的配置上限。发送和读取需要并发执行，不能先等待填满队列后的所有发送再开始读取。关闭读取者或卸载插件会唤醒等待中的发送者并返回 `DroppedClosed`；已入队的事件仍可读完。无效事件返回 `DroppedInvalid`。`observer.stats` 记录入队、关闭和无效事件数量，不再提供满队列或超大事件丢弃计数。
 
 每个字段必须标记 Public / Private / Thinking / Credential。默认仅公开 Public 字段，递归删除常见凭据和思考字段；Credential 永不输出。可以明确启用私有内容或思考，并增加脱敏 key。脱敏不能从任意自由文本推断秘密，宿主必须正确标记字段；事件名称和字段名称只允许短标识符。
 

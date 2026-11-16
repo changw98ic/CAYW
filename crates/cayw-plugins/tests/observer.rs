@@ -19,41 +19,66 @@ fn observation(n: u64) -> Observation {
     }
 }
 #[tokio::test]
-async fn slow_reader_drops_full_events_without_blocking_and_can_resume() {
+async fn slow_reader_receives_every_event_with_backpressure() {
     let (observer, mut reader) = Observer::channel(ObserverConfig {
         capacity: 2,
         ..Default::default()
     })
     .unwrap();
-    let slow = tokio::spawn(async move {
-        tokio::time::sleep(Duration::from_millis(100)).await;
-        [reader.recv().await.unwrap(), reader.recv().await.unwrap()]
-    });
-    for n in 0..1000 {
+    for n in 0..2 {
         assert_eq!(
-            observer.publish(observation(n)),
-            if n < 2 {
-                PublishOutcome::Queued
-            } else {
-                PublishOutcome::DroppedFull
-            }
+            observer.publish(observation(n)).await,
+            PublishOutcome::Queued
         );
     }
-    let events = slow.await.unwrap();
-    assert_eq!(events[0].fields["count"], 0);
-    assert_eq!(events[1].fields["count"], 1);
-    assert_eq!(observer.stats().dropped_full, 998);
-    assert_eq!(
-        observer.publish(observation(1001)),
-        PublishOutcome::DroppedClosed
+    let pending = observer.publish(observation(2));
+    tokio::pin!(pending);
+    assert!(futures::poll!(&mut pending).is_pending());
+    assert_eq!(reader.recv().await.unwrap().fields["count"], 0);
+    assert_eq!(pending.await, PublishOutcome::Queued);
+    let (produced, ()) = tokio::join!(
+        async {
+            for n in 3..1000 {
+                assert_eq!(
+                    observer.publish(observation(n)).await,
+                    PublishOutcome::Queued
+                );
+            }
+            observer.stats().queued
+        },
+        async {
+            for n in 1..1000 {
+                assert_eq!(reader.recv().await.unwrap().fields["count"], n);
+            }
+        }
     );
+    assert_eq!(produced, 1000);
+}
+#[tokio::test]
+async fn unloading_wakes_a_waiting_publisher_and_preserves_queued_events() {
+    let (observer, mut reader) = Observer::channel(ObserverConfig {
+        capacity: 1,
+        ..Default::default()
+    })
+    .unwrap();
+    assert_eq!(
+        observer.publish(observation(0)).await,
+        PublishOutcome::Queued
+    );
+    let pending = observer.publish(observation(1));
+    tokio::pin!(pending);
+    assert!(futures::poll!(&mut pending).is_pending());
+    observer.request_shutdown();
+    assert_eq!(pending.await, PublishOutcome::DroppedClosed);
+    assert_eq!(reader.recv().await.unwrap().fields["count"], 0);
+    assert_eq!(reader.recv().await, None);
 }
 #[tokio::test]
 async fn reader_failure_close_and_plugin_unload_do_not_block_producer() {
     let (observer, mut reader) = Observer::channel(ObserverConfig::default()).unwrap();
     reader.close();
     assert_eq!(
-        observer.publish(observation(0)),
+        observer.publish(observation(0)).await,
         PublishOutcome::DroppedClosed
     );
     let (observer, reader) = Observer::channel(ObserverConfig::default()).unwrap();
@@ -63,7 +88,7 @@ async fn reader_failure_close_and_plugin_unload_do_not_block_producer() {
     });
     assert_eq!(failed.await.unwrap(), Err("sink failed"));
     assert_eq!(
-        observer.publish(observation(0)),
+        observer.publish(observation(0)).await,
         PublishOutcome::DroppedClosed
     );
     let (observer, mut reader) = Observer::channel(ObserverConfig::default()).unwrap();
@@ -87,7 +112,7 @@ async fn reader_failure_close_and_plugin_unload_do_not_block_producer() {
     assert_eq!(stats["queued"], 0);
     registry.unload("observer").unwrap();
     assert_eq!(
-        observer.publish(observation(0)),
+        observer.publish(observation(0)).await,
         PublishOutcome::DroppedClosed
     );
     assert_eq!(
@@ -131,10 +156,12 @@ async fn default_redaction_removes_thinking_credentials_private_and_nested_keys(
         ),
     ]);
     assert_eq!(
-        observer.publish(Observation {
-            kind: "event".into(),
-            fields
-        }),
+        observer
+            .publish(Observation {
+                kind: "event".into(),
+                fields
+            })
+            .await,
         PublishOutcome::Queued
     );
     let event = reader.recv().await.unwrap();
@@ -146,43 +173,44 @@ async fn default_redaction_removes_thinking_credentials_private_and_nested_keys(
     assert_eq!(event.fields["data"]["nested"][0]["reasoning"], "[redacted]");
 }
 #[tokio::test]
-async fn configured_redaction_and_event_size_limits_apply_before_enqueue() {
+async fn configured_redaction_preserves_large_events() {
     let config = ObserverConfig {
         allow_private: true,
         allow_thinking: true,
         redact_keys: ["customer".into()].into(),
-        max_event_bytes: 256,
         ..Default::default()
     };
     let (observer, mut reader) = Observer::channel(config).unwrap();
     assert_eq!(
-        observer.publish(Observation {
-            kind: "event".into(),
-            fields: [
-                (
-                    "thinking".into(),
-                    ObservedField {
-                        value: json!("explicitly enabled"),
-                        sensitivity: Sensitivity::Thinking
-                    }
-                ),
-                (
-                    "customer".into(),
-                    ObservedField {
-                        value: json!("hidden"),
-                        sensitivity: Sensitivity::Private
-                    }
-                ),
-                (
-                    "password".into(),
-                    ObservedField {
-                        value: json!("hidden"),
-                        sensitivity: Sensitivity::Public
-                    }
-                ),
-            ]
-            .into()
-        }),
+        observer
+            .publish(Observation {
+                kind: "event".into(),
+                fields: [
+                    (
+                        "thinking".into(),
+                        ObservedField {
+                            value: json!("explicitly enabled"),
+                            sensitivity: Sensitivity::Thinking
+                        }
+                    ),
+                    (
+                        "customer".into(),
+                        ObservedField {
+                            value: json!("hidden"),
+                            sensitivity: Sensitivity::Private
+                        }
+                    ),
+                    (
+                        "password".into(),
+                        ObservedField {
+                            value: json!("hidden"),
+                            sensitivity: Sensitivity::Public
+                        }
+                    ),
+                ]
+                .into()
+            })
+            .await,
         PublishOutcome::Queued
     );
     let event = reader.recv().await.unwrap();
@@ -190,11 +218,38 @@ async fn configured_redaction_and_event_size_limits_apply_before_enqueue() {
     assert_eq!(event.fields["customer"], "[redacted]");
     assert_eq!(event.fields["password"], "[redacted]");
     let mut huge = observation(0);
-    huge.fields.get_mut("count").unwrap().value = json!("x".repeat(300));
-    assert_eq!(observer.publish(huge), PublishOutcome::DroppedOversize);
+    huge.fields.get_mut("count").unwrap().value = json!("x".repeat(1024 * 1024));
+    assert_eq!(observer.publish(huge).await, PublishOutcome::Queued);
+    assert_eq!(
+        reader.recv().await.unwrap().fields["count"],
+        "x".repeat(1024 * 1024)
+    );
     let mut invalid = observation(0);
     invalid.kind = "unsafe kind".into();
-    assert_eq!(observer.publish(invalid), PublishOutcome::DroppedInvalid);
-    assert_eq!(observer.stats().dropped_oversize, 1);
+    assert_eq!(
+        observer.publish(invalid).await,
+        PublishOutcome::DroppedInvalid
+    );
     assert_eq!(observer.stats().dropped_invalid, 1);
+}
+
+#[test]
+fn capacity_accepts_tokio_maximum_and_rejects_unrepresentable_values() {
+    let maximum = tokio::sync::Semaphore::MAX_PERMITS;
+    assert!(
+        Observer::channel(ObserverConfig {
+            capacity: maximum,
+            ..Default::default()
+        })
+        .is_ok()
+    );
+    for capacity in [0, maximum + 1] {
+        assert!(matches!(
+            Observer::channel(ObserverConfig {
+                capacity,
+                ..Default::default()
+            }),
+            Err(PluginError::InvalidArguments(_))
+        ));
+    }
 }

@@ -32,12 +32,6 @@ use crate::audit::{AuditOpenError, DurableAudit};
 use crate::companion::Companion;
 use crate::project::{ProjectError, Snapshot, SourceFile, SourceNode, component_html};
 
-const MAX_FILES: usize = 256;
-const MAX_TOTAL_BYTES: usize = 16 * 1024 * 1024;
-const MAX_FILE_BYTES: usize = 8 * 1024 * 1024;
-const MAX_NODES: usize = 20_000;
-const MAX_HISTORY: usize = 100;
-const MAX_HISTORY_BYTES: usize = 32 * 1024 * 1024;
 const MAX_PATH_BYTES: usize = 4096;
 const MAX_PATH_COMPONENTS: usize = 64;
 
@@ -298,7 +292,6 @@ impl FrameworkProject {
         if let Some(path) = &edit.path {
             candidate.insert(path.clone(), edit.source.clone());
         }
-        enforce_limits(&candidate)?;
         let next_revision = draft_revision(&candidate);
         let nodes =
             parse_documents(&self.companion, &self.framework, &candidate, &next_revision).await?;
@@ -705,18 +698,17 @@ impl PermissionGate for FrameworkGate {
     }
 }
 
-/// Limits for one explicit user operation. Every operation receives a fresh
-/// [`Host::task_host`] scope over the same held root handle, so these bounds
-/// apply per operation rather than accumulating until the editor restarts.
-/// A 16 MiB project needs at most 32 MiB of raw arguments and results for one
-/// full read or save; JSON escaping keeps the worst case well below this cap.
+/// Each explicit operation gets a fresh scope over the held workspace root.
+/// Source size and file count do not impose a lifetime budget on the editor.
 fn host_config(codeintel: Option<SymbolVersionBridge>) -> HostConfig {
     HostConfig {
-        max_argument_bytes: Some(32 * 1024 * 1024),
-        max_result_bytes: Some(32 * 1024 * 1024),
-        max_total_bytes: Some(128 * 1024 * 1024),
-        max_calls: Some(4096),
-        max_file_bytes: Some(MAX_FILE_BYTES),
+        max_argument_bytes: None,
+        max_result_bytes: None,
+        max_total_bytes: None,
+        max_calls: None,
+        // Host uses preview reads when this is None. Editors need a complete
+        // source and its digest; use the platform addressable size, not a quota.
+        max_file_bytes: Some(usize::MAX),
         max_list_entries: Some(1),
         call_timeout: Some(Duration::from_secs(60)),
         data: None,
@@ -766,24 +758,8 @@ async fn read_all<'a>(
     paths: impl Iterator<Item = &'a String>,
 ) -> Result<BTreeMap<String, FileState>, ProjectError> {
     let mut files = BTreeMap::new();
-    let mut total = 0usize;
     for path in paths {
         let (source, sha256) = read_source(host, path).await?;
-        if source.len() > MAX_FILE_BYTES {
-            return Err(ProjectError::new(
-                "source_too_large",
-                format!("{path} exceeds the {MAX_FILE_BYTES}-byte editor limit"),
-            ));
-        }
-        total = total
-            .checked_add(source.len())
-            .ok_or_else(|| ProjectError::new("source_too_large", "project source size overflow"))?;
-        if total > MAX_TOTAL_BYTES {
-            return Err(ProjectError::new(
-                "source_too_large",
-                format!("project source exceeds the {MAX_TOTAL_BYTES}-byte editor limit"),
-            ));
-        }
         files.insert(
             path.clone(),
             FileState {
@@ -949,12 +925,6 @@ fn parse_nodes(
         .get("nodes")
         .and_then(Value::as_array)
         .ok_or_else(|| ProjectError::new("invalid_response", "the companion returned no nodes"))?;
-    if array.len() > MAX_NODES {
-        return Err(ProjectError::new(
-            "too_many_nodes",
-            format!("mapped node count exceeds {MAX_NODES}"),
-        ));
-    }
     let mut mapped = Vec::with_capacity(array.len());
     for value in array {
         let node: MappedNode = serde_json::from_value(value.clone()).map_err(|_| {
@@ -1201,12 +1171,6 @@ impl EditResult {
         for patch in order.iter().rev() {
             result.replace_range(patch.start..patch.end, &patch.replacement);
         }
-        if result.len() > MAX_FILE_BYTES {
-            return Err(ProjectError::new(
-                "source_too_large",
-                format!("{affected} exceeds the {MAX_FILE_BYTES}-byte editor limit"),
-            ));
-        }
         Ok(Self {
             path: Some(affected),
             source: result,
@@ -1261,12 +1225,6 @@ fn parse_scan(value: &Value, page: &str) -> Result<Vec<String>, ProjectError> {
         .ok_or_else(|| {
             ProjectError::new("invalid_response", "the companion returned no source paths")
         })?;
-    if paths.len() > MAX_FILES {
-        return Err(ProjectError::new(
-            "invalid_project",
-            format!("the project has more than {MAX_FILES} source files"),
-        ));
-    }
     let mut unique = BTreeSet::new();
     for path in paths {
         let path = path.as_str().ok_or_else(|| {
@@ -1445,34 +1403,6 @@ fn files_json(files: &BTreeMap<String, String>) -> Value {
     )
 }
 
-fn enforce_limits(files: &BTreeMap<String, String>) -> Result<(), ProjectError> {
-    if files.len() > MAX_FILES {
-        return Err(ProjectError::new(
-            "source_too_large",
-            format!("the project has more than {MAX_FILES} source files"),
-        ));
-    }
-    let mut total = 0usize;
-    for (path, source) in files {
-        if source.len() > MAX_FILE_BYTES {
-            return Err(ProjectError::new(
-                "source_too_large",
-                format!("{path} exceeds the {MAX_FILE_BYTES}-byte editor limit"),
-            ));
-        }
-        total = total
-            .checked_add(source.len())
-            .ok_or_else(|| ProjectError::new("source_too_large", "project source size overflow"))?;
-    }
-    if total > MAX_TOTAL_BYTES {
-        return Err(ProjectError::new(
-            "source_too_large",
-            format!("project source exceeds the {MAX_TOTAL_BYTES}-byte editor limit"),
-        ));
-    }
-    Ok(())
-}
-
 fn draft_revision(files: &BTreeMap<String, String>) -> String {
     let mut hasher = Sha256::new();
     for (path, source) in files {
@@ -1502,17 +1432,6 @@ fn push_history(history: &mut Vec<HistoryEntry>, entry: HistoryEntry) {
         return;
     }
     history.push(entry);
-    while history.len() > MAX_HISTORY {
-        history.remove(0);
-    }
-    let mut bytes: usize = history
-        .iter()
-        .map(|entry| entry.before.len() + entry.after.len())
-        .sum();
-    while bytes > MAX_HISTORY_BYTES && history.len() > 1 {
-        let removed = history.remove(0);
-        bytes = bytes.saturating_sub(removed.before.len() + removed.after.len());
-    }
 }
 
 fn audit_error(error: AuditOpenError) -> ProjectError {
@@ -1699,20 +1618,21 @@ mod tests {
     }
 
     #[test]
-    fn history_is_bounded_and_moves_entries_between_stacks() {
+    fn history_keeps_all_entries() {
         let mut undo = Vec::new();
-        for index in 0..(MAX_HISTORY + 5) {
+        for index in 0..105 {
             push_history(
                 &mut undo,
                 HistoryEntry {
                     path: "a.tsx".into(),
-                    before: format!("{index}"),
+                    before: format!("{index}{}", "x".repeat(330 * 1024)),
                     after: format!("{}", index + 1),
                 },
             );
         }
-        assert_eq!(undo.len(), MAX_HISTORY);
-        assert_eq!(undo[0].before, "5");
+        assert_eq!(undo.len(), 105);
+        assert!(undo[0].before.starts_with("0x"));
+        assert!(undo.iter().map(|entry| entry.before.len()).sum::<usize>() > 32 * 1024 * 1024);
     }
 
     #[test]

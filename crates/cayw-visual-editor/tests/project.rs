@@ -1080,7 +1080,7 @@ async fn an_external_change_is_reported_and_never_overwritten() {
 }
 
 #[tokio::test]
-async fn reload_keeps_the_old_draft_when_the_new_source_cannot_be_mapped() {
+async fn reload_keeps_the_old_draft_when_the_new_source_is_not_utf8() {
     let fixture = Fixture::new(BASE_PAGE);
     let project = fixture.open().await;
     let before = project.snapshot().await.expect("snapshot");
@@ -1091,12 +1091,12 @@ async fn reload_keeps_the_old_draft_when_the_new_source_cannot_be_mapped() {
         .expect("text edit");
     let draft = project.snapshot().await.expect("draft snapshot");
 
-    fixture.write(&"<div></div>".repeat(20_001));
+    fs::write(fixture.page_path(), [0xff]).unwrap();
     let error = project
         .reload()
         .await
-        .expect_err("too many elements must fail mapping");
-    assert_eq!(code(&error), "page_too_complex");
+        .expect_err("invalid UTF-8 must fail reading");
+    assert_eq!(code(&error), "read_failed");
 
     let after = project
         .snapshot()
@@ -1473,4 +1473,16 @@ async fn the_real_site_page_maps_and_edits_without_touching_scripts() {
     assert!(written.contains("padding-top: 1px"));
     assert!(written.contains("data-cayw-component=\"card\""));
     assert!(written.starts_with("<!DOCTYPE html>"));
+}
+
+#[tokio::test]
+async fn more_than_20000_nodes_can_be_opened_and_reloaded() {
+    let fixture = Fixture::new(BASE_PAGE);
+    let project = fixture.open().await;
+    fixture.write(&"<div></div>".repeat(20_001));
+    let snapshot = project.reload().await.unwrap();
+    assert_eq!(snapshot.nodes.len(), 20_001);
+    drop(project);
+    let reopened = fixture.open().await;
+    assert_eq!(reopened.snapshot().await.unwrap().nodes.len(), 20_001);
 }

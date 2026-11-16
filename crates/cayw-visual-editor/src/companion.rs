@@ -25,9 +25,6 @@ use tokio::{
     sync::Mutex,
 };
 
-/// One request or response line may not exceed this many bytes.
-pub(crate) const MAX_LINE_BYTES: usize = 32 * 1024 * 1024;
-
 const READ_CHUNK_BYTES: usize = 64 * 1024;
 const LOG_TAIL_BYTES: u64 = 2 * 1024;
 const NORMAL_CALL_TIMEOUT: Duration = Duration::from_secs(30);
@@ -218,12 +215,6 @@ impl Companion {
                 format!("could not encode the companion request: {error}"),
             )
         })?;
-        if line.len() > MAX_LINE_BYTES {
-            return Err(known_error(
-                "companion_request_too_large",
-                format!("the companion request exceeds the {MAX_LINE_BYTES}-byte line limit"),
-            ));
-        }
         line.push(b'\n');
         match tokio::time::timeout(timeout, self.exchange(id, &line)).await {
             Ok(Ok(result)) => Ok(result),
@@ -288,8 +279,7 @@ impl Companion {
         self.parse_response(id, &response)
     }
 
-    /// Reads one newline-terminated response without ever buffering more than
-    /// the protocol limit. EOF is a transport failure, not an empty response.
+    /// Reads one newline-terminated response. EOF is a transport failure.
     async fn read_line(&self) -> Result<Vec<u8>, ProjectError> {
         let mut stdout = self.stdout.lock().await;
         let Some(stdout) = stdout.as_mut() else {
@@ -299,28 +289,19 @@ impl Companion {
             ));
         };
         let mut pending = self.pending.lock().await;
+        let mut searched = 0;
         loop {
-            if let Some(end) = pending.iter().position(|byte| *byte == b'\n') {
-                if end > MAX_LINE_BYTES {
-                    return Err(known_error(
-                        "companion_protocol",
-                        format!(
-                            "the companion response exceeds the {MAX_LINE_BYTES}-byte line limit"
-                        ),
-                    ));
-                }
+            if let Some(end) = pending[searched..]
+                .iter()
+                .position(|byte| *byte == b'\n')
+                .map(|offset| offset + searched)
+            {
                 let mut line: Vec<u8> = pending.drain(..=end).collect();
                 line.pop();
                 if line.last() == Some(&b'\r') {
                     line.pop();
                 }
                 return Ok(line);
-            }
-            if pending.len() > MAX_LINE_BYTES {
-                return Err(known_error(
-                    "companion_protocol",
-                    format!("the companion response exceeds the {MAX_LINE_BYTES}-byte line limit"),
-                ));
             }
             let mut chunk = [0_u8; READ_CHUNK_BYTES];
             let read = stdout.read(&mut chunk).await.map_err(|failure| {
@@ -339,6 +320,7 @@ impl Companion {
                     ),
                 ));
             }
+            searched = pending.len();
             pending.extend_from_slice(&chunk[..read]);
         }
     }
@@ -612,51 +594,23 @@ lines.on('line', (line) => {
     }
 
     #[tokio::test]
-    async fn oversized_requests_are_rejected_without_killing_the_process() {
+    async fn large_requests_and_responses_keep_the_companion_available() {
         let Some((companion, _directory)) = start(ECHO).await else {
             return;
         };
-        let oversized = "x".repeat(MAX_LINE_BYTES + 1);
-        let failure = companion
-            .call("echo", json!({ "value": oversized }))
+        let content = "x".repeat(34 * 1024 * 1024);
+        let reply = companion
+            .call("echo", json!({"value": content}))
             .await
-            .expect_err("oversized request");
-        assert_eq!(failure.code, "companion_request_too_large");
-        assert!(!failure.outcome_unknown);
+            .unwrap();
+        assert_eq!(
+            reply["params"]["value"].as_str().map(str::len),
+            Some(content.len())
+        );
+        assert!(reply["params"]["value"].as_str() == Some(content.as_str()));
         assert!(companion.available());
-        companion
-            .call("echo", json!({}))
-            .await
-            .expect("still usable");
+        companion.call("echo", json!({})).await.unwrap();
         companion.shutdown().await;
-    }
-
-    #[tokio::test]
-    async fn oversized_responses_mark_the_companion_unavailable() {
-        let script = r#"
-import { createInterface } from 'node:readline';
-const lines = createInterface({ input: process.stdin, crlfDelay: Infinity });
-lines.on('line', (line) => {
-  const request = JSON.parse(line);
-  const payload = 'x'.repeat(34 * 1024 * 1024);
-  process.stdout.write(JSON.stringify({ id: request.id, ok: true, result: payload }) + '\n');
-});
-"#;
-        let Some((companion, _directory)) = start(script).await else {
-            return;
-        };
-        let failure = companion
-            .call("echo", json!({}))
-            .await
-            .expect_err("oversized response");
-        assert_eq!(failure.code, "companion_protocol");
-        assert!(!failure.outcome_unknown);
-        assert!(!companion.available());
-        let failure = companion
-            .call("echo", json!({}))
-            .await
-            .expect_err("unavailable");
-        assert_eq!(failure.code, "companion_unavailable");
     }
 
     #[tokio::test]

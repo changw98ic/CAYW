@@ -56,17 +56,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let saved_workflows = binding.checkpoint_strongflow(&registry)?;
     // Deliberately no acceptance evidence: this example has not executed a build.
     let (observer, mut reader) = Observer::channel(ObserverConfig::default())?;
-    observer.publish(Observation {
-        kind: "demo.started".into(),
-        fields: [(
-            "session".into(),
-            ObservedField {
-                value: json!(binding.session_id()),
-                sensitivity: Sensitivity::Private,
-            },
-        )]
-        .into(),
-    });
+    observer
+        .publish(Observation {
+            kind: "demo.started".into(),
+            fields: [(
+                "session".into(),
+                ObservedField {
+                    value: json!(binding.session_id()),
+                    sensitivity: Sensitivity::Private,
+                },
+            )]
+            .into(),
+        })
+        .await;
     println!(
         "observation: {}",
         serde_json::to_string(&reader.recv().await)?

@@ -1,5 +1,5 @@
-//! Lossy, bounded observation. A slow or disconnected reader never blocks the
-//! caller. Hosts classify fields; credentials and sensitive key names are always
+//! Bounded observation delivery with backpressure. A slow reader makes publish
+//! wait; closing or unloading wakes pending publishers. Credentials are always
 //! redacted. Observer events do not grant permission or feed an executor.
 
 use crate::*;
@@ -38,7 +38,6 @@ pub struct RedactedObservation {
 #[derive(Debug, Clone)]
 pub struct ObserverConfig {
     pub capacity: usize,
-    pub max_event_bytes: usize,
     pub allow_private: bool,
     pub allow_thinking: bool,
     /// Additional case-insensitive exact field names, at any depth.
@@ -49,7 +48,6 @@ impl Default for ObserverConfig {
     fn default() -> Self {
         Self {
             capacity: 128,
-            max_event_bytes: 16 * 1024,
             allow_private: false,
             allow_thinking: false,
             redact_keys: BTreeSet::new(),
@@ -60,27 +58,21 @@ impl Default for ObserverConfig {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PublishOutcome {
     Queued,
-    DroppedFull,
     DroppedClosed,
-    DroppedOversize,
     DroppedInvalid,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ObserverStats {
     pub queued: u64,
-    pub dropped_full: u64,
     pub dropped_closed: u64,
-    pub dropped_oversize: u64,
     pub dropped_invalid: u64,
 }
 
 #[derive(Default)]
 struct Counters {
     queued: AtomicU64,
-    full: AtomicU64,
     closed: AtomicU64,
-    oversize: AtomicU64,
     invalid: AtomicU64,
 }
 
@@ -123,9 +115,10 @@ impl ObservationReader {
 
 impl Observer {
     pub fn channel(config: ObserverConfig) -> Result<(Self, ObservationReader), PluginError> {
-        if config.capacity == 0 || config.capacity > 1_000_000 || config.max_event_bytes == 0 {
+        // Tokio semaphore permits are the channel implementation boundary.
+        if config.capacity == 0 || config.capacity > tokio::sync::Semaphore::MAX_PERMITS {
             return Err(PluginError::InvalidArguments(
-                "invalid observer capacity or event limit".into(),
+                "observer capacity must be positive and fit Tokio semaphore permits".into(),
             ));
         }
         let (sender, receiver) = mpsc::channel(config.capacity);
@@ -155,7 +148,7 @@ impl Observer {
         ))
     }
 
-    pub fn publish(&self, observation: Observation) -> PublishOutcome {
+    pub async fn publish(&self, observation: Observation) -> PublishOutcome {
         if self.stopped.is_cancelled() || self.sender.is_closed() {
             self.counters.closed.fetch_add(1, Ordering::Relaxed);
             return PublishOutcome::DroppedClosed;
@@ -186,22 +179,18 @@ impl Observer {
             kind: observation.kind,
             fields,
         };
-        if serde_json::to_vec(&event)
-            .map_or(true, |bytes| bytes.len() > self.config.max_event_bytes)
-        {
-            self.counters.oversize.fetch_add(1, Ordering::Relaxed);
-            return PublishOutcome::DroppedOversize;
-        }
-        match self.sender.try_send(event) {
-            Ok(()) => {
+        let permit = tokio::select! {
+            biased;
+            _ = self.stopped.cancelled() => None,
+            permit = self.sender.reserve() => permit.ok(),
+        };
+        match permit {
+            Some(permit) => {
+                permit.send(event);
                 self.counters.queued.fetch_add(1, Ordering::Relaxed);
                 PublishOutcome::Queued
             }
-            Err(mpsc::error::TrySendError::Full(_)) => {
-                self.counters.full.fetch_add(1, Ordering::Relaxed);
-                PublishOutcome::DroppedFull
-            }
-            Err(mpsc::error::TrySendError::Closed(_)) => {
+            None => {
                 self.counters.closed.fetch_add(1, Ordering::Relaxed);
                 PublishOutcome::DroppedClosed
             }
@@ -211,9 +200,7 @@ impl Observer {
     pub fn stats(&self) -> ObserverStats {
         ObserverStats {
             queued: self.counters.queued.load(Ordering::Relaxed),
-            dropped_full: self.counters.full.load(Ordering::Relaxed),
             dropped_closed: self.counters.closed.load(Ordering::Relaxed),
-            dropped_oversize: self.counters.oversize.load(Ordering::Relaxed),
             dropped_invalid: self.counters.invalid.load(Ordering::Relaxed),
         }
     }

@@ -24,7 +24,6 @@ pub const AUDIT_FILE: &str = "calls.jsonl";
 /// Durable marker written when any outcome is unknown.
 pub const UNKNOWN_MARKER: &str = "unknown.json";
 
-const MAX_AUDIT_BYTES: u64 = 64 * 1024 * 1024;
 const REDACT_ABOVE: usize = 512;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -321,12 +320,6 @@ impl AuditSink for AuditStore {
 /// When scanning returns an unresolved reason or read error, the caller in
 /// [`AuditStore::open`] writes the durable unknown marker.
 fn scan(path: &Path) -> std::io::Result<Option<String>> {
-    let metadata = fs::metadata(path)?;
-    if metadata.len() > MAX_AUDIT_BYTES {
-        return Ok(Some(
-            "audit file exceeds the bounded size; reconcile it before editing".into(),
-        ));
-    }
     let reader = BufReader::new(File::open(path)?);
     let mut terminal: BTreeMap<String, bool> = BTreeMap::new();
     for (line_number, line) in reader.lines().enumerate() {

@@ -55,10 +55,6 @@ pub const COMPONENT_NAMES: &[&str] = &[
     "cta",
 ];
 
-const MAX_PAGE_BYTES: usize = 8 * 1024 * 1024;
-const MAX_NODES: usize = 20_000;
-const MAX_HISTORY: usize = 100;
-const MAX_HISTORY_BYTES: usize = 32 * 1024 * 1024;
 const MAX_TEXT_BYTES: usize = 256 * 1024;
 const MAX_ATTRIBUTE_VALUE_BYTES: usize = 64 * 1024;
 
@@ -356,12 +352,6 @@ impl Project {
                 )
             })?;
         let (source, sha256) = read_page(&host, &page).await?;
-        if source.len() > MAX_PAGE_BYTES {
-            return Err(ProjectError::new(
-                "page_too_large",
-                format!("page exceeds the {MAX_PAGE_BYTES}-byte editor limit"),
-            ));
-        }
         parse_document(&source)?;
         Ok(Self {
             page,
@@ -678,11 +668,13 @@ impl PermissionGate for PageGate {
 
 fn host_config(codeintel: Option<SymbolVersionBridge>) -> HostConfig {
     HostConfig {
-        max_argument_bytes: Some(32 * 1024 * 1024),
-        max_result_bytes: Some(32 * 1024 * 1024),
-        max_total_bytes: Some(128 * 1024 * 1024),
-        max_calls: Some(4096),
-        max_file_bytes: Some(MAX_PAGE_BYTES),
+        max_argument_bytes: None,
+        max_result_bytes: None,
+        max_total_bytes: None,
+        max_calls: None,
+        // Host uses preview reads when this is None. Editors need a complete
+        // source and its digest; use the platform addressable size, not a quota.
+        max_file_bytes: Some(usize::MAX),
         max_list_entries: Some(1),
         call_timeout: Some(Duration::from_secs(60)),
         data: None,
@@ -801,13 +793,6 @@ fn push_history(history: &mut Vec<String>, value: &str) {
         return;
     }
     history.push(value.to_owned());
-    while history.len() > MAX_HISTORY {
-        history.remove(0);
-    }
-    let mut bytes: usize = history.iter().map(String::len).sum();
-    while bytes > MAX_HISTORY_BYTES && history.len() > 1 {
-        bytes = bytes.saturating_sub(history.remove(0).len());
-    }
 }
 
 fn normalize_page(page: &str) -> Result<String, ProjectError> {
@@ -1021,12 +1006,6 @@ fn parse_document(source: &str) -> Result<Document, ProjectError> {
         };
         match token {
             Token::StartTag(tag) => {
-                if nodes.len() >= MAX_NODES {
-                    return Err(ProjectError::new(
-                        "page_too_complex",
-                        format!("page exceeds the {MAX_NODES}-element editor limit"),
-                    ));
-                }
                 let name = String::from_utf8_lossy(&tag.name).to_ascii_lowercase();
                 let span = tag.span.start..tag.span.end;
                 let span_ok = span.start < span.end
