@@ -25,6 +25,7 @@ struct Runtime {
     error: Option<String>,
     listener_error: Option<String>,
     cancel: Option<CancellationToken>,
+    stop_error: Option<String>,
     steering: VecDeque<Message>,
     follow_up: VecDeque<Message>,
     steering_mode: QueueMode,
@@ -92,6 +93,16 @@ impl AgentControl {
     }
     pub fn abort(&self) {
         if let Some(cancel) = &lock(&self.shared.runtime).cancel {
+            cancel.cancel();
+        }
+    }
+    /// Stop the current run for a host error, preserving its cause separately
+    /// from caller cancellation. Tool side-effect outcomes remain unchanged.
+    /// Calls while idle have no effect; the cause belongs only to this run.
+    pub fn stop_with_error(&self, error: impl Into<String>) {
+        let mut state = lock(&self.shared.runtime);
+        if let Some(cancel) = state.cancel.clone() {
+            state.stop_error.get_or_insert_with(|| error.into());
             cancel.cancel();
         }
     }
@@ -178,6 +189,7 @@ impl Drop for RunGuard {
         }
         state.running = false;
         state.cancel = None;
+        state.stop_error = None;
         state.streaming = None;
         state.pending.clear();
         drop(state);
@@ -206,6 +218,7 @@ impl Agent {
                     error: None,
                     listener_error: None,
                     cancel: None,
+                    stop_error: None,
                     steering: VecDeque::new(),
                     follow_up: VecDeque::new(),
                     steering_mode: QueueMode::OneAtATime,
@@ -384,6 +397,7 @@ impl Agent {
             state.error = None;
             state.listener_error = None;
             state.cancel = Some(cancel.clone());
+            state.stop_error = None;
             (
                 state.context.clone(),
                 pending,
@@ -609,10 +623,10 @@ impl Agent {
             let assistant = match prepared {
                 Ok(()) => self.stream_assistant(&context, &cancel).await,
                 Err(error) => {
-                    let reason = if cancel.is_cancelled() {
-                        StopReason::Aborted
+                    let (reason, error) = if cancel.is_cancelled() {
+                        self.stop_failure(&error)
                     } else {
-                        StopReason::Error
+                        (StopReason::Error, error)
                     };
                     let message = AssistantMessage::new(&context.model).failure(reason, error);
                     self.emit(
@@ -707,11 +721,6 @@ impl Agent {
                 };
             }
             if cancel.is_cancelled() || decision.is_err() || unknown_outcome {
-                let reason = if cancel.is_cancelled() {
-                    StopReason::Aborted
-                } else {
-                    StopReason::Error
-                };
                 let error = decision.err().unwrap_or_else(|| {
                     if unknown_outcome {
                         "Tool outcome is unknown; the interrupted turn was stopped".into()
@@ -719,6 +728,11 @@ impl Agent {
                         "Agent run cancelled".into()
                     }
                 });
+                let (reason, error) = if cancel.is_cancelled() {
+                    self.stop_failure(&error)
+                } else {
+                    (StopReason::Error, error)
+                };
                 let message = self
                     .error_turn(&context, reason, &error, &cancel, &mut new_messages)
                     .await;
@@ -797,10 +811,10 @@ impl Agent {
                     pending.extend(update.messages, None);
                 }
                 Err(error) => {
-                    let reason = if cancel.is_cancelled() {
-                        StopReason::Aborted
+                    let (reason, error) = if cancel.is_cancelled() {
+                        self.stop_failure(&error)
                     } else {
-                        StopReason::Error
+                        (StopReason::Error, error)
                     };
                     let message = self
                         .error_turn(&context, reason, &error, &cancel, &mut new_messages)
@@ -849,6 +863,13 @@ impl Agent {
         message
     }
 
+    fn stop_failure(&self, cancellation: &str) -> (StopReason, String) {
+        match &lock(&self.shared.runtime).stop_error {
+            Some(error) => (StopReason::Error, error.clone()),
+            None => (StopReason::Aborted, cancellation.to_owned()),
+        }
+    }
+
     async fn stream_assistant(
         &self,
         context: &AgentContext,
@@ -882,7 +903,10 @@ impl Agent {
         loop {
             let next = tokio::select! {
                 biased;
-                _ = cancel.cancelled() => return with_duration(partial.failure(StopReason::Aborted, "Model request cancelled"), started),
+                _ = cancel.cancelled() => {
+                    let (reason, error) = self.stop_failure("Model request cancelled");
+                    return with_duration(partial.failure(reason, error), started);
+                },
                 next = AssertUnwindSafe(futures::StreamExt::next(&mut stream)).catch_unwind() => next,
             };
             let event = match next {

@@ -85,6 +85,11 @@ def run(root):
         effect = suite.workspace("lifecycle") / "effect.txt"
         assert effect.read_text() == "effect\n"
         before = suite.events(session, "unknown-before-confirmation")
+        terminal_message = [r["event"]["event"]["message"] for r in before
+                            if r["event"]["type"] == "agent" and r["event"]["event"]["type"] == "message_end"
+                            and r["event"]["event"]["message"]["role"] == "assistant"][-1]
+        assert terminal_message["stop_reason"] == "error", terminal_message
+        assert "outcome is unknown" in terminal_message["error_message"], terminal_message
         original = next(r["event"]["call"] for r in before if r["event"]["type"] == "capability_settled" and r["event"]["call"]["name"] == "test.run")
         assert original["outcome"]["type"] == "outcome_unknown", original
         tasks = suite.rpc("session.tasks", {"session_id": session})

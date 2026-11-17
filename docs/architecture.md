@@ -148,6 +148,8 @@ Agent 的内存历史由 Runtime 与持久记录衔接。上下文包含消息�
 
 早期有限 Magpie 记录仅证明原始 Agent 循环的相应场景；当前持久化模型全链、协议兼容矩阵与模型真实任务成本分别按 [#6](https://github.com/changw98ic/CAYW/issues/6)、[#10](https://github.com/changw98ic/CAYW/issues/10) 验收。参见[原始内核说明](rust-pi-core.md)、[Provider 代码](../crates/cayw-ai/src/providers/openai.rs)和[适配器边界](../crates/cayw-providers/README.md)。
 
+宿主通过 `AgentControl::stop_with_error` 停止当前 Agent 时，具体原因以 `error` 终态返回；主动取消仍使用 `abort`，返回 `aborted`。停止原因只属于当前运行，空闲时设置不影响未来运行。Runtime 在未知副作用触发停止时传递明确的未知结果说明；子调用、任务和原始记录中的未知状态仍独立保留。该 Rust 控制接口不暴露为模型工具或新的 IPC 方法，Core、IPC 和检查器协议版本不变。
+
 ## 主 session、上下文管理与恢复点
 
 本节说明组件职责和语义；完整设计见[记忆、上下文与主动工作设计](memory-context-work.md)。

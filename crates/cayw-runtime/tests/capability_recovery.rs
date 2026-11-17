@@ -244,6 +244,23 @@ async fn real_host_unknown_terminal_pairs_in_core_and_allows_follow_up_after_reo
     assert_eq!(result.state, SessionState::Idle);
     assert_eq!(service.0.load(Ordering::SeqCst), 1);
     assert_eq!(provider.calls.load(Ordering::SeqCst), 1);
+    let terminal = result
+        .messages
+        .iter()
+        .rev()
+        .find_map(|message| match message {
+            Message::Assistant(message) => Some(message),
+            _ => None,
+        })
+        .unwrap();
+    assert_eq!(terminal.stop_reason, cayw_ai::StopReason::Error);
+    assert!(
+        terminal
+            .error_message
+            .as_deref()
+            .is_some_and(|reason| reason.contains("outcome is unknown")),
+        "{terminal:?}"
+    );
     let events = rt.events(&id, 0, 1000).unwrap();
     let start = events
         .iter()

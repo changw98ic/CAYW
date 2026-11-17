@@ -350,12 +350,21 @@ class Suite:
         count = lambda rows: sum(r["event"]["type"] == "host" and r["event"]["kind"] == "model_request"
                                   and r["event"]["data"]["record"] == "started" for r in rows)
         assert count(before) == count(after), "restart/recover replayed a model request"
-        self.prompt(session, "读取已有 checkpoint.txt。不要重做已经完成的写入。把你实际读到的完整内容写到 recovered.txt。", "recovery")
+        script = "local src=cayw.call('fs.read',{path='checkpoint.txt'}); cayw.call('fs.write',{path='recovered.txt',content=src.content}); local verified=cayw.call('fs.read',{path='recovered.txt'}); return {content=verified.content,match=(src.content==verified.content)}"
+        self.prompt(session, "这是取消恢复后的新任务。在同一个 execute_code exec 中执行下面的完整脚本，复用局部变量中的读取结果，不要另起 cell 预读 checkpoint.txt，也不要重做原写入。完成后按实际输出回复。脚本：" + script, "recovery")
         assert checkpoint.read_text() == "one-effect"
         assert (self.workspace("lifecycle") / "recovered.txt").read_text() == checkpoint.read_text()
         final_events = self.events(session, "recovery-final")
         assert sum(r["event"]["type"] == "capability_settled" and r["event"]["call"]["name"] == "fs.write"
                    and r["event"]["call"]["arguments"]["path"] == "checkpoint.txt" for r in final_events) == 1
+        for capability, path in [("fs.read", "checkpoint.txt"), ("fs.write", "recovered.txt"), ("fs.read", "recovered.txt")]:
+            assert sum(r["event"]["type"] == "capability_started" and r["event"]["call"]["name"] == capability
+                       and r["event"]["call"]["arguments"]["path"] == path for r in final_events) == 1
+        copied = [r["event"]["call"] for r in final_events if r["event"]["type"] == "capability_started"
+                  and r["event"]["call"]["name"] in ["fs.read", "fs.write"]
+                  and (r["event"]["call"]["name"], r["event"]["call"]["arguments"]["path"])
+                  in [("fs.read", "checkpoint.txt"), ("fs.write", "recovered.txt"), ("fs.read", "recovered.txt")]]
+        assert len({call["key"]["execution_id"] for call in copied}) == 1, "copy and verification must share the same cell"
         save(self.root / "cancel-result.json", {"passed": True, "session_id": session, "cancelled_task": terminal,
              "replayed_requests_on_recover": 0, "effect_lines": 1})
 

@@ -1396,6 +1396,7 @@ async fn run_worker(
 
 const ROUTE_REQUIRED: &str = "This main-session turn cannot finish yet. Call work.list and read the existing WorkItems. If one is the same task, call work.dispatch for that work_id and do not create another. If none is the same task, call work.create and then work.dispatch for the new work_id. Or call work.get or work.tasks for one WorkItem and tell the user that status; that does not dispatch. A text answer is not accepted until work.list and a dispatch have both succeeded, or until one WorkItem status has been read.";
 const RELAY: &str = "The main session only passes messages. The child session does the work and the review. Do not read or write files, run checks, or start a subagent. After you dispatch, tell the user and stop. When a task status update arrives, tell the user that status and stop. Read a WorkItem status only when the user is talking to you, or when this turn is the status update.";
+const UNKNOWN_STOP: &str = "Tool outcome is unknown; the interrupted turn was stopped. Reconcile the original effect before replaying it.";
 
 struct RequestFence {
     context: Arc<RunContext>,
@@ -1660,6 +1661,17 @@ async fn execute_with_cells(
                 _ => {}
             }
             ctx.inner.changed.notify_waiters();
+            if ctx.unknown.load(Ordering::Acquire)
+                && matches!(
+                    event,
+                    AgentEvent::ToolExecutionEnd { .. } | AgentEvent::TurnEnd { .. }
+                )
+            {
+                lock(&ctx.inner.session_controls)
+                    .get(&ctx.lease.session_id)
+                    .expect("running Agent control is registered")
+                    .stop_with_error(UNKNOWN_STOP);
+            }
             if matches!(event, AgentEvent::TurnStart) {
                 ctx.turns.fetch_add(1, Ordering::AcqRel);
             }
@@ -1779,7 +1791,11 @@ async fn execute_with_cells(
         || async { context.check(&context.cancel) },
         || {
             context.cells_stopping.store(true, Ordering::Release);
-            agent.control().abort();
+            if context.unknown.load(Ordering::Acquire) {
+                agent.control().stop_with_error(UNKNOWN_STOP);
+            } else {
+                agent.control().abort();
+            }
         },
     )
     .await;

@@ -859,7 +859,13 @@ async fn empty_thinking_fragments_do_not_abort_a_signed_response() {
     wire.push(block_stop(1));
     wire.extend(finish("end_turn"));
     let (base, rx, task) = server_with_chunk("thinking-fragment-limit", wire, 8192).await;
-    let events = collect(&AnthropicProvider::new(base, KEY).unwrap(), request()).await;
+    // This finite loopback response tests fragment counts, not processing speed.
+    // Private thinking deltas do not emit public events for a progress watchdog.
+    let events = AnthropicProvider::new(base, KEY)
+        .unwrap()
+        .stream(request(), CancellationToken::new())
+        .collect::<Vec<_>>()
+        .await;
     save("thinking-fragment-limit", "events.json", &events);
     assert_eq!(terminal(&events).stop_reason, StopReason::Stop);
     rx.await.unwrap();

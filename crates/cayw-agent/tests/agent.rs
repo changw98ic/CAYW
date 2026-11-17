@@ -416,6 +416,54 @@ async fn duplicate_tool_ids_are_rejected_before_execution() {
 }
 
 #[tokio::test]
+async fn host_stop_preserves_its_error_and_does_not_leak_into_the_next_run() {
+    let started = Arc::new(Notify::new());
+    let token = Arc::new(Mutex::new(None));
+    let agent = Agent::new(
+        Arc::new(Stall {
+            started: started.clone(),
+            token: token.clone(),
+        }),
+        model(),
+    );
+    agent
+        .control()
+        .stop_with_error("idle call must not stop a future run");
+    for host_error in [true, false] {
+        let worker = agent.clone();
+        let task =
+            tokio::spawn(async move { worker.prompt(Message::user("start")).await.unwrap() });
+        started.notified().await;
+        if host_error {
+            agent
+                .control()
+                .stop_with_error("host stopped after an unknown tool result");
+            agent
+                .control()
+                .stop_with_error("later cleanup must not replace the cause");
+        } else {
+            agent.control().abort();
+        }
+        let result = task.await.unwrap();
+        if host_error {
+            assert_eq!(result.last_message.stop_reason, StopReason::Error);
+            assert_eq!(
+                result.last_message.error_message.as_deref(),
+                Some("host stopped after an unknown tool result")
+            );
+        } else {
+            assert_eq!(result.last_message.stop_reason, StopReason::Aborted);
+            assert_eq!(
+                result.last_message.error_message.as_deref(),
+                Some("Model request cancelled")
+            );
+        }
+        assert!(token.lock().unwrap().as_ref().unwrap().is_cancelled());
+        assert!(!agent.snapshot().is_running);
+    }
+}
+
+#[tokio::test]
 async fn tool_calls_with_stop_or_reused_ids_are_never_executed() {
     let mut stopped = tool_response();
     stopped.stop_reason = StopReason::Stop;
