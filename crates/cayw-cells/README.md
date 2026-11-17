@@ -38,11 +38,20 @@ is supplied by the host; it is not a model-controlled budget.
 
 ## `execute_code` tool
 
-`exec` takes `action`, `script`, optional `yield_time_ms` (default `0`) and
+`exec` takes `action`, `script`, optional `yield_time_ms` and
 optional `max_output_tokens`. `wait` additionally requires `cell_id` and
 `cursor`. The schema keeps the minimum `max_output_tokens >= 1024`; it has no
 artificial `maxLength` for the script and no upper `maximum` for
 `yield_time_ms` or `max_output_tokens`.
+
+The tool's default wait is 1000 ms for both actions, reduced only by a host's
+configured `max_yield_time`. This lets short operations return their output in
+the first call: the 2026-11-16 live trace measured 44–468 ms per short cell.
+Output, explicit yield, permission waiting or completion can return earlier.
+This is a response wait, not an execution timeout: reaching it leaves the cell
+running for a later `wait`. Explicit `yield_time_ms: 0` still returns immediately.
+The Rust manager's explicitly supplied `ExecRequest`/`WaitRequest` values are
+unchanged.
 
 When the model omits `max_output_tokens`, the page budget is the canonical
 131072-byte slice, reduced only by a configured `max_output_tokens`. An

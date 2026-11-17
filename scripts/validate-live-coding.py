@@ -22,6 +22,19 @@ def save(path, value):
     path.write_text(json.dumps(value, ensure_ascii=False, indent=2) + "\n")
 
 
+def execution_kind(prompt_log):
+    if prompt_log is None:
+        return "not_run"
+    with prompt_log.open() as lines:
+        for line in lines:
+            row = json.loads(line)
+            event = row.get("event", {}).get("event", {})
+            if (event.get("type") == "host" and event["kind"] == "model_request"
+                    and event["data"]["record"] == "started"):
+                return "live_model"
+    return "not_run"
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--runtime", type=Path, required=True)
@@ -42,11 +55,14 @@ def main():
     environment.update(HOME=str(private / "home"), CAYW_HOME=str(private / "cayw"),
                        CAYW_MAIN_SESSION=str(private / "main-session"), NO_COLOR="1")
     sequence = 0
+    prompt_log = None
 
     def command(program, arguments, name):
-        nonlocal sequence
+        nonlocal sequence, prompt_log
         sequence += 1
         prefix = evidence / (f"{sequence:03d}-" + name)
+        if name == "prompt":
+            prompt_log = prefix.with_suffix(".stdout.log")
         with prefix.with_suffix(".stdout.log").open("w") as out, prefix.with_suffix(".stderr.log").open("w") as err:
             result = subprocess.run([str(program), *arguments], cwd=workspace,
                                     env=environment, stdout=out, stderr=err)
@@ -116,7 +132,7 @@ def main():
         "一次完整测试通过且说明准确后直接最终交付，无需反复重写已经核验的文件。")
     (review / "actual-prompt.txt").write_text(prompt)
     server = None
-    summary = {"execution_kind": "live_model", "machine_passed": False, "human_source_repairs": 0,
+    summary = {"execution_kind": "not_run", "machine_passed": False, "human_source_repairs": 0,
                "human_interventions_during_task": 0}
     try:
         with (evidence / "server.stderr.log").open("w") as errors:
@@ -173,6 +189,7 @@ def main():
             if summary["server_exit_code"]:
                 summary["machine_passed"] = False
         summary["finished_utc"] = datetime.now(timezone.utc).isoformat()
+        summary["execution_kind"] = execution_kind(prompt_log)
         save(review / "summary.json", summary)
         print(json.dumps(summary, ensure_ascii=False))
     return 0 if summary["machine_passed"] else 1

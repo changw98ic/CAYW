@@ -61,6 +61,8 @@ python3 scripts/validate-live-coding.py \
 
 `review/summary.json`的`machine_passed`只表示原Task正常完成、名额释放、模型实际运行完整测试、独立代码与产物检查通过。说明中的事实、首次通过与干预次数仍须独立检查；不能把该字段当作完整人工验收结论。启动和模型失败保留原始日志，不更换模型或悄悄重放。
 
+`execution_kind` 根据 prompt trace 中的模型请求 `started` 事件确定。启动或配置失败、仅有请求预留而尚未开始调用，记为 `not_run`；请求开始后服务失败或取消，仍记为 `live_model`，不要求先收到成功回复或完整用量。
+
 ## 4. 本地产品主线的可运行命令
 
 使用同一份 macOS arm64 发行包的四个程序，先按[安装指南](../headless-chat.md#安装)校验 `SHA256SUMS`，保存 `BUILD.json`。也可按[本地工作流](../local-workflows.md#打包和验证)在干净已提交源码上构建发行包。不要把不同源码的 TUI/Client/Runtime 拼在一起。`cayw-runtime` 在该基线没有 README；接口核对来自 `src/main.rs`、`src/launch.rs`、`src/cli_workspaces.rs` 及[独立客户端说明](../../examples/headless-client/README.md)。

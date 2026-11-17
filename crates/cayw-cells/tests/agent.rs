@@ -37,6 +37,7 @@ impl CapabilityHost for Host {
 }
 struct ProviderFixture {
     script: String,
+    yield_time_ms: Option<u64>,
     terminal_status: CellStatus,
     turn: AtomicUsize,
     cell: Mutex<Option<String>>,
@@ -49,7 +50,12 @@ impl Provider for ProviderFixture {
         let turn = self.turn.fetch_add(1, Ordering::SeqCst);
         let mut assistant = AssistantMessage::new(&request.model);
         let arguments = if turn == 0 {
-            json!({"action":"exec","script":self.script,"yield_time_ms":10000,"max_output_tokens":4096})
+            let mut arguments =
+                json!({"action":"exec","script":self.script,"max_output_tokens":4096});
+            if let Some(wait) = self.yield_time_ms {
+                arguments["yield_time_ms"] = wait.into();
+            }
+            arguments
         } else {
             let result = request
                 .messages
@@ -107,6 +113,7 @@ async fn agent_uses_one_entry_exec_then_wait_with_multiple_internal_host_operati
     let provider = Arc::new(ProviderFixture {
         script: "yield_control(); cayw.call('write', {}); cayw.call('write', {}); text('complete')"
             .into(),
+        yield_time_ms: Some(10000),
         terminal_status: CellStatus::Completed,
         turn: AtomicUsize::new(0),
         cell: Mutex::new(None),
@@ -157,6 +164,7 @@ async fn cell_exit_ends_only_the_cell_and_agent_produces_its_next_message() {
     .unwrap();
     let provider = Arc::new(ProviderFixture {
         script: "exit(7); cayw.call('write', {})".into(),
+        yield_time_ms: Some(10000),
         terminal_status: CellStatus::Exited,
         turn: AtomicUsize::new(0),
         cell: Mutex::new(None),
@@ -172,4 +180,52 @@ async fn cell_exit_ends_only_the_cell_and_agent_produces_its_next_message() {
     let cell = provider.cell.lock().unwrap().clone().unwrap();
     assert_eq!(manager.record(&cell).unwrap().parent_call_id, "call-0");
     manager.close().await;
+}
+
+#[tokio::test]
+async fn omitted_wait_returns_short_operation_without_an_extra_model_round() {
+    for max_yield_time in [None, Some(std::time::Duration::from_millis(500))] {
+        let dir = tempfile::tempdir().unwrap();
+        let limits = CellLimits {
+            max_yield_time,
+            ..Default::default()
+        };
+        let host = Arc::new(Host(AtomicUsize::new(0)));
+        let manager = CellManager::new(
+            CellIdentity {
+                session_id: "session".into(),
+                task_id: "task".into(),
+                attempt_id: "attempt".into(),
+                permission_context: "fixture-gate".into(),
+            },
+            Arc::new(SqliteJournal::open(dir.path().join("cells.db")).unwrap()),
+            backend(host.clone()),
+            ReadCoordinator::new(vec![], limits.clone()).unwrap(),
+            limits,
+            Limits::default(),
+        )
+        .unwrap();
+        let provider = Arc::new(ProviderFixture {
+            script: "return cayw.call('write', {})".into(),
+            yield_time_ms: None,
+            terminal_status: CellStatus::Completed,
+            turn: AtomicUsize::new(0),
+            cell: Mutex::new(None),
+        });
+        let agent = Agent::new(provider.clone(), Model::new("fixture", "fixture"));
+        agent
+            .set_tools(vec![Arc::new(CellTool::new(manager.clone()))])
+            .unwrap();
+        agent
+            .prompt(Message::user("run short operation"))
+            .await
+            .unwrap();
+        assert_eq!(host.0.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            provider.turn.load(Ordering::SeqCst),
+            2,
+            "exec result must arrive before the model's next turn"
+        );
+        manager.close().await;
+    }
 }
