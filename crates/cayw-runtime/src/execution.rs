@@ -449,6 +449,26 @@ impl AgentTool for DurableTool {
         if result.outcome_unknown {
             self.context.unknown.store(true, Ordering::Release);
         }
+        if !result.terminate
+            && self.context.inner.config.approval_mode == crate::ApprovalMode::ModelAuto
+        {
+            let pending: Vec<_> = self
+                .context
+                .inner
+                .store
+                .snapshot(&self.context.lease.session_id)
+                .map_err(|error| self.context.recorded_store_error(error))?
+                .pending_approvals
+                .into_iter()
+                .filter(|approval| approval.input.task_id == self.context.task.id)
+                .collect();
+            if !pending.is_empty() {
+                result.content.push(cayw_ai::Content::text(format!(
+                    "The original cell is waiting for your approval decision. Before waiting again, use a new execute_code cell to call cayw.call('approval.pending', {{}}), review the exact scope, then call approval.decide with that approval_id and a decision of allow_once, allow_task or deny. Then wait for the original cell; do not replay it. Pending approvals: {}",
+                    serde_json::to_string(&pending).map_err(|error| error.to_string())?
+                )));
+            }
+        }
         Ok(result)
     }
 }

@@ -916,7 +916,7 @@ async fn disconnected_browser_cancels_only_its_own_dispatched_prompt() {
 }
 
 #[tokio::test]
-async fn saturated_prompt_lane_rejects_queue_timeout_but_keeps_control_lane_available() {
+async fn saturated_prompt_lane_queues_until_available_and_keeps_controls_available() {
     let limits = GatewayLimits {
         max_in_flight: 2,
         max_prompt_in_flight: 1,
@@ -938,14 +938,11 @@ async fn saturated_prompt_lane_rejects_queue_timeout_but_keeps_control_lane_avai
     .unwrap()
     .unwrap()
     .forget();
-    let queued = fixture
-        .rpc("session.prompt", json!({"session_id":"s2","text":"排队"}))
-        .send()
-        .await
-        .unwrap();
-    let value = envelope(queued, StatusCode::SERVICE_UNAVAILABLE).await;
-    assert_eq!(value["error"]["code"], "queue_timeout");
-    assert_eq!(value["error"]["outcome_unknown"], false);
+    let queued = tokio::spawn(
+        fixture
+            .rpc("session.prompt", json!({"session_id":"s2","text":"排队"}))
+            .send(),
+    );
     envelope(
         fixture
             .rpc("session.events", json!({"session_id":"s1","after":0}))
@@ -965,11 +962,15 @@ async fn saturated_prompt_lane_rejects_queue_timeout_but_keeps_control_lane_avai
     )
     .await;
     envelope(prompt.await.unwrap().unwrap(), StatusCode::OK).await;
-    assert_eq!(
-        fixture.runtime.prompt_started.available_permits(),
-        0,
-        "queued prompt must not have reached runtime"
-    );
+    fixture
+        .runtime
+        .prompt_started
+        .acquire()
+        .await
+        .unwrap()
+        .forget();
+    fixture.runtime.prompt_release.add_permits(1);
+    envelope(queued.await.unwrap().unwrap(), StatusCode::OK).await;
     fixture.close().await;
 }
 

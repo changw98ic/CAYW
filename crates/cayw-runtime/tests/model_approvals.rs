@@ -39,6 +39,18 @@ impl Provider for Fixture {
                 "max_output_tokens": 8192
             })),
             1 => {
+                let result = request
+                    .messages
+                    .iter()
+                    .rev()
+                    .find_map(|message| match message {
+                        Message::ToolResult(result) => Some(result),
+                        _ => None,
+                    })
+                    .unwrap();
+                assert!(result.content.iter().any(|content| matches!(content,
+                    Content::Text { text } if text.contains("approval.pending") && text.contains("approval.decide")
+                )), "a waiting tool result must tell the model how to decide pending approvals");
                 let page = request
                     .messages
                     .iter()

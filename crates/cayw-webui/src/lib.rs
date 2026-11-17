@@ -862,7 +862,15 @@ async fn rpc(
     };
     let _permits = tokio::select! {
         _ = state.cancel.cancelled() => return shutting_down(false),
-        result = timeout(state.limits.queue_timeout, admission) => match result {
+        result = async {
+            if prompt {
+                // Runtime owns task scheduling. Waiting for an HTTP prompt
+                // lane must not expire an already accepted durable task.
+                Ok(admission.await)
+            } else {
+                timeout(state.limits.queue_timeout, admission).await
+            }
+        } => match result {
             Ok(permits) => permits,
             Err(_) => return error_response(StatusCode::SERVICE_UNAVAILABLE, "queue_timeout", "Gateway queue wait timed out; request was not dispatched", false),
         }
