@@ -198,6 +198,7 @@ class Suite:
                  "release": os.uname().release, "machine": os.uname().machine},
              "binaries": {name: hashlib.sha256((BIN/name).read_bytes()).hexdigest()
                  for name in ["cayw","cayw-webui","cayw-visual-editor","cayw-trace-debug"]},
+             "client_binary": {"path": str(CLIENT), "sha256": hashlib.sha256(CLIENT.read_bytes()).hexdigest()},
              "started_utc": datetime.now(timezone.utc).isoformat()})
         print(json.dumps(ready))
 
@@ -285,6 +286,12 @@ class Suite:
                 observations.append(health)
                 time.sleep(0.1)
             replies = [f.result() for f in futures]
+        for i, reply in enumerate(replies):
+            assert "error" not in reply, reply
+            message = reply["messages"][-1]
+            assert message["role"] == "assistant", message
+            answer = "".join(part["text"] for part in message["content"] if part["type"] == "text")
+            assert answer.strip() == "CAYW_QUEUE_" + str(i), answer
         final = [self.rpc("task.get", {"task_id": t["id"]}) for t in tasks]
         for i, session in enumerate(sessions):
             self.events(session, "queue-" + str(i))
