@@ -28,4 +28,4 @@ uuid = { version = "=1.27.0", features = ["v4"] }
 [dev-dependencies]
 futures.workspace = true
 tempfile = "3"
-tokio = { workspace = true, features = ["rt-multi-thread"] }
+tokio = { workspace = true, features = ["rt-multi-thread", "test-util"] }

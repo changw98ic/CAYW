@@ -16,7 +16,7 @@ pub struct TurnLane {
     pub step_ids: Vec<String>,
     /// Sum of step elapsed_ms in this turn (idle between turns excluded).
     pub elapsed_ms: u64,
-    /// Count of Failed / Empty / BlindRetry steps in this turn.
+    /// Count of failed, interrupted, cancelled, unknown, empty or blind-retry steps.
     pub branch_count: u64,
 }
 
@@ -45,7 +45,12 @@ pub struct SessionCompare {
 fn is_branch(outcome: StepOutcome) -> bool {
     matches!(
         outcome,
-        StepOutcome::Failed | StepOutcome::Empty | StepOutcome::BlindRetry
+        StepOutcome::Failed
+            | StepOutcome::Empty
+            | StepOutcome::BlindRetry
+            | StepOutcome::OutcomeUnknown
+            | StepOutcome::Cancelled
+            | StepOutcome::Interrupted
     )
 }
 

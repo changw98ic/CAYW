@@ -1,15 +1,19 @@
 //! Translate durable Runtime / Trace `EventRecord`s into [`RunStep`] snapshots.
 //!
 //! Authority is the append-only Core event log: tool steps come from
-//! `AgentEvent::ToolExecutionStart` / `ToolExecutionEnd` pairs. This module does
-//! not invent outcomes, call an LLM, or rewrite evidence cursors.
+//! `AgentEvent::ToolExecutionStart` / `ToolExecutionEnd` pairs. Background
+//! execution and child capability records update those rows without rewriting
+//! the underlying log. A page is not an execution terminal.
 
 use cayw_agent::{AgentEvent, ToolResult};
 use cayw_ai::content_text;
-use cayw_core::{CoreEvent, EventRecord};
+use cayw_core::{
+    CapabilityCallRecord, CapabilityOutcome, CoreEvent, EventRecord, ExecutionOutcome,
+    ExecutionRecord, ExecutionState, ReconciledOutcome,
+};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 use crate::paths::{RetryPath, build_retry_paths};
 use crate::timeline::{RunTimeline, build_run_timeline};
@@ -22,7 +26,22 @@ pub fn params_digest(arguments: &Value) -> String {
     format!("sha256:{:x}", Sha256::digest(bytes))
 }
 
-fn outcome_from_result(result: &ToolResult) -> StepOutcome {
+fn outcome_from_result(tool: &str, result: &ToolResult) -> StepOutcome {
+    if result.outcome_unknown {
+        return StepOutcome::OutcomeUnknown;
+    }
+    if tool == "execute_code"
+        && let Some(page) = &result.structured_content
+    {
+        match page.get("status").and_then(Value::as_str) {
+            Some("cancelled") => return StepOutcome::Cancelled,
+            Some("interrupted") => return StepOutcome::Interrupted,
+            _ => {}
+        }
+        if page.get("vm_alive") == Some(&Value::Bool(true)) {
+            return StepOutcome::Running;
+        }
+    }
     if result.is_error {
         return StepOutcome::Failed;
     }
@@ -35,7 +54,7 @@ fn outcome_from_result(result: &ToolResult) -> StepOutcome {
 }
 
 fn error_summary(result: &ToolResult) -> Option<String> {
-    if !result.is_error {
+    if !result.is_error && !result.outcome_unknown {
         return None;
     }
     let text = content_text(&result.content);
@@ -51,13 +70,107 @@ struct OpenCall {
     started_at_ms: u64,
 }
 
+#[derive(Default)]
+struct ExecutionProjection {
+    state: Option<ExecutionState>,
+    terminal_error: Option<String>,
+    // Keep only diagnostic facts, never raw capability arguments or outputs.
+    diagnostics: BTreeMap<u64, (StepOutcome, String)>,
+    reconciled: BTreeMap<u64, String>,
+    cursor: u64,
+}
+
+impl ExecutionProjection {
+    fn project(&self, step: &mut RunStep) {
+        let unknown = self
+            .diagnostics
+            .values()
+            .any(|(outcome, _)| *outcome == StepOutcome::OutcomeUnknown);
+        if unknown {
+            step.outcome = StepOutcome::OutcomeUnknown;
+        } else if step.outcome != StepOutcome::OutcomeUnknown {
+            if let Some(state) = self.state
+                && step.outcome != StepOutcome::Failed
+            {
+                match state {
+                    ExecutionState::Running | ExecutionState::Yielded => {
+                        step.outcome = StepOutcome::Running;
+                    }
+                    ExecutionState::Cancelled => step.outcome = StepOutcome::Cancelled,
+                    ExecutionState::Interrupted => step.outcome = StepOutcome::Interrupted,
+                    ExecutionState::Failed => step.outcome = StepOutcome::Failed,
+                    ExecutionState::Completed => {
+                        if step.outcome == StepOutcome::Running {
+                            step.outcome = StepOutcome::Success;
+                        }
+                    }
+                }
+            }
+            // A completed Luau program can have handled a failed operation.
+            // Keep that child fact visible; do not label the VM itself failed.
+            if !self.diagnostics.is_empty()
+                && !matches!(
+                    step.outcome,
+                    StepOutcome::Running | StepOutcome::Cancelled | StepOutcome::Interrupted
+                )
+            {
+                step.outcome = StepOutcome::Failed;
+            }
+        }
+        let mut errors: Vec<&str> = self.terminal_error.iter().map(String::as_str).collect();
+        errors.extend(self.diagnostics.values().map(|(_, error)| error.as_str()));
+        errors.extend(self.reconciled.values().map(String::as_str));
+        if !errors.is_empty() {
+            let errors = errors.join("; ");
+            step.error_summary = Some(match self.state {
+                Some(state) => format!("Execution {state:?}; {errors}"),
+                None => errors,
+            });
+        }
+        step.evidence_cursor = Some(self.cursor.max(step.evidence_cursor.unwrap_or(0)));
+    }
+}
+
+fn capability_diagnostic(call: &CapabilityCallRecord) -> Option<(StepOutcome, String)> {
+    let (outcome, error) = match &call.outcome {
+        Some(CapabilityOutcome::OutcomeUnknown { error }) => {
+            (StepOutcome::OutcomeUnknown, error.clone())
+        }
+        Some(CapabilityOutcome::Failed { error }) => (StepOutcome::Failed, error.clone()),
+        Some(CapabilityOutcome::NotExecuted { reason }) => {
+            (StepOutcome::Failed, format!("not executed: {reason}"))
+        }
+        Some(CapabilityOutcome::Completed { result })
+            if matches!(
+                call.name.as_str(),
+                "build.run" | "test.run" | "check.run" | "lint.run" | "format.run"
+            ) && result.get("success") == Some(&Value::Bool(false)) =>
+        {
+            let error = match result.get("exit_code") {
+                Some(code) => format!("process returned exit_code={code}"),
+                None => "process reported success=false".into(),
+            };
+            (StepOutcome::Failed, error)
+        }
+        _ => return None,
+    };
+    Some((
+        outcome,
+        format!("Child {} #{}: {error}", call.name, call.key.sequence),
+    ))
+}
+
 struct SessionBuilder {
     session_id: String,
     turn: u64,
     ordinal: u64,
     open: HashMap<String, OpenCall>,
     all_steps: Vec<RunStep>,
-    page_steps: Vec<RunStep>,
+    executions: HashMap<String, ExecutionProjection>,
+    bindings: HashMap<String, String>,
+    dirty_calls: HashSet<String>,
+    dirty_executions: HashSet<String>,
+    reconciliations: HashMap<String, (StepOutcome, Option<String>, u64)>,
 }
 
 impl SessionBuilder {
@@ -68,8 +181,143 @@ impl SessionBuilder {
             ordinal: 0,
             open: HashMap::new(),
             all_steps: Vec::new(),
-            page_steps: Vec::new(),
+            executions: HashMap::new(),
+            bindings: HashMap::new(),
+            dirty_calls: HashSet::new(),
+            dirty_executions: HashSet::new(),
+            reconciliations: HashMap::new(),
         }
+    }
+
+    fn on_record(&mut self, record: &EventRecord, emit_step: bool) {
+        match &record.event {
+            CoreEvent::Agent { event } => self.on_agent(record, event, emit_step),
+            CoreEvent::ExecutionStarted { execution }
+            | CoreEvent::ExecutionYielded { execution }
+            | CoreEvent::ExecutionFinished { execution } => {
+                self.on_execution(record, execution, emit_step)
+            }
+            CoreEvent::ExecutionWaitRegistered { binding } => {
+                self.bindings
+                    .insert(binding.call_id.clone(), binding.execution_id.clone());
+            }
+            CoreEvent::CapabilityPlanned { call }
+            | CoreEvent::CapabilityStarted { call }
+            | CoreEvent::CapabilitySettled { call }
+            | CoreEvent::CapabilityReconciled { call, .. } => {
+                self.on_capability(record, call, emit_step)
+            }
+            CoreEvent::AttemptRecovered {
+                executions,
+                capabilities,
+                ..
+            } => {
+                for execution in executions {
+                    self.on_execution(record, execution, emit_step);
+                }
+                for call in capabilities {
+                    self.on_capability(record, call, emit_step);
+                }
+            }
+            CoreEvent::Reconciled { reconciliation } => {
+                let (outcome, summary) = match &reconciliation.outcome {
+                    ReconciledOutcome::Completed { result } => (
+                        outcome_from_result(&reconciliation.expected.call.name, result),
+                        error_summary(result),
+                    ),
+                    ReconciledOutcome::NotExecuted { reason } => {
+                        (StepOutcome::Failed, Some(format!("not executed: {reason}")))
+                    }
+                };
+                self.reconciliations.insert(
+                    reconciliation.call_id.clone(),
+                    (outcome, summary, record.cursor),
+                );
+                if emit_step {
+                    self.dirty_calls.insert(reconciliation.call_id.clone());
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn on_execution(&mut self, record: &EventRecord, execution: &ExecutionRecord, emit: bool) {
+        self.bindings.insert(
+            execution.parent_call_id.clone(),
+            execution.execution_id.clone(),
+        );
+        let projection = self
+            .executions
+            .entry(execution.execution_id.clone())
+            .or_default();
+        projection.state = Some(execution.state);
+        projection.terminal_error = match &execution.terminal {
+            Some(ExecutionOutcome::Failed { error }) => Some(error.clone()),
+            Some(
+                ExecutionOutcome::Cancelled { reason } | ExecutionOutcome::Interrupted { reason },
+            ) => Some(reason.clone()),
+            _ => None,
+        };
+        projection.cursor = record.cursor;
+        if emit {
+            self.dirty_executions.insert(execution.execution_id.clone());
+        }
+    }
+
+    fn on_capability(&mut self, record: &EventRecord, call: &CapabilityCallRecord, emit: bool) {
+        self.bindings
+            .insert(call.parent_call_id.clone(), call.key.execution_id.clone());
+        let projection = self
+            .executions
+            .entry(call.key.execution_id.clone())
+            .or_default();
+        if let Some(diagnostic) = capability_diagnostic(call) {
+            projection.diagnostics.insert(call.key.sequence, diagnostic);
+        } else {
+            projection.diagnostics.remove(&call.key.sequence);
+        }
+        if matches!(&record.event, CoreEvent::CapabilityReconciled { .. }) {
+            projection.reconciled.insert(
+                call.key.sequence,
+                format!(
+                    "Child {} #{} reconciled at cursor {}",
+                    call.name, call.key.sequence, record.cursor
+                ),
+            );
+        }
+        projection.cursor = record.cursor;
+        if emit {
+            self.dirty_executions.insert(call.key.execution_id.clone());
+        }
+    }
+
+    fn finish(mut self) -> (Vec<RunStep>, Vec<RunStep>) {
+        let mut page_steps = Vec::new();
+        for step in &mut self.all_steps {
+            let reconciled = self.reconciliations.get(&step.step_id);
+            if let Some((outcome, summary, cursor)) = reconciled {
+                step.outcome = *outcome;
+                step.error_summary = summary.clone();
+                step.evidence_cursor = Some(*cursor);
+            }
+            let execution_id = self.bindings.get(&step.step_id);
+            if let Some(execution) = execution_id.and_then(|id| self.executions.get(id)) {
+                execution.project(step);
+            }
+            if let Some((_, _, cursor)) = reconciled {
+                let notice = format!("Tool reconciled at cursor {cursor}");
+                step.error_summary = Some(match &step.error_summary {
+                    Some(summary) => format!("{notice}; {summary}"),
+                    None => notice,
+                });
+            }
+            if self.dirty_calls.contains(&step.step_id)
+                || execution_id.is_some_and(|id| self.dirty_executions.contains(id))
+            {
+                page_steps.push(step.clone());
+            }
+        }
+        (self.all_steps, page_steps)
     }
 
     fn on_agent(&mut self, record: &EventRecord, event: &AgentEvent, emit_step: bool) {
@@ -112,15 +360,15 @@ impl SessionBuilder {
                     ordinal: self.ordinal,
                     tool: call.name.clone(),
                     params_digest: params_digest(&call.arguments),
-                    outcome: outcome_from_result(result),
+                    outcome: outcome_from_result(&call.name, result),
                     started_at_ms: started,
                     elapsed_ms: elapsed,
                     evidence_cursor: Some(record.cursor),
                     error_summary: error_summary(result),
                 };
-                self.all_steps.push(step.clone());
+                self.all_steps.push(step);
                 if emit_step {
-                    self.page_steps.push(step);
+                    self.dirty_calls.insert(call.id.clone());
                 }
                 self.ordinal = self.ordinal.saturating_add(1);
             }
@@ -148,16 +396,13 @@ pub fn snapshot_from_runtime_events_window(
         if record.session_id != session_id {
             continue;
         }
-        if let CoreEvent::Agent { event } = &record.event {
-            let emit_step = i >= clamped_start;
-            builder.on_agent(record, event, emit_step);
-        }
+        builder.on_record(record, i >= clamped_start);
     }
     SessionRunSnapshot {
         session_id: session_id.into(),
         label,
         task_fingerprint,
-        steps: builder.page_steps,
+        steps: builder.finish().1,
     }
 }
 
@@ -234,12 +479,10 @@ pub fn timelines_and_snapshots_from_runtime_events_window(
             if record.session_id != session_id {
                 continue;
             }
-            if let CoreEvent::Agent { event } = &record.event {
-                let emit_step = i >= clamped_start;
-                builder.on_agent(record, event, emit_step);
-            }
+            builder.on_record(record, i >= clamped_start);
         }
-        if builder.page_steps.is_empty() {
+        let (all_steps, page_steps) = builder.finish();
+        if page_steps.is_empty() {
             continue;
         }
 
@@ -247,13 +490,13 @@ pub fn timelines_and_snapshots_from_runtime_events_window(
             session_id: session_id.clone(),
             label: None,
             task_fingerprint: None,
-            steps: builder.all_steps,
+            steps: all_steps,
         };
         let page_snapshot = SessionRunSnapshot {
             session_id: session_id.clone(),
             label: None,
             task_fingerprint: None,
-            steps: builder.page_steps,
+            steps: page_steps,
         };
 
         // Align track offset with the session's overall start time.
@@ -322,12 +565,20 @@ pub fn merge_session_snapshots(
     task_fingerprint: Option<String>,
     snapshots: &[SessionRunSnapshot],
 ) -> SessionRunSnapshot {
-    let mut steps = Vec::new();
+    let mut by_id = HashMap::<String, RunStep>::new();
     for snapshot in snapshots {
         if snapshot.session_id == session_id {
-            steps.extend(snapshot.steps.clone());
+            for step in &snapshot.steps {
+                let existing = by_id
+                    .entry(step.step_id.clone())
+                    .or_insert_with(|| step.clone());
+                if step.evidence_cursor >= existing.evidence_cursor {
+                    *existing = step.clone();
+                }
+            }
         }
     }
+    let mut steps: Vec<_> = by_id.into_values().collect();
     steps.sort_by_key(|step| (step.turn, step.ordinal, step.started_at_ms));
     SessionRunSnapshot {
         session_id: session_id.into(),
@@ -378,6 +629,56 @@ impl RunInspectorView {
         self.has_more = page.has_more;
         self.next_after = page.next_after;
         self
+    }
+}
+
+/// Incremental fold for stores that read Core events in bounded pages.
+/// Feed the prefix through `after` as context, then the requested window.
+/// Only step projections and execution identities are retained, not raw events.
+pub struct RuntimeEventInspector {
+    builder: SessionBuilder,
+    after: u64,
+}
+
+impl RuntimeEventInspector {
+    pub fn new(session_id: &str, after: u64) -> Self {
+        Self {
+            builder: SessionBuilder::new(session_id),
+            after,
+        }
+    }
+
+    pub fn push(&mut self, record: &EventRecord) {
+        if record.session_id == self.builder.session_id {
+            self.builder.on_record(record, record.cursor > self.after);
+        }
+    }
+
+    pub fn finish(
+        self,
+        label: Option<String>,
+        task_fingerprint: Option<String>,
+        page: RunInspectorPage,
+    ) -> RunInspectorView {
+        let session_id = self.builder.session_id.clone();
+        let snapshot = SessionRunSnapshot {
+            session_id,
+            label,
+            task_fingerprint,
+            steps: self.builder.finish().1,
+        };
+        let timeline = build_run_timeline(&snapshot);
+        RunInspectorView {
+            protocol_version: crate::RUN_INSPECTOR_PROTOCOL_VERSION,
+            snapshot,
+            timeline,
+            events_total: 0,
+            after: 0,
+            events_scanned: 0,
+            has_more: false,
+            next_after: 0,
+        }
+        .with_page(page)
     }
 }
 

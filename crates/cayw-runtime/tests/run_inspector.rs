@@ -129,6 +129,46 @@ async fn run_inspector_rpc_matches_direct_entry() {
     assert!(direct.timeline.retry_paths.is_empty());
 }
 
+#[tokio::test]
+async fn run_inspector_terminal_page_updates_an_earlier_running_step() {
+    let temp = tempfile::tempdir().unwrap();
+    std::fs::create_dir(temp.path().join("workspace")).unwrap();
+    let rt = runtime(
+        &temp,
+        Arc::new(ScriptProvider::new("yield_control(); return true")),
+    );
+    let session = rt.create(Some("terminal page".into())).unwrap();
+    rt.prompt(&session.id, "yield then complete", CancellationToken::new())
+        .await
+        .unwrap();
+    let records = rt.events(&session.id, 0, 1000).unwrap();
+    let boundary = records.iter().find(|record| matches!(&record.event,
+        cayw_core::CoreEvent::Agent { event }
+            if matches!(event.as_ref(), cayw_agent::AgentEvent::ToolExecutionEnd { result, .. }
+                if result.structured_content.as_ref().and_then(|page| page.get("vm_alive")) == Some(&json!(true))))
+    ).expect("yield_control must return an intermediate page").cursor;
+    let first = rt
+        .run_inspector_page(&session.id, 0, Some(boundary as usize))
+        .unwrap();
+    assert_eq!(first.snapshot.steps[0].outcome, StepOutcome::Running);
+    let last = rt.run_inspector_page(&session.id, boundary, None).unwrap();
+    let original = last
+        .snapshot
+        .steps
+        .iter()
+        .find(|step| step.step_id == first.snapshot.steps[0].step_id)
+        .expect("terminal page must carry an update for the original exec");
+    assert_eq!(original.outcome, StepOutcome::Success);
+    let full = rt.run_inspector(&session.id).unwrap();
+    let merged = cayw_run_inspector::merge_session_snapshots(
+        &session.id,
+        full.snapshot.label.clone(),
+        None,
+        &[first.snapshot, last.snapshot],
+    );
+    assert_eq!(merged, full.snapshot);
+}
+
 /// Append enough Host events that the durable cursor exceeds one Core page.
 fn seed_long_session(rt: &Runtime, session_id: &str, host_events: usize) {
     let store = rt.store();
@@ -167,6 +207,12 @@ async fn run_inspector_pages_beyond_first_1000_events() {
     assert_eq!(full.events_scanned, view.cursor);
     assert!(!full.has_more, "full scan must not claim truncation");
     assert_eq!(full.next_after, view.cursor);
+    assert_eq!(
+        rt.run_inspector_page(&session.id, 0, Some(usize::MAX))
+            .unwrap(),
+        full,
+        "a requested window above the previous arbitrary cap remains valid"
+    );
 
     // Explicit first page still signals has_more and stops at the limit.
     let page1 = rt

@@ -1109,6 +1109,227 @@ async fn model_cli_routes_to_the_requested_nonprimary_workspace() {
 }
 
 #[tokio::test]
+async fn local_reconciliation_releases_unknown_process_write_fence_without_replay() {
+    use cayw_ai::{
+        AssistantEvent, AssistantStream, CancellationToken, Model, ModelRequest, Provider,
+    };
+    use cayw_core::{CapabilityOutcome, CapabilityReconciliation, CoreEvent};
+    use cayw_runtime::{Runtime, RuntimeConfig, ScopedPermission};
+    use std::sync::Arc;
+
+    struct ProcessModel;
+    impl Provider for ProcessModel {
+        fn stream(&self, request: ModelRequest, _: CancellationToken) -> AssistantStream {
+            let message = cayw_runtime::fixture::script_response(
+                &request,
+                "return cayw.call('test.run',{profile='interrupted'})",
+                "original-process",
+            );
+            Box::pin(futures::stream::iter([AssistantEvent::Done { message }]))
+        }
+    }
+    let root = tempfile::tempdir().unwrap();
+    private_dir(root.path());
+    let home = tempfile::tempdir().unwrap();
+    let workspace = tempfile::tempdir().unwrap();
+    let initialized = init(home.path(), workspace.path(), root.path()).await;
+    assert!(initialized.status.success());
+    let initialized = first_json_line(&initialized);
+    let profile = cayw_host::Profile {
+        kind: cayw_host::ProfileKind::Test,
+        program: "/bin/sh".into(),
+        args: vec![
+            "-c".into(),
+            "printf 'effect\\n' >> effect.txt; exec /bin/sleep 300".into(),
+        ],
+        env: BTreeMap::new(),
+        timeout: Some(Duration::from_secs(1)),
+        max_output_bytes: None,
+        allow_filter: false,
+        io: cayw_host::ProcessIo::Pipes,
+    };
+    let mut config = RuntimeConfig {
+        permissions: vec![ScopedPermission::exact(
+            "test.run",
+            json!({"profile":"interrupted"}),
+        )],
+        ..Default::default()
+    };
+    config.host.profiles.insert("interrupted".into(), profile);
+    let runtime = Runtime::open(
+        initialized["database"].as_str().unwrap(),
+        workspace.path(),
+        Arc::new(ProcessModel),
+        Model::new("fixture", "local-process"),
+        config,
+    )
+    .unwrap();
+    let session = runtime.create(None).unwrap().id;
+    let unknown = runtime
+        .prompt(&session, "run process once", CancellationToken::new())
+        .await
+        .unwrap();
+    assert_eq!(
+        std::fs::read_to_string(workspace.path().join("effect.txt")).unwrap(),
+        "effect\n"
+    );
+    let original = unknown
+        .unresolved_capabilities
+        .iter()
+        .find(|call| call.name == "test.run")
+        .unwrap()
+        .clone();
+    assert!(matches!(
+        original.outcome,
+        Some(CapabilityOutcome::OutcomeUnknown { .. })
+    ));
+    let decision = CapabilityReconciliation {
+        key: original.key.clone(), expected: (&original).into(), actor: "rpc-user".into(),
+        evidence: "Test operator inspected effect.txt (one line), and the managed process cleanup completed; interrupted process did not report a successful exit".into(),
+        outcome: CapabilityOutcome::Failed { error: "Confirmed interrupted after writing effect.txt once".into() },
+        external_provenance: original.external_provenance.clone(),
+    };
+    drop(runtime);
+
+    let mut server = serve(
+        home.path(),
+        workspace.path(),
+        root.path(),
+        &["--offline", "--demo-authorized"],
+    )
+    .spawn()
+    .unwrap();
+    let ready = read_ready(&mut server).await;
+    let client = connect(&ready).await;
+    // A caller-controlled actor/evidence is still insufficient authority.
+    let denied = client
+        .request(
+            "capability.reconcile",
+            json!({"session_id":session,"reconciliation":decision}),
+        )
+        .await
+        .expect_err("RPC strings alone cannot confirm a result");
+    assert!(
+        denied.to_string().contains("host denied"),
+        "expected authority refusal, got {denied}"
+    );
+    let mut inspect = command(home.path(), workspace.path(), Some(root.path().as_os_str()));
+    inspect.args(["reconcile", "--inspect", &session]);
+    let inspected = run(inspect).await;
+    assert!(
+        inspected.status.success(),
+        "inspect failed: {}",
+        String::from_utf8_lossy(&inspected.stderr)
+    );
+    let inspected = first_json_line(&inspected);
+    assert_eq!(inspected["id"], session);
+    assert!(
+        inspected["unresolved_capabilities"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|call| call["key"] == json!(original.key))
+    );
+    let blocked = client
+        .request(
+            "session.prompt",
+            json!({"session_id":session,"text":"write before verification"}),
+        )
+        .await
+        .unwrap();
+    assert!(
+        !workspace.path().join("cayw-demo.txt").exists(),
+        "unknown write fence must remain before operator confirmation: {blocked}"
+    );
+
+    let decision_file = root.path().join("operator-decision.json");
+    std::fs::write(
+        &decision_file,
+        serde_json::to_vec(&json!({"type":"capability","reconciliation":decision})).unwrap(),
+    )
+    .unwrap();
+    let mut reconcile = command(home.path(), workspace.path(), Some(root.path().as_os_str()));
+    reconcile
+        .args(["reconcile", "--decision"])
+        .arg(&decision_file);
+    let reconciled = run(reconcile).await;
+    assert!(
+        reconciled.status.success(),
+        "local operator reconciliation failed: {}",
+        String::from_utf8_lossy(&reconciled.stderr)
+    );
+    let view = first_json_line(&reconciled);
+    assert_eq!(view["id"], session);
+    assert!(
+        view["unresolved_capabilities"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|call| call["key"] != json!(original.key)),
+        "the exact confirmed call must be resolved: {view}"
+    );
+    // The exact operator decision is idempotent; the original task stays stopped.
+    let mut retry = command(home.path(), workspace.path(), Some(root.path().as_os_str()));
+    retry.args(["reconcile", "--decision"]).arg(&decision_file);
+    let retry = run(retry).await;
+    assert!(
+        retry.status.success(),
+        "exact receipt retry failed: {}",
+        String::from_utf8_lossy(&retry.stderr)
+    );
+    let mut forged = decision.clone();
+    forged.expected.lease.fence += 1;
+    assert!(
+        client
+            .request(
+                "capability.reconcile",
+                json!({"session_id":session,"reconciliation":forged})
+            )
+            .await
+            .is_err()
+    );
+    let after = client
+        .request(
+            "session.prompt",
+            json!({"session_id":session,"text":"write after verification"}),
+        )
+        .await
+        .unwrap();
+    assert!(
+        workspace.path().join("cayw-demo.txt").is_file(),
+        "same workspace must accept the next write: {after}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(workspace.path().join("effect.txt")).unwrap(),
+        "effect\n",
+        "original process must never replay"
+    );
+    let records: Vec<cayw_core::EventRecord> = serde_json::from_value(
+        client
+            .request(
+                "session.events",
+                json!({"session_id":session,"after":0,"limit":1000}),
+            )
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    assert!(records.iter().any(|record| matches!(&record.event, CoreEvent::CapabilitySettled { call } if call.key == original.key && matches!(call.outcome, Some(CapabilityOutcome::OutcomeUnknown { .. })))));
+    assert!(records.iter().any(|record| matches!(&record.event, CoreEvent::CapabilityReconciled { call, .. } if call.key == original.key && matches!(call.outcome, Some(CapabilityOutcome::Failed { .. })))));
+    client.close().await;
+    unsafe {
+        libc::kill(server.id().unwrap() as i32, libc::SIGINT);
+    }
+    assert!(
+        tokio::time::timeout(WATCHDOG, server.wait())
+            .await
+            .unwrap()
+            .unwrap()
+            .success()
+    );
+}
+
+#[tokio::test]
 async fn start_owns_one_client_without_workspace_launcher_state() {
     let root = tempfile::tempdir().unwrap();
     private_dir(root.path());

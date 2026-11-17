@@ -130,6 +130,8 @@ Session 当前有 idle、running、awaiting_approval 三种状态；StrongFlow p
 
 Task 队列区分 queued、running、draining 与 completed/failed/cancelled/interrupted/outcome_unknown。draining 表示工作已停止准入，但清理或持久化仍需核对；不能提前释放执行容量。运行身份和完整 lease 在与执行写入相同的事务内核对。恢复要先确认原执行者停止并取得独占归属，不能只凭一次“进程不在”的观察接管。
 
+本地操作者可用 `cayw reconcile --inspect` 查看未知调用，并用 `--decision` 提交已经独立核实的精确结果。唯一 Client 的核验器读取工作区外的私有确认记录，再沿原 Runtime/Core 核对流程追加决定；原未知事件保留。actor 和 evidence 文本本身不授予权限，SDK 与显式 Headless 的宿主核验策略保持独立。使用方法及边界见[本地未知结果核对](local-reconciliation.md)。
+
 依据：[Core 类型](../crates/cayw-core/src/types.rs)、[持久任务队列](../crates/cayw-queue/src/queue.rs)、[SDK/IPC 身份契约](issue1-sdk-ipc-contract.md)。
 
 ## AgentLoop、ModelPort 与上下文
@@ -218,6 +220,8 @@ Luau 是当前优先方向，已有运行时；Monty 只作可选同契约比较
 `max_output_tokens` 是现有 API 字段名，Cells 当前按保守的**序列化 UTF-8 字节预算**计费，不是 Provider tokenizer 或媒体 token 估算。页预算不足以容纳下一项时保留游标并报告所需预算，不能静默跳过输出。文本、媒体和 JSON 输出支持也不等于每个 Provider 都能接收相同多模态格式；UI 呈现与模型协议支持分别核对。
 
 重启可恢复 cell 记录、输出、会话值和子调用事实，不能恢复已经丢失的 Lua 栈。明确未执行的调用、已结算调用和未知调用分别处理；丢失的 VM 不自动重跑源码，即使没有未知调用，也只能记录中断并由宿主决定后续新执行。
+
+省略 `yield_time_ms` 时等待输出、待审批、脚本主动让出、完成或取消；宿主配置 `max_yield_time` 时使用该上限。显式 `0` 仍立即取页。这只决定何时返回当前页，不是执行时限。
 
 依据：[CodeMode 边界](../crates/cayw-codemode/README.md)、[CellTool](../crates/cayw-cells/src/tool.rs)、[Cells 类型与输出](../crates/cayw-cells/src/types.rs)。
 

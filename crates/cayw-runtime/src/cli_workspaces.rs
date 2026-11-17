@@ -922,6 +922,9 @@ async fn open_workspace(
     // Headless never opens this workspace path.
     config.approval_rules = Some(cayw_runtime::device_rules(&paths.data_dir));
     config.approval_mode = cayw_runtime::ApprovalMode::ModelAuto;
+    config.reconciliation_verifier = Some(Arc::new(
+        cayw_runtime::local_cli::LocalReconciliationVerifier(paths.clone()),
+    ));
     config.main_session =
         cayw_runtime::local_cli::main_session_directory(configured_main_session.as_deref())
             .ok()

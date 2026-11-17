@@ -13,7 +13,9 @@ use std::sync::{
     Arc, Mutex,
     atomic::{AtomicUsize, Ordering},
 };
+use std::time::Duration;
 use support::backend;
+use tokio::sync::Semaphore;
 
 struct Host(AtomicUsize);
 #[async_trait]
@@ -226,6 +228,118 @@ async fn omitted_wait_returns_short_operation_without_an_extra_model_round() {
             2,
             "exec result must arrive before the model's next turn"
         );
+        manager.close().await;
+    }
+}
+
+struct DelayedHost {
+    entered: Semaphore,
+    calls: AtomicUsize,
+}
+
+#[async_trait]
+impl CapabilityHost for DelayedHost {
+    fn capabilities(&self) -> Vec<ToolDefinition> {
+        Host(AtomicUsize::new(0)).capabilities()
+    }
+
+    async fn call(
+        &self,
+        _: &str,
+        _: Value,
+        cancel: CancellationToken,
+    ) -> Result<Value, CapabilityError> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        self.entered.add_permits(1);
+        tokio::select! {
+            _ = tokio::time::sleep(Duration::from_secs(2)) => Ok(json!({"ok": true})),
+            _ = cancel.cancelled() => Err(CapabilityError::new("cancelled before fixture write")),
+        }
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn default_wait_passes_the_old_deadline_and_keeps_explicit_wakeups() {
+    // Two seconds is simulated Host work that crosses the former one-second
+    // default. These assertions measure model turns, not wall-clock speed.
+    for (max_yield_time, explicit_wait, wake, expected_turns) in [
+        (None, None, "complete", 2),
+        (Some(Duration::from_secs(4)), None, "complete", 2),
+        (None, Some(u64::MAX), "complete", 2),
+        (None, Some(0), "complete", 3),
+        (None, None, "permission", 3),
+        (None, None, "cancel", 1),
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        let limits = CellLimits {
+            max_yield_time,
+            ..Default::default()
+        };
+        let journal = Arc::new(SqliteJournal::open(dir.path().join("cells.db")).unwrap());
+        let host = Arc::new(DelayedHost {
+            entered: Semaphore::new(0),
+            calls: AtomicUsize::new(0),
+        });
+        let manager = CellManager::new(
+            CellIdentity {
+                session_id: "session".into(),
+                task_id: "task".into(),
+                attempt_id: "attempt".into(),
+                permission_context: "fixture-gate".into(),
+            },
+            journal.clone(),
+            backend(host.clone()),
+            ReadCoordinator::new(vec![], limits.clone()).unwrap(),
+            limits,
+            Limits::default(),
+        )
+        .unwrap();
+        let provider = Arc::new(ProviderFixture {
+            script: "return cayw.call('write', {})".into(),
+            yield_time_ms: explicit_wait,
+            terminal_status: CellStatus::Completed,
+            turn: AtomicUsize::new(0),
+            cell: Mutex::new(None),
+        });
+        let agent = Agent::new(provider.clone(), Model::new("fixture", "fixture"));
+        let tool = Arc::new(CellTool::new(manager.clone()));
+        if let Some(max) = max_yield_time {
+            let definition = tool.definition();
+            let field = &definition.parameters["oneOf"][0]["properties"]["yield_time_ms"];
+            assert_eq!(field["default"], json!(max.as_millis() as u64));
+            assert_eq!(field["maximum"], field["default"]);
+        }
+        agent.set_tools(vec![tool]).unwrap();
+        let control = agent.control();
+        let wake_manager = manager.clone();
+        let wake_host = host.clone();
+        let waker = tokio::spawn(async move {
+            wake_host.entered.acquire().await.unwrap().forget();
+            if wake == "permission" {
+                let cells = journal
+                    .records(wake_manager.identity(), wake_manager.limits())
+                    .unwrap();
+                wake_manager.notify_permission_wait(&cells[0].cell_id);
+            } else if wake == "cancel" {
+                control.abort();
+            }
+        });
+        let result = agent
+            .prompt(Message::user("run controlled operation"))
+            .await
+            .unwrap();
+        waker.await.unwrap();
+        assert_eq!(
+            provider.turn.load(Ordering::SeqCst),
+            expected_turns,
+            "wake={wake}, max={max_yield_time:?}, explicit={explicit_wait:?}"
+        );
+        assert_eq!(host.calls.load(Ordering::SeqCst), 1);
+        if wake == "cancel" {
+            assert_eq!(result.last_message.stop_reason, StopReason::Aborted);
+        } else {
+            assert_eq!(result.last_message.stop_reason, StopReason::Stop);
+        }
         manager.close().await;
     }
 }

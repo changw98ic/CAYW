@@ -13,9 +13,6 @@ use std::sync::Arc;
 pub struct CellTool {
     manager: Arc<CellManager>,
 }
-// The 2026-11-16 live trace's short cells took 44–468 ms. Give those
-// operations a chance to reply inline; this only yields, never cancels work.
-const DEFAULT_YIELD_TIME_MS: u64 = 1000;
 impl CellTool {
     pub fn new(manager: Arc<CellManager>) -> Self {
         Self { manager }
@@ -27,8 +24,11 @@ impl CellTool {
         self.manager
             .limits()
             .max_yield_time
-            .map_or(DEFAULT_YIELD_TIME_MS, |max| {
-                DEFAULT_YIELD_TIME_MS.min(u64::try_from(max.as_millis()).unwrap_or(u64::MAX))
+            // Without a host cap, use the full accepted wait range instead of
+            // imposing a polling interval. Output, permission waits, explicit
+            // yield_control, completion and cancellation still wake the caller.
+            .map_or(u64::MAX, |max| {
+                u64::try_from(max.as_millis()).unwrap_or(u64::MAX)
             })
     }
 }
@@ -66,17 +66,22 @@ impl AgentTool for CellTool {
             None => String::new(),
         };
         let default_yield_ms = self.default_yield_time_ms();
-        let mut yield_time_ms = json!({"type":"integer","minimum":0,"default":default_yield_ms});
+        let mut yield_time_ms = json!({"type":"integer","minimum":0});
         if let Some(max) = limits.max_yield_time {
             yield_time_ms["maximum"] = json!(u64::try_from(max.as_millis()).unwrap_or(u64::MAX));
+            yield_time_ms["default"] = json!(default_yield_ms);
         }
         let page = limits.default_page_tokens();
         let mut max_output_tokens = json!({"type":"integer","minimum":1024,"default":page});
         if let Some(max) = limits.max_output_tokens {
             max_output_tokens["maximum"] = json!(max);
         }
+        let omitted_wait = match limits.max_yield_time {
+            Some(_) => format!("omitted yield_time_ms uses the host's {default_yield_ms} ms cap"),
+            None => "omitted yield_time_ms waits for output, a pending permission, yield_control, completion or cancellation".into(),
+        };
         let omitted_page =
-            format!("omitted values use {default_yield_ms} ms and a {page}-byte page.");
+            format!("{omitted_wait}; omitted max_output_tokens uses a {page}-byte page.");
         ToolDefinition {
             name: "execute_code".into(),
             description: "Execute or wait for one bounded Luau cell. Arguments are a JSON object. cursor, yield_time_ms and max_output_tokens use JSON integers; exact nonnegative decimal strings (including integral decimal or exponent forms) are converted before the same range checks. Example exec arguments: {\"action\":\"exec\",\"script\":\"return 1 + 1\"}. exec creates a globally unique cell_id; wait reads incremental output after cursor without replay. yield_time_ms and max_output_tokens are optional: ".to_owned() + &omitted_page + " yield_time_ms returns early without cancelling the managed VM. wait resumes yield_control unless continue_execution=false. When the returned page has vm_alive=true or has_more=true, callers must continue invoking action=\"wait\" with the same cell_id and cursor=next_cursor until vm_alive=false and has_more=false; do not replay exec. Helpers inside the Luau script: store(key,value,expected_version), load(key), text(string), image(mime,base64), audio(mime,base64), notify(message,completed,total), exit(code), yield_control(), toolDefinition(name), tool_search(query,limit). store(key,value,expected_version) requires all 3 arguments: expected_version is mandatory; pass 0 for a new key, or the version returned by load(key).version when updating an existing key. load(key) returns an object with version and value, or null if absent. ALL_TOOLS is a read-only array of tool names. toolDefinition and tool_search are Luau functions, not external tool names. Use return or cayw.emit(value) for JSON values, including tables. pcall/xpcall handle ordinary known errors; cancellation, exhausted budgets, unknown effects and exit still stop the cell. Pure computation coroutines and per-cell globals are available. Await host tools from the main script. print, io, os, package, require and math.tointeger are unavailable. Use ordinary Luau operators and bounded string/table/math/utf8 functions. Invoke host tools with cayw.call(name,args); each invocation is authorized. Do not register any other execute_code tool. max_output_tokens is a conservative serialized UTF-8 BYTE budget (minimum 1024), not provider token usage. A page too small for the next item returns required_budget with unchanged cursor. Restart recovers durable records, never a Lua stack. No automatic replay." + &script_byte_note,

@@ -296,7 +296,8 @@ pub trait ReconciliationVerifier: Send + Sync {
     fn verify(&self, request: &ReconciliationRequest) -> Result<(), String>;
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ReconciliationRequest {
     Tool {
         reconciliation: Reconciliation,

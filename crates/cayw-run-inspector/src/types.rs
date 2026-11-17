@@ -6,9 +6,17 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum StepOutcome {
+    /// A returned page belongs to a VM that has not finished.
+    Running,
+    /// A tool or child capability has effects that have not been reconciled.
+    OutcomeUnknown,
+    /// Execution stopped after cancellation.
+    Cancelled,
+    /// Execution stopped before completing; this does not assert its effects.
+    Interrupted,
     /// Tool / answer step completed without failure flags.
     Success,
-    /// Explicit failure (error flag or failed terminal).
+    /// Explicit failure (error flag, failed terminal, or failed child operation).
     Failed,
     /// Retrieval-style empty result (not a hard failure).
     Empty,

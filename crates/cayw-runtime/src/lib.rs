@@ -2042,8 +2042,8 @@ impl Runtime {
     ///
     /// Pages the Core event log from `after` (same authority as [`Self::events`])
     /// until `limit` events are scanned or the session cursor is reached.
-    /// When `limit` is `None`, at most 200,000 events are included via internal
-    /// `MAX_EVENT_PAGE` paging.
+    /// When `limit` is `None`, scan through the captured session cursor using
+    /// internal `MAX_EVENT_PAGE` paging without retaining raw event pages.
     ///
     /// The response always carries `events_total` / `has_more` / `next_after`;
     /// callers use these cursors to continue through longer histories.
@@ -2058,8 +2058,8 @@ impl Runtime {
     ///
     /// `limit` caps how many Core events are folded into this response. Values
     /// above [`cayw_core::MAX_EVENT_PAGE`] are allowed; the store is still read
-    /// in `MAX_EVENT_PAGE` chunks. `None` selects the 200,000-event response cap;
-    /// continue with `has_more` and `next_after` when more events remain.
+    /// in `MAX_EVENT_PAGE` chunks. Prefix events retain call identity and start
+    /// timestamps; only new or updated steps are emitted for this window.
     pub fn run_inspector_page(
         &self,
         id: &str,
@@ -2079,47 +2079,31 @@ impl Runtime {
                 "run inspector limit must be at least 1 when set".into(),
             ));
         }
-        // Bound a single response so a runaway client cannot ask for unbounded
-        // materialization in one RPC; full history requires cursor continuation.
-        const MAX_INSPECTOR_EVENTS: usize = 200_000;
-        if let Some(limit) = limit
-            && limit > MAX_INSPECTOR_EVENTS
-        {
-            return Err(RuntimeError::InvalidInput(format!(
-                "run inspector limit may not exceed {MAX_INSPECTOR_EVENTS}"
-            )));
-        }
-        let mut records = Vec::new();
-        let mut cursor = after;
-        let remaining_cap = limit.unwrap_or(MAX_INSPECTOR_EVENTS);
-        while cursor < events_total && records.len() < remaining_cap {
-            let want = (events_total - cursor)
-                .min(cayw_core::MAX_EVENT_PAGE as u64)
-                .min((remaining_cap - records.len()) as u64) as usize;
-            if want == 0 {
-                break;
-            }
+        let end = limit.map_or(events_total, |limit| {
+            after.saturating_add(limit as u64).min(events_total)
+        });
+        let mut inspector = cayw_run_inspector::RuntimeEventInspector::new(id, after);
+        let mut cursor = 0;
+        while after < end && cursor < end {
+            let want = (end - cursor).min(cayw_core::MAX_EVENT_PAGE as u64) as usize;
             let page = self.inner.store.events(id, cursor, want)?;
             if page.is_empty() {
-                break;
+                return Err(cayw_core::CoreError::CorruptStore(
+                    "run inspector event prefix is incomplete".into(),
+                )
+                .into());
             }
-            let next = page.last().map_or(cursor, |record| record.cursor);
-            if next <= cursor {
-                break;
+            cursor = page.last().expect("nonempty page").cursor;
+            for record in &page {
+                inspector.push(record);
             }
-            cursor = next;
-            records.extend(page);
         }
-        let events_scanned = records.len() as u64;
-        let next_after = records.last().map(|record| record.cursor).unwrap_or(after);
-        // None still has the response cap; longer histories use next_after.
-        // Signal remaining events whenever this response stops before the cursor.
+        let events_scanned = end - after;
+        let next_after = end;
         let has_more = next_after < events_total;
-        Ok(cayw_run_inspector::inspect_runtime_events_page(
-            id,
+        Ok(inspector.finish(
             Some(view.label),
             None,
-            &records,
             cayw_run_inspector::RunInspectorPage {
                 events_total,
                 after,

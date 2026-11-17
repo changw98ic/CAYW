@@ -34,6 +34,36 @@ struct Connection {
 }
 
 impl LocalPaths {
+    /// Record a decision made by the local operator. This is deliberately a
+    /// filesystem operation, never an RPC or model-visible Host capability.
+    /// The workspace cannot write this private directory.
+    pub fn record_reconciliation(
+        &self,
+        request: &cayw_core::ReconciliationRequest,
+    ) -> io::Result<PathBuf> {
+        self.validate_existing()?;
+        let bytes = reconciliation_bytes(request)?;
+        let path = self.reconciliation_path(&bytes);
+        let _lock = private_lock(&self.data_dir.join("init.lock"))?;
+        _lock.lock()?;
+        match read_private(&path, bytes.len() as u64) {
+            Ok(current) if current == bytes => return Ok(path),
+            Ok(_) => {
+                return Err(invalid(
+                    "local reconciliation receipt differs from its decision",
+                ));
+            }
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error),
+        }
+        write_private(&path, &bytes)?;
+        Ok(path)
+    }
+
+    fn reconciliation_path(&self, bytes: &[u8]) -> PathBuf {
+        self.state_file(&format!("reconciliation-{:x}.json", Sha256::digest(bytes)))
+    }
+
     pub fn from_environment(workspace: impl AsRef<Path>) -> io::Result<Self> {
         let workspace = workspace.as_ref().canonicalize()?;
         if !workspace.is_dir() {
@@ -219,6 +249,41 @@ impl LocalPaths {
             paths: self.clone(),
             published: None,
         })
+    }
+}
+
+/// The local Client trusts only exact decisions recorded outside the workspace
+/// by `cayw reconcile`. Caller-owned actor/evidence strings grant no authority.
+pub struct LocalReconciliationVerifier(pub LocalPaths);
+
+fn reconciliation_bytes(request: &cayw_core::ReconciliationRequest) -> io::Result<Vec<u8>> {
+    let actor = match request {
+        cayw_core::ReconciliationRequest::Tool { reconciliation } => &reconciliation.actor,
+        cayw_core::ReconciliationRequest::Capability { reconciliation } => &reconciliation.actor,
+    };
+    if actor != "rpc-user" {
+        return Err(invalid("local reconciliation actor must be rpc-user"));
+    }
+    serde_json::to_vec(request).map_err(io::Error::other)
+}
+
+impl cayw_core::ReconciliationVerifier for LocalReconciliationVerifier {
+    fn verify(&self, request: &cayw_core::ReconciliationRequest) -> Result<(), String> {
+        let verify = || -> io::Result<()> {
+            self.0.validate_existing()?;
+            let expected = reconciliation_bytes(request)?;
+            let recorded = read_private(
+                &self.0.reconciliation_path(&expected),
+                expected.len() as u64,
+            )?;
+            if recorded != expected {
+                return Err(invalid(
+                    "local receipt does not confirm this exact origin and outcome",
+                ));
+            }
+            Ok(())
+        };
+        verify().map_err(|error| format!("local operator confirmation is unavailable: {error}"))
     }
 }
 
