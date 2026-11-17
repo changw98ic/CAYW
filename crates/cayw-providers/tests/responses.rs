@@ -1074,18 +1074,26 @@ async fn empty_argument_fragments_do_not_impose_a_response_quota() {
         8192,
     )
     .await;
-    let events: Vec<_> = tokio::time::timeout(
-        WATCHDOG,
-        ResponsesProvider::new(base, KEY)
-            .unwrap()
-            .stream(request(), CancellationToken::new())
-            .collect(),
-    )
-    .await
-    .unwrap();
+    let mut stream = ResponsesProvider::new(base, KEY)
+        .unwrap()
+        .stream(request(), CancellationToken::new());
+    let mut events = Vec::new();
+    // This is a response-length regression, not a throughput assertion. Keep
+    // the existing hang guard on each next update so a long, progressing
+    // response is not rejected merely for taking over twenty seconds in debug.
+    while let Some(event) = tokio::time::timeout(WATCHDOG, stream.next())
+        .await
+        .expect("Responses fragment stream stopped making progress")
+    {
+        events.push(event);
+    }
     save("fragment-limit", "events.json", &events);
     assert_eq!(terminal(&events).stop_reason, StopReason::ToolUse);
     assert_eq!(terminal(&events).tool_calls().len(), 1);
+    assert_eq!(
+        terminal(&events).tool_calls()[0].arguments,
+        json!({"city":"Paris"})
+    );
     task.await.unwrap();
 }
 
