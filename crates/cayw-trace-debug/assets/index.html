@@ -80,6 +80,26 @@
       <ol id="timeline-list" class="timeline" aria-label="本轮执行步骤"></ol>
     </section>
 
+    <section class="card" aria-labelledby="source-graph-title">
+      <h2 id="source-graph-title">Rust 源码路径图</h2>
+      <p class="hint">从当前工作区的源码推导可能路径。点击图中节点查看源码，展开列表可逐条跟随连线。</p>
+      <form id="source-graph-form" class="login-row">
+        <label for="source-graph-path">工作区相对路径</label>
+        <input id="source-graph-path" placeholder="src/lib.rs" spellcheck="false" required>
+        <button type="submit">加载 Rust 文件</button>
+      </form>
+      <label for="source-graph-function">函数</label>
+      <select id="source-graph-function" disabled></select>
+      <p id="source-graph-status" class="small" role="status"></p>
+      <div id="source-graph-diagram" class="graph-scroll" hidden></div>
+      <p id="source-graph-location" class="small" aria-live="polite"></p>
+      <pre id="source-graph-code" hidden></pre>
+      <details id="source-graph-details" hidden>
+        <summary>节点与连线列表</summary>
+        <ol id="source-graph-nodes" aria-label="源码节点与连线"></ol>
+      </details>
+    </section>
+
     <section class="card graph-card" aria-labelledby="module-graph-title">
       <div class="card-head">
         <h2 id="module-graph-title">模块架构图</h2>

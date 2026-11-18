@@ -87,6 +87,14 @@ python3 -I scripts/validate-trace-debug.py task \
 
 第二条命令仍通过普通 IPC 执行任务。最后在 `serve` 终端按 Ctrl+C 结束演示 Runtime。
 
+## Rust 源码路径图
+
+用 `--workspace` 或 `CAYW_WORKSPACE` 指定仓库根目录。在 Trace Debug 网页的「Rust 源码路径图」中输入工作区相对路径，例如 `crates/cayw-trace-debug/src/server.rs`。加载文件后选择 `guarded_request`。点击图中节点可以查看对应版本的源码。「节点与连线列表」支持逐条查看分支和跳转到已识别的调用目标。
+
+路径来自 Rust 源码的语法分析。它覆盖条件和短路判断、`match` 及其守卫、三种循环、`break`、`continue`、`return`、末尾返回和 `?` 提前返回。首版可链接同文件顶层的 `self::函数` 调用，以及从 `lib.rs`、`main.rs` 或 `mod.rs` 使用标准 `mod` 声明访问的 `self::模块::函数`。调用目标无法确认时会保留调用位置。导入别名、方法类型解析、编译配置和宏展开暂未接入。
+
+源码图显示可能的路径。实际执行和重放仍在原有 Trace 页面中查看。文件内容发生变化时，已有选择会提示重新加载，以免用旧位置打开新源码。
+
 ## 节点接入
 
 可独立重新计算的节点由 `GraphPlan` 声明。每个节点提供 Luau 函数体，以及 `params`、`input_pointer`、模块名称和实现位置。函数参数为 `input, state, params, context`，返回值为：

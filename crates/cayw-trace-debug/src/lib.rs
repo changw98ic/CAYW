@@ -2,6 +2,7 @@
 pub mod capture;
 pub mod engine;
 pub mod server;
+mod source_graph;
 mod storage;
 pub mod symbol_graph;
 pub mod types;

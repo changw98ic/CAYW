@@ -57,6 +57,8 @@
   var openEvidence = new Set();
 
   var ui = {};
+  var sourceView = null;
+  var sourceRequest = 0;
 
   function boot() {
     [
@@ -69,7 +71,10 @@
       'node-empty', 'node-body', 'node-heading', 'node-error', 'node-gaps', 'node-facts',
       'node-source', 'node-params', 'node-pointer', 'save-node', 'discard-draft', 'save-status',
       'revision-count', 'revision-list', 'undo-version', 'undo-node', 'undo-status',
-      'compare-select', 'comparison-body', 'gaps-list'
+      'compare-select', 'comparison-body', 'gaps-list', 'source-graph-form',
+      'source-graph-path', 'source-graph-function', 'source-graph-status',
+      'source-graph-nodes', 'source-graph-location', 'source-graph-code',
+      'source-graph-diagram', 'source-graph-details'
     ].forEach(function (id) { ui[id] = document.getElementById(id); });
 
     ui['login-form'].addEventListener('submit', login);
@@ -81,6 +86,19 @@
     ui['discard-draft'].addEventListener('click', discardDraft);
     ui['undo-node'].addEventListener('click', undoToVersion);
     ui['graph-show-all'].addEventListener('click', showAllModules);
+    ui['source-graph-form'].addEventListener('submit', function (event) {
+      event.preventDefault();
+      loadSourceGraph(ui['source-graph-path'].value, null);
+    });
+    ui['source-graph-function'].addEventListener('change', function (event) {
+      if (sourceView && event.target.value !== '') {
+        loadSourceGraph(sourceView.path, { offset: Number(event.target.value), digest: sourceView.digest });
+      } else {
+        sourceRequest += 1;
+        clearSourceNodes();
+        ui['source-graph-status'].textContent = '请选择函数。';
+      }
+    });
     ['node-source', 'node-params', 'node-pointer'].forEach(function (id) {
       ui[id].addEventListener('input', onEditorInput);
     });
@@ -91,6 +109,226 @@
       }
     });
     ui['web-token'].focus();
+  }
+
+  var sourceNodeLabels = {
+    entry: '入口', exit: '出口', implicit_return: '末尾返回', condition: '条件',
+    let_else: '模式绑定', match: 'match', pattern: '匹配模式', match_end: '没有匹配项',
+    loop: 'loop', while: 'while', for: 'for', iteration_end: '本次循环结束',
+    return: 'return', try: '?', break: 'break', continue: 'continue', diverge: '离开当前路径',
+    call: '调用', macro: '宏', opaque: '表达式'
+  };
+  var sourceEdgeLabels = {
+    next: '下一步', true: '成立', false: '不成立', match: '匹配', no_match: '未匹配',
+    repeat: '回到循环开头', next_item: '有下一项', exhausted: '迭代结束',
+    return: '返回', continue: '继续', early_return: '提前返回', break: '跳出'
+  };
+
+  function clearSourceNodes() {
+    ui['source-graph-nodes'].replaceChildren();
+    ui['source-graph-details'].hidden = true;
+    ui['source-graph-diagram'].replaceChildren();
+    ui['source-graph-diagram'].hidden = true;
+    ui['source-graph-location'].textContent = '';
+    ui['source-graph-code'].textContent = '';
+    ui['source-graph-code'].hidden = true;
+  }
+
+  async function loadSourceGraph(path, selection) {
+    var request = ++sourceRequest;
+    var select = ui['source-graph-function'];
+    var status = ui['source-graph-status'];
+    clearSourceNodes();
+    if (!selection) {
+      sourceView = null;
+      select.replaceChildren();
+      select.disabled = true;
+    }
+    status.textContent = '正在读取源码…';
+    try {
+      var response = await api('/api/source-graph', {
+        method: 'POST', body: JSON.stringify({ path: path, selection: selection })
+      });
+      if (request !== sourceRequest || !connected) return;
+      if (response.status === 401) {
+        disconnect('连接已失效，请重新输入网页访问令牌。');
+        return;
+      }
+      if (response.status !== 200) {
+        status.textContent = response.payload?.error?.message || '无法读取源码路径';
+        if (response.status === 409) select.disabled = true;
+        return;
+      }
+      sourceView = response.payload;
+      ui['source-graph-path'].value = sourceView.path;
+      select.replaceChildren(new Option('选择函数', ''));
+      sourceView.functions.forEach(function (fn) {
+        select.appendChild(new Option(fn.name + ' · 第 ' + fn.location.line + ' 行', fn.location.bytes.start));
+      });
+      select.disabled = !sourceView.functions.length;
+      if (!selection) {
+        status.textContent = select.disabled ? '文件中没有可分析的函数体。' : '请选择函数。';
+        return;
+      }
+      select.value = String(selection.offset);
+      renderSourceGraph(sourceView);
+      status.textContent = '静态路径 · ' + sourceView.graph.nodes.length + ' 个节点';
+    } catch (error) {
+      if (request === sourceRequest && connected) status.textContent = '无法读取源码路径：' + error.message;
+    }
+  }
+
+  function renderSourceGraph(view) {
+    var graph = view.graph;
+    var sourceLines = view.source.split('\n');
+    var outgoing = graph.nodes.map(function () { return []; });
+    graph.edges.forEach(function (edge) { outgoing[edge.from].push(edge); });
+    var reachable = new Set();
+    var pending = [graph.entry];
+    for (var index = 0; index < pending.length; index += 1) {
+      var id = pending[index];
+      if (reachable.has(id)) continue;
+      reachable.add(id);
+      outgoing[id].forEach(function (edge) { pending.push(edge.to); });
+    }
+    var buttons = [];
+    var diagramNodes = [];
+    var active = null;
+
+    function show(id, focus) {
+      var location = graph.nodes[id].location;
+      var first = Math.max(0, location.line - 3);
+      var last = location.line + 2;
+      ui['source-graph-location'].textContent = view.path + ':' + location.line + ':' + location.column + ' · SHA-256 ' + view.digest;
+      ui['source-graph-code'].textContent = sourceLines.slice(first, last).map(function (line, index) {
+        var number = first + index + 1;
+        return (number === location.line ? '› ' : '  ') + number + ' | ' + line;
+      }).join('\n');
+      ui['source-graph-code'].hidden = false;
+      if (active !== null) {
+        buttons[active].removeAttribute('aria-current');
+        diagramNodes[active].classList.remove('is-selected');
+        diagramNodes[active].setAttribute('aria-pressed', 'false');
+      }
+      buttons[id].setAttribute('aria-current', 'true');
+      diagramNodes[id].classList.add('is-selected');
+      diagramNodes[id].setAttribute('aria-pressed', 'true');
+      active = id;
+      if (focus) buttons[id].focus();
+    }
+
+    function label(id) {
+      var node = graph.nodes[id];
+      return sourceNodeLabels[node.kind] + ' · ' + node.location.line + ':' + node.location.column;
+    }
+
+    var order = graph.nodes.map(function (_, id) { return id; });
+    order.sort(function (a, b) {
+      if (a === graph.entry || b === graph.entry) return a === b ? 0 : a === graph.entry ? -1 : 1;
+      return graph.nodes[a].location.bytes.start - graph.nodes[b].location.bytes.start || b - a;
+    });
+    var rows = document.createDocumentFragment();
+    order.forEach(function (id) {
+      var node = graph.nodes[id];
+      var row = el('li');
+      var button = el('button', 'secondary', label(id));
+      button.type = 'button';
+      button.addEventListener('click', function () { show(id, false); });
+      buttons[id] = button;
+      row.appendChild(button);
+      if (!reachable.has(id)) row.appendChild(el('span', 'small muted', ' · 图中无入口路径'));
+      if (node.detail) row.appendChild(el('span', 'small muted', ' · ' + node.detail));
+      if (node.target) {
+        var target = el('button', 'secondary', '打开函数 · ' + node.target.path + ':' + node.target.location.line);
+        target.type = 'button';
+        target.addEventListener('click', function () {
+          if (node.target.path !== view.path) {
+            sourceView = null;
+            ui['source-graph-path'].value = node.target.path;
+            ui['source-graph-function'].replaceChildren();
+            ui['source-graph-function'].disabled = true;
+          }
+          loadSourceGraph(node.target.path, { offset: node.target.location.bytes.start, digest: node.target.digest });
+        });
+        row.appendChild(target);
+      }
+      if (outgoing[id].length) {
+        var connections = el('ul');
+        outgoing[id].forEach(function (edge) {
+          var connection = el('li');
+          var jump = el('button', 'secondary', sourceEdgeLabels[edge.kind] + ' → ' + label(edge.to));
+          jump.type = 'button';
+          jump.addEventListener('click', function () { show(edge.to, true); });
+          connection.appendChild(jump);
+          connections.appendChild(connection);
+        });
+        row.appendChild(connections);
+      }
+      rows.appendChild(row);
+    });
+    ui['source-graph-nodes'].replaceChildren(rows);
+    ui['source-graph-details'].hidden = false;
+
+    var layout = layoutNodes(order.map(function (id) { return { id: id }; }), graph.edges.filter(function (edge) {
+      return edge.kind !== 'repeat';
+    }));
+    var diagram = makeGraph(layout.width + 24, layout.height, 'Rust 源码路径图');
+    addArrow(diagram, 'trace-arrow-source');
+    graph.edges.forEach(function (edge) {
+      var from = layout.positions.get(edge.from);
+      var to = layout.positions.get(edge.to);
+      var route;
+      if (edge.kind === 'repeat') {
+        var right = layout.width + 8;
+        var fromY = from.y + layout.nodeHeight / 2;
+        var toY = to.y + layout.nodeHeight / 2;
+        route = 'M ' + (from.x + layout.nodeWidth) + ' ' + fromY + ' H ' + right + ' V ' + toY + ' H ' + (to.x + layout.nodeWidth);
+      } else {
+        route = edgePath(from, to, layout, from.layer === to.layer ? 'same-layer' : '');
+      }
+      var path = svgEl('path', { d: route, class: 'g-edge', 'marker-end': 'url(#trace-arrow-source)' });
+      var title = svgEl('title');
+      title.textContent = label(edge.from) + ' · ' + sourceEdgeLabels[edge.kind] + ' → ' + label(edge.to);
+      path.appendChild(title);
+      diagram.appendChild(path);
+      if (edge.kind !== 'next' && edge.kind !== 'repeat') {
+        var edgeLabel = svgEl('text', {
+          x: (from.x + to.x + layout.nodeWidth) / 2,
+          y: (from.y + to.y + layout.nodeHeight) / 2,
+          class: 'g-edge-label', 'text-anchor': 'middle'
+        });
+        edgeLabel.textContent = sourceEdgeLabels[edge.kind];
+        diagram.appendChild(edgeLabel);
+      }
+    });
+    order.forEach(function (id) {
+      var position = layout.positions.get(id);
+      var node = graph.nodes[id];
+      var group = svgEl('g', {
+        class: 'g-node status-none', tabindex: '0', role: 'button',
+        'aria-pressed': 'false', 'aria-label': label(id)
+      });
+      group.appendChild(svgEl('rect', {
+        class: 'box', x: position.x, y: position.y, width: layout.nodeWidth, height: layout.nodeHeight, rx: 8
+      }));
+      var title = svgEl('text', { class: 'g-title', x: position.x + 10, y: position.y + 24 });
+      title.textContent = label(id);
+      var snippet = svgEl('text', { class: 'g-subtitle', x: position.x + 10, y: position.y + 47 });
+      snippet.textContent = clip(sourceLines[node.location.line - 1].trim(), 22);
+      group.append(title, snippet);
+      group.addEventListener('click', function () { show(id, false); });
+      group.addEventListener('keydown', function (event) {
+        if (event.key === 'Enter' || event.key === ' ') {
+          event.preventDefault();
+          show(id, false);
+        }
+      });
+      diagramNodes[id] = group;
+      diagram.appendChild(group);
+    });
+    ui['source-graph-diagram'].replaceChildren(diagram);
+    ui['source-graph-diagram'].hidden = false;
+    show(graph.entry, false);
   }
 
   // ---------- small helpers ----------
@@ -585,6 +823,12 @@
     activeControllers.clear();
     token = '';
     doc = null;
+    sourceView = null;
+    sourceRequest += 1;
+    clearSourceNodes();
+    ui['source-graph-function'].replaceChildren();
+    ui['source-graph-function'].disabled = true;
+    ui['source-graph-status'].textContent = '';
     editorKey = null;
     pendingSave = false;
     pendingUndo = false;

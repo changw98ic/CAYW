@@ -56,6 +56,7 @@ struct Server {
     cancel: CancellationToken,
     /// Same F04 bridge instance Host/editor hold when the app wires one.
     codeintel: Option<SymbolVersionBridge>,
+    source_root: Option<Result<Arc<cap_std::fs::Dir>, std::io::Error>>,
 }
 
 /// Serve the trace debug interface on an already-bound loopback listener.
@@ -93,8 +94,12 @@ pub async fn serve_with_codeintel(
             "trace debug web token must contain 32..4096 ASCII bytes without whitespace".into(),
         ));
     }
+    let source_root = store.workspace_root().map(|root| {
+        cap_std::fs::Dir::open_ambient_dir(root, cap_std::ambient_authority()).map(Arc::new)
+    });
     let state = Arc::new(Server {
         store,
+        source_root,
         inspector: Mutex::new(InspectorPrefix::default()),
         web_token,
         authorities: authorities(address),
@@ -116,6 +121,7 @@ pub async fn serve_with_codeintel(
             "/api/codeintel/file-version",
             post(codeintel_file_version_route),
         )
+        .route("/api/source-graph", post(source_graph_route))
         .route("/api/run-inspector", get(run_inspector_route))
         .route("/api/projects/{project_id}/edit", post(edit_route))
         .route("/api/projects/{project_id}/undo", post(undo_route))
@@ -411,6 +417,75 @@ async fn codeintel_file_version_route(
             StatusCode::BAD_REQUEST,
             "invalid_request",
             &error.to_string(),
+        ),
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SourceGraphBody {
+    path: String,
+    selection: Option<SourceSelection>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SourceSelection {
+    offset: usize,
+    digest: String,
+}
+
+async fn source_graph_route(
+    State(state): State<Arc<Server>>,
+    payload: Result<Json<SourceGraphBody>, JsonRejection>,
+) -> Response {
+    let Ok(Json(body)) = payload else {
+        return error_response(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "invalid",
+            "源码图请求格式有误",
+        );
+    };
+    let root = match &state.source_root {
+        Some(Ok(root)) => root.clone(),
+        Some(Err(error)) => {
+            return error_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "source_io",
+                &format!("无法打开工作区：{error}"),
+            );
+        }
+        None => {
+            return error_response(
+                StatusCode::NOT_FOUND,
+                "not_found",
+                "Trace Debug 启动时未设置工作区",
+            );
+        }
+    };
+    let selection = body
+        .selection
+        .map(|selection| (selection.offset, selection.digest));
+    match tokio::task::spawn_blocking(move || {
+        crate::source_graph::inspect(&root, body.path, selection)
+    })
+    .await
+    {
+        Ok(Ok(view)) => Json(view).into_response(),
+        Ok(Err(Error::Io(error))) => error_response(
+            match error.kind() {
+                std::io::ErrorKind::NotFound => StatusCode::NOT_FOUND,
+                std::io::ErrorKind::InvalidData => StatusCode::UNPROCESSABLE_ENTITY,
+                _ => StatusCode::BAD_REQUEST,
+            },
+            "source_io",
+            &format!("无法读取源码：{error}"),
+        ),
+        Ok(Err(error)) => store_error(error),
+        Err(_) => error_response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "source_analysis",
+            "源码分析任务意外退出",
         ),
     }
 }

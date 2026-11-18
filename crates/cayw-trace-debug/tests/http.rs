@@ -89,6 +89,124 @@ async fn raw(address: SocketAddr, request: String) -> String {
 }
 
 #[tokio::test]
+async fn source_graph_projects_rust_paths_without_a_trace_plan() {
+    let directory = tempfile::tempdir().unwrap();
+    let source = "\u{feff}#!/usr/bin/env rust-script\nmod helper;\nfn 本地() {}\nfn run(items: &[u8]) -> Option<()> {\n    'outer: for item in items {\n        match item {\n            0 if self::helper::check() => continue 'outer,\n            1 => break 'outer,\n            2 => return None,\n            _ => self::helper::maybe()?,\n        }\n        self::本地();\n        item.abs_diff(3);\n    }\n    Some(())\n}\n";
+    std::fs::write(directory.path().join("lib.rs"), source).unwrap();
+    std::fs::write(
+        directory.path().join("helper.rs"),
+        "pub fn check() -> bool { true }\npub fn maybe() -> Option<()> { Some(()) }",
+    )
+    .unwrap();
+    std::os::unix::fs::symlink("lib.rs", directory.path().join("link.rs")).unwrap();
+    let store =
+        TraceStore::open_with_workspace(directory.path().join("trace.json"), directory.path())
+            .unwrap();
+    let server = start_store(directory, store, TOKEN.to_owned()).await;
+    let client = client();
+    let endpoint = url(server.address, "/api/source-graph");
+    let post = |body| client.post(&endpoint).bearer_auth(TOKEN).json(&body);
+    assert_eq!(
+        client
+            .post(&endpoint)
+            .json(&json!({"path":"lib.rs"}))
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        401
+    );
+    for path in ["link.rs", "../lib.rs", "/lib.rs"] {
+        assert!(
+            !post(json!({"path":path}))
+                .send()
+                .await
+                .unwrap()
+                .status()
+                .is_success(),
+            "{path}"
+        );
+    }
+    let view: serde_json::Value = post(json!({"path":"lib.rs"}))
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(view["source"], source);
+    assert!(view["graph"].is_null());
+    assert_eq!(
+        view["functions"][0]["location"]["bytes"]["start"],
+        source.find("本地").unwrap()
+    );
+    let body = json!({"path":"lib.rs", "selection":{
+        "offset":view["functions"][1]["location"]["bytes"]["start"], "digest":view["digest"]
+    }});
+    let view: serde_json::Value = post(body.clone())
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let nodes = view["graph"]["nodes"].as_array().unwrap();
+    let edges = view["graph"]["edges"].as_array().unwrap();
+    let kind = |id: &serde_json::Value| {
+        nodes[id.as_u64().unwrap() as usize]["kind"]
+            .as_str()
+            .unwrap()
+    };
+    let edge = |from, to, label| {
+        edges.iter().any(|edge| {
+            kind(&edge["from"]) == from && kind(&edge["to"]) == to && edge["kind"] == label
+        })
+    };
+    assert!(edge("continue", "for", "repeat"));
+    assert!(edge("iteration_end", "for", "repeat"));
+    assert!(edge("break", "call", "break"));
+    assert!(edge("condition", "continue", "true"));
+    assert!(edge("condition", "pattern", "false"));
+    assert!(edge("return", "exit", "return"));
+    assert!(edge("try", "exit", "early_return"));
+    assert!(edge("implicit_return", "exit", "next"));
+    let target = &nodes
+        .iter()
+        .find(|node| node["target"]["path"] == "helper.rs")
+        .unwrap()["target"];
+    let cross_file: serde_json::Value = post(json!({"path":target["path"], "selection":{
+        "offset":target["location"]["bytes"]["start"], "digest":target["digest"]
+    }}))
+    .send()
+    .await
+    .unwrap()
+    .error_for_status()
+    .unwrap()
+    .json()
+    .await
+    .unwrap();
+    assert_eq!(cross_file["path"], "helper.rs");
+    assert!(cross_file["graph"].is_object());
+    assert!(nodes.iter().any(|node| node["target"]["path"] == "lib.rs"));
+    assert!(
+        nodes
+            .iter()
+            .any(|node| node["kind"] == "call" && node["detail"].is_string())
+    );
+    std::fs::write(
+        server._directory.path().join("lib.rs"),
+        format!("// edit\n{source}"),
+    )
+    .unwrap();
+    assert_eq!(post(body).send().await.unwrap().status(), 409);
+    server.shutdown().await;
+}
+
+#[tokio::test]
 async fn refuses_public_listener_and_unusable_web_tokens() {
     let directory = tempfile::tempdir().unwrap();
     let store = TraceStore::open(directory.path().join("trace.json")).unwrap();
