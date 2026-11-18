@@ -193,7 +193,7 @@ async fn static_page_is_host_guarded_and_api_requires_the_web_token() {
         .unwrap();
     assert_eq!(response.status(), reqwest::StatusCode::OK);
     let document: serde_json::Value = response.json().await.unwrap();
-    assert_eq!(document["schema"], "cayw.trace.v1");
+    assert_eq!(document["schema"], "cayw.trace.state.v1");
     assert_eq!(document["sequence"], 0);
     assert!(document["projects"].is_object());
 
@@ -285,7 +285,14 @@ async fn workbench_navigation_opens_only_the_login_document() {
         .await
         .unwrap();
     assert_eq!(response.status(), reqwest::StatusCode::OK);
-    assert_eq!(response.json::<Document>().await.unwrap().sequence, 0);
+    assert_eq!(
+        response
+            .json::<cayw_trace_debug::StateUpdate>()
+            .await
+            .unwrap()
+            .sequence,
+        0
+    );
     running.shutdown().await;
 }
 
@@ -664,7 +671,7 @@ async fn ingest_symbol_hangs_surface_through_http_state() {
         .await
         .unwrap();
     assert_eq!(response.status(), reqwest::StatusCode::OK);
-    let document: Document = response.json().await.unwrap();
+    let document: cayw_trace_debug::StateUpdate = response.json().await.unwrap();
     let hangs = &document.projects["exec"].symbol_hangs;
     assert_eq!(
         hangs.len(),
@@ -863,5 +870,58 @@ async fn run_inspector_route_cross_page_pagination_is_equivalent_to_full_project
     combined_steps.extend(page2_steps.clone());
     assert_eq!(combined_steps, *full_steps);
 
+    running.shutdown().await;
+}
+
+#[tokio::test]
+async fn browser_state_omits_raw_history_and_evidence_is_loaded_by_exact_cursor() {
+    let directory = tempfile::tempdir().unwrap();
+    let store = TraceStore::open(directory.path().join("trace.json")).unwrap();
+    let event = EventRecord {
+        protocol_version: cayw_core::PROTOCOL_VERSION,
+        session_id: "session".into(),
+        cursor: 1,
+        timestamp: 1,
+        attempt: None,
+        event: CoreEvent::Host {
+            kind: "large-evidence".into(),
+            data: json!({"payload":"x".repeat(1024 * 1024)}),
+        },
+    };
+    store.ingest(std::slice::from_ref(&event)).unwrap();
+    let sequence = store.sequence();
+    let initial = store.state_update(None);
+    assert!(initial.reset);
+    assert_eq!(initial.sessions["session"].after, 1);
+    let small = serde_json::to_value(&initial).unwrap();
+    assert!(small.get("events").is_none());
+    assert!(!small.to_string().contains("payload"));
+    assert!(store.state_update(Some(sequence)).projects.is_empty());
+    let running = start_store(directory, store, TOKEN.into()).await;
+    let path = url(running.address, "/api/events/session/1");
+    assert_eq!(
+        client().get(&path).send().await.unwrap().status(),
+        reqwest::StatusCode::UNAUTHORIZED
+    );
+    let original: EventRecord = client()
+        .get(path)
+        .bearer_auth(TOKEN)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(original, event);
+    assert_eq!(
+        client()
+            .get(url(running.address, "/api/events/session/2"))
+            .bearer_auth(TOKEN)
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        reqwest::StatusCode::NOT_FOUND
+    );
     running.shutdown().await;
 }

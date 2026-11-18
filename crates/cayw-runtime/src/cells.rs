@@ -621,6 +621,9 @@ impl CellBackend for Backend {
             Ok(()) if crate::collaboration::is_tool(name) => {
                 crate::collaboration::invoke(&scope, &self.base, arguments, cancel).await
             }
+            Ok(()) if crate::visual_tools::is_tool(name) => {
+                crate::visual_tools::invoke(&scope, &self.base, arguments, cancel).await
+            }
             Ok(()) if crate::content::is_tool(name) => {
                 crate::content::invoke(&scope, &self.base, arguments, cancel).await
             }

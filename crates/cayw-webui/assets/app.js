@@ -53,10 +53,16 @@ function textOnly(message) {
   return clip(array(message?.content).filter(part => part.type === 'text').map(part => part.text ?? '').join('\n'));
 }
 
-export function messagePresentation(message) {
+export function messagePresentation(message, execution = null) {
   const raw = message?.role === 'toolResult' ? null : messageText(message);
   if (message?.role === 'toolResult') {
-    const page = message.structured_content;
+    const original = message.structured_content;
+    // Keep the original tool receipt intact. Later durable execution facts
+    // update the card even when no model wait call returned a terminal page.
+    const terminal = execution && execution.execution_id === original?.cell_id ? execution.terminal : null;
+    const page = terminal && ['running', 'yielded'].includes(original?.status)
+      ? { ...original, status: execution.state, vm_alive: false, error: terminal.error ?? terminal.reason ?? null }
+      : original;
     const knownPage = message.tool_name === 'execute_code' && object(page) && ['completed', 'failed', 'cancelled', 'outcome_unknown', 'interrupted', 'running', 'yielded'].includes(page.status) && Array.isArray(page.outputs);
     const interrupted = Boolean(message.outcome_unknown || (knownPage && (page.outcome_unknown || page.status === 'outcome_unknown' || page.status === 'interrupted')));
     const status = interrupted ? 'interrupted' : message.is_error && page?.status !== 'cancelled' ? 'failed' : knownPage ? page.status : 'record';
@@ -76,7 +82,7 @@ export function messagePresentation(message) {
     else if (status === 'cancelled') detail = '任务已停止。';
     else if (status === 'failed') {
       const reason = typeof page?.error === 'string' ? page.error : '';
-      detail = /permission denied/.test(reason) ? '有一项操作未获授权，任务已结束。' : /^Timeout:/.test(reason) ? '任务超过本次运行时限。' : '执行未完成，可展开查看原因。';
+      detail = reason || '执行未完成，可展开查看原因。';
     }
     return { kind: 'tool_result', title, status, text: detail, values, get raw() { return messageText(message); } };
   }
@@ -89,7 +95,7 @@ export function messagePresentation(message) {
 }
 
 export function createView(id) {
-  return { id, cursor: 0, snapshot: null, events: [], liveText: '', totalMessages: 0, snapshotAfter: 0, proofEpoch: 0, snapshotEpoch: 0, writes: [], faults: {}, activeAttempt: null, approvalQuestions: {} };
+  return { id, cursor: 0, snapshot: null, executions: {}, events: [], liveText: '', totalMessages: 0, snapshotAfter: 0, proofEpoch: 0, snapshotEpoch: 0, writes: [], faults: {}, activeAttempt: null, approvalQuestions: {} };
 }
 
 const validLease = lease => object(lease) && ['session_id', 'attempt_id', 'worker_id'].every(key => typeof lease[key] === 'string' && lease[key].length > 0) && safeCursor(lease.fence) && lease.fence > 0;
@@ -386,6 +392,7 @@ export function applySnapshot(view, snapshot, initial = false, requestedAfter = 
     approvalQuestions: Object.fromEntries(Object.entries(view.approvalQuestions ?? {}).filter(([id]) => pendingIds.has(id))),
     activeAttempt: object(snapshot.attempt) && !sameLease(snapshot.attempt,view.activeAttempt?.lease) ? { lease:snapshot.attempt, after:snapshot.cursor, terminal:null } : view.activeAttempt,
     snapshot,
+    executions: Object.fromEntries(array(snapshot.executions).map(execution => [execution.execution_id, execution])),
     totalMessages: snapshot.messages.length,
     snapshotAfter: Math.max(view.snapshotAfter, requestedAfter),
     snapshotEpoch: Math.max(view.snapshotEpoch, requestedEpoch),
@@ -412,10 +419,15 @@ export function consumeEvents(view, records) {
     }
     previous = record.cursor;
   }
-  let next = { ...view, events: [...view.events] };
+  let next = { ...view, executions: { ...view.executions }, events: [...view.events] };
   for (const record of records) {
     if (record.cursor <= view.cursor) continue;
     const event = declaredAgentEvent(record.event ?? record);
+    if (record.cursor > (view.snapshot?.cursor ?? 0) && ['execution_started', 'execution_yielded', 'execution_finished'].includes(event.type)) {
+      next.executions[event.execution.execution_id] = event.execution;
+    } else if (record.cursor > (view.snapshot?.cursor ?? 0) && event.type === 'attempt_recovered') {
+      for (const execution of event.executions) next.executions[execution.execution_id] = execution;
+    }
     if (event.type === 'text_delta' && typeof event.delta === 'string') {
       next.liveText = `${next.liveText}${event.delta}`;
     } else if (event.type === 'message_update') {
@@ -780,7 +792,7 @@ function boot() {
     for (const [index, message] of messages.entries()) {
       const role = ['user', 'assistant', 'system', 'toolResult', 'custom'].includes(message.role) ? message.role : 'custom';
       const card = el('article', `message ${role}`);
-      const presentation = messagePresentation(message);
+      const presentation = messagePresentation(message, view.executions[message.structured_content?.cell_id]);
       const key = `${message.tool_call_id ?? message.timestamp ?? index}/${index}`;
       card.append(el('div', 'role', ({ user: '你', assistant: '助手', system: '系统', toolResult: '工具结果', custom: '宿主记录' })[role]));
       if (presentation.kind === 'text') card.append(el('div', 'body', presentation.text));

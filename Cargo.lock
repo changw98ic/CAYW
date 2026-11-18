@@ -867,6 +867,7 @@ dependencies = [
  "cayw-runtime",
  "futures",
  "reqwest",
+ "rusqlite",
  "serde",
  "serde_json",
  "sha2",

@@ -710,6 +710,71 @@ async fn external_error_payload_is_bounded_before_audit_and_return() {
 struct WaitingGate {
     entered: tokio::sync::Notify,
 }
+
+struct DelayedDecision {
+    wait: Duration,
+    cancel_on_decision: bool,
+}
+#[async_trait]
+impl PermissionGate for DelayedDecision {
+    async fn authorize(
+        &self,
+        _: &str,
+        _: &Value,
+        cancel: CancellationToken,
+    ) -> Result<(), CapabilityError> {
+        tokio::time::sleep(self.wait).await;
+        if self.cancel_on_decision {
+            cancel.cancel();
+        }
+        Ok(())
+    }
+}
+
+#[tokio::test]
+async fn permission_wait_does_not_spend_execution_time_and_late_allow_cannot_override_cancel() {
+    // The wait intentionally crosses the configured execution budget. There is
+    // no assertion on wall-clock speed; a busy machine may take arbitrarily longer.
+    for cancel_on_decision in [false, true] {
+        let root = Workspace::new();
+        let audit = Arc::new(Audit::default());
+        let host = Host::new(
+            root.path(),
+            Arc::new(DelayedDecision {
+                wait: Duration::from_secs(3),
+                cancel_on_decision,
+            }),
+            audit.clone(),
+            HostConfig {
+                call_timeout: Some(Duration::from_secs(2)),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let result = call(
+            &host,
+            "fs.write",
+            json!({"path":"result.txt","content":"once"}),
+        )
+        .await;
+        if cancel_on_decision {
+            let error = result.unwrap_err();
+            assert!(!error.outcome_unknown);
+            assert!(audit.records.lock().unwrap().is_empty());
+            assert!(!root.path().join("result.txt").exists());
+        } else {
+            result.unwrap();
+            assert_eq!(
+                std::fs::read_to_string(root.path().join("result.txt")).unwrap(),
+                "once"
+            );
+            assert_eq!(
+                *audit.records.lock().unwrap(),
+                ["start:fs.write", "success"]
+            );
+        }
+    }
+}
 #[async_trait]
 impl PermissionGate for WaitingGate {
     async fn authorize(

@@ -73,6 +73,7 @@ struct OpenCall {
 #[derive(Default)]
 struct ExecutionProjection {
     state: Option<ExecutionState>,
+    terminal_at_ms: Option<u64>,
     terminal_error: Option<String>,
     // Keep only diagnostic facts, never raw capability arguments or outputs.
     diagnostics: BTreeMap<u64, (StepOutcome, String)>,
@@ -82,6 +83,11 @@ struct ExecutionProjection {
 
 impl ExecutionProjection {
     fn project(&self, step: &mut RunStep) {
+        if let Some(ended) = self.terminal_at_ms {
+            step.elapsed_ms = step
+                .elapsed_ms
+                .max(ended.saturating_sub(step.started_at_ms));
+        }
         let unknown = self
             .diagnostics
             .values()
@@ -251,6 +257,9 @@ impl SessionBuilder {
             .entry(execution.execution_id.clone())
             .or_default();
         projection.state = Some(execution.state);
+        if execution.terminal.is_some() && projection.terminal_at_ms.is_none() {
+            projection.terminal_at_ms = Some(record.timestamp);
+        }
         projection.terminal_error = match &execution.terminal {
             Some(ExecutionOutcome::Failed { error }) => Some(error.clone()),
             Some(

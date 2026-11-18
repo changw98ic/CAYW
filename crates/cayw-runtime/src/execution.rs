@@ -1789,10 +1789,12 @@ async fn execute_with_cells(
         &context.cancel,
         context.scope.deadline().map(tokio::time::Instant::from_std),
         || async { context.check(&context.cancel) },
-        || {
+        |reason| {
             context.cells_stopping.store(true, Ordering::Release);
             if context.unknown.load(Ordering::Acquire) {
                 agent.control().stop_with_error(UNKNOWN_STOP);
+            } else if let Some(reason) = reason {
+                agent.control().stop_with_error(reason);
             } else {
                 agent.control().abort();
             }
@@ -1814,7 +1816,7 @@ where
     F: std::future::Future<Output = Result<(), RuntimeError>>,
     C: FnMut() -> CF,
     CF: std::future::Future<Output = Result<(), RuntimeError>>,
-    A: FnMut(),
+    A: FnMut(Option<String>),
 {
     tokio::pin!(run);
     let mut fence = tokio::time::interval(Duration::from_millis(25));
@@ -1836,14 +1838,14 @@ where
                     other => other,
                 };
             }
-            _ = cancel.cancelled() => { abort(); return run.await; },
+            _ = cancel.cancelled() => { abort(None); return run.await; },
             _ = async {
                 match deadline {
                     Some(deadline) => tokio::time::sleep_until(deadline).await,
                     None => std::future::pending::<()>().await,
                 }
             } => {
-                abort();
+                abort(Some(RuntimeError::Budget("time").to_string()));
                 return match run.await {
                     Ok(()) => Err(RuntimeError::Budget("time")),
                     Err(error) => Err(error),
@@ -1853,13 +1855,13 @@ where
                 if let Err(error) = check().await {
                     if matches!(error, RuntimeError::Budget("time")) {
                         expired = true;
-                        abort();
+                        abort(Some(error.to_string()));
                     } else if matches!(error, RuntimeError::Cancelled) {
                         cancel.cancel();
                     } else {
                         // A known stop must keep its cause after the Agent has
                         // joined. The user cancellation token is a separate fact.
-                        abort();
+                        abort(Some(error.to_string()));
                         return match run.await {
                             Err(cleanup @ RuntimeError::RecoveryRequired { .. }) => Err(cleanup),
                             _ => Err(error),
@@ -1964,7 +1966,7 @@ mod tests {
                 tokio::time::advance(Duration::from_millis(100)).await;
                 Ok(())
             },
-            || panic!("a valid response must not be cancelled"),
+            |_| panic!("a valid response must not be cancelled"),
         )
         .await
         .unwrap();
@@ -1994,7 +1996,7 @@ mod tests {
                 cancel.cancel();
                 Ok(())
             },
-            || finished.cancel(),
+            |_| finished.cancel(),
         )
         .await
         .unwrap();
@@ -2022,7 +2024,10 @@ mod tests {
                 &cancel,
                 Some(tokio::time::Instant::now() + Duration::from_secs(10)),
                 || std::future::ready(Err(failure.take().unwrap())),
-                || stopped.cancel(),
+                |reason| {
+                    assert_eq!(reason.as_deref(), Some(expected.as_str()));
+                    stopped.cancel();
+                },
             )
             .await
             .unwrap_err();
@@ -2044,7 +2049,7 @@ mod tests {
             &cancel,
             Some(tokio::time::Instant::now() + Duration::from_secs(10)),
             || async { Err(RuntimeError::Cancelled) },
-            || finished.cancel(),
+            |_| finished.cancel(),
         )
         .await
         .unwrap();

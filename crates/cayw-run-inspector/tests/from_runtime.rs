@@ -393,3 +393,74 @@ fn windowed_projection_preserves_start_timestamp_across_page_boundary() {
     let merged = merge_session_snapshots(session, None, None, &[page1_snapshot, page2_snapshot]);
     assert_eq!(merged, full_snapshot);
 }
+
+#[test]
+fn background_terminal_duration_includes_waiting_after_first_page() {
+    use cayw_core::{AttemptLease, ExecutionOutcome, ExecutionRecord, ExecutionState};
+    let session = "timed";
+    let call = call(
+        "original",
+        "execute_code",
+        json!({"action":"exec","script":"return 1"}),
+    );
+    let mut execution = ExecutionRecord {
+        execution_id: "cell".into(),
+        parent_call_id: call.id.clone(),
+        task_id: "task".into(),
+        source_hash: "hash".into(),
+        lease: AttemptLease {
+            session_id: session.into(),
+            attempt_id: "attempt".into(),
+            worker_id: "worker".into(),
+            fence: 1,
+        },
+        state: ExecutionState::Running,
+        terminal: None,
+    };
+    let mut records = vec![
+        record(
+            session,
+            1,
+            1000,
+            agent(AgentEvent::ToolExecutionStart { call: call.clone() }),
+        ),
+        record(
+            session,
+            2,
+            1100,
+            CoreEvent::ExecutionStarted {
+                execution: execution.clone(),
+            },
+        ),
+        record(
+            session,
+            3,
+            2000,
+            agent(AgentEvent::ToolExecutionEnd {
+                call,
+                result: ToolResult {
+                    structured_content: Some(
+                        json!({"cell_id":"cell","status":"running","vm_alive":true}),
+                    ),
+                    ..Default::default()
+                },
+                duration_ms: Some(1000),
+            }),
+        ),
+    ];
+    execution.state = ExecutionState::Failed;
+    execution.terminal = Some(ExecutionOutcome::Failed {
+        error: "host failure".into(),
+    });
+    records.push(record(
+        session,
+        4,
+        122000,
+        CoreEvent::ExecutionFinished { execution },
+    ));
+    let snapshot = snapshot_from_runtime_events(session, None, None, &records);
+    assert_eq!(snapshot.steps[0].elapsed_ms, 121000);
+    assert_eq!(snapshot.steps[0].outcome, StepOutcome::Failed);
+    let page = snapshot_from_runtime_events_window(session, None, None, &records, 3, 4);
+    assert_eq!(page.steps, snapshot.steps);
+}

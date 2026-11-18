@@ -1440,25 +1440,15 @@ impl Host {
         cancel: CancellationToken,
         service: Option<&dyn ExternalHost>,
     ) -> Result<Value, CapabilityError> {
-        let deadline =
-            call_deadline(self.config.call_timeout).map_err(|error| self.diagnostic(error))?;
         // Wait for any already-started call on this lane before validating or
         // asking permission, but do not hold the lane across an async permission
         // wait so another cell can run approval.pending / approval.decide.
         tokio::select! { biased;
             _ = cancel.cancelled() => return Err(self.diagnostic(CapabilityError::stopped(CapabilityStop::Cancelled, "capability cancelled while queued"))),
-            _ = sleep_deadline(deadline) => return Err(self.diagnostic(CapabilityError::stopped(CapabilityStop::Timeout, "capability queue deadline reached"))),
             guard = self.execution.lock() => drop(guard),
         }
         let (mut call, mut lane) = self
-            .admit_owned(
-                capability,
-                arguments,
-                cancel,
-                service.is_some(),
-                true,
-                deadline,
-            )
+            .admit_owned(capability, arguments, cancel, service.is_some(), true)
             .await?;
         let name = capability.definition.name.as_str();
         let delegated = service.is_some_and(ExternalHost::delegates_workspace_calls);
@@ -1525,13 +1515,12 @@ impl Host {
         cancel: CancellationToken,
         service: bool,
         lock_execution: bool,
-        deadline: Option<Instant>,
     ) -> Result<(OwnedCall, Option<tokio::sync::MutexGuard<'a, ()>>), CapabilityError> {
         let name = capability.definition.name.as_str();
         let child = cancel.child_token();
         let cancel_on_drop = CancelCall(child.clone());
         let admission = (|| {
-            self.check(&child, deadline)?;
+            self.check(&child, None)?;
             let argument_limit = match capability.executor {
                 Executor::Data => self.config.data.and_then(|limits| limits.input_bytes),
                 Executor::Workspace => self
@@ -1559,12 +1548,11 @@ impl Host {
         };
         // Permission may wait for a user. It holds no lane needed by a reader
         // completing its original Core/Cells acknowledgment.
-        self.check(&child, deadline)
+        self.check(&child, None)
             .map_err(|error| response.error(error))?;
         tokio::select! {
             biased;
             _ = child.cancelled() => return Err(response.error(CapabilityError::stopped(CapabilityStop::Cancelled, "capability cancelled before permission"))),
-            _ = sleep_deadline(deadline) => return Err(response.error(CapabilityError::stopped(CapabilityStop::Timeout, "capability permission deadline reached"))),
             result = self.gate.authorize(name, &arguments.0, child.clone()) => {
                 if let Err(error) = result {
                     if error.outcome_unknown { self.safety.unknown.store(true, Ordering::Release); }
@@ -1576,12 +1564,15 @@ impl Host {
             Some(tokio::select! {
                 biased;
                 _ = child.cancelled() => return Err(response.error(CapabilityError::stopped(CapabilityStop::Cancelled, "capability cancelled while queued"))),
-                _ = sleep_deadline(deadline) => return Err(response.error(CapabilityError::stopped(CapabilityStop::Timeout, "capability queue deadline reached"))),
                 guard = self.execution.lock() => guard,
             })
         } else {
             None
         };
+        // Approval and lane waiting are admission, not capability execution.
+        // The caller cancellation token still carries any task-wide deadline.
+        let deadline =
+            call_deadline(self.config.call_timeout).map_err(|error| response.error(error))?;
         self.check(&child, deadline)
             .map_err(|error| response.error(error))?;
         let mut starting = StartingGuard {
@@ -1627,17 +1618,8 @@ impl Host {
         cancel: CancellationToken,
     ) -> Result<FrozenReadTicket, CapabilityError> {
         let capability = self.catalog.get("fs.read").expect("filesystem catalog");
-        let deadline =
-            call_deadline(self.config.call_timeout).map_err(|error| self.diagnostic(error))?;
         let (mut call, _) = self
-            .admit_owned(
-                capability,
-                Arguments(arguments),
-                cancel,
-                false,
-                false,
-                deadline,
-            )
+            .admit_owned(capability, Arguments(arguments), cancel, false, false)
             .await?;
         match self.read_lease(&call.child, call.deadline).await {
             Ok(lease) => Ok(FrozenReadTicket::new(call, lease)),

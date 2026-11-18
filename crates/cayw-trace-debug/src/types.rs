@@ -185,6 +185,16 @@ pub struct Document {
     pub events: Vec<cayw_core::EventRecord>,
     pub metrics: Metrics,
 }
+
+/// Incremental browser projection. Raw durable events are fetched separately.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StateUpdate {
+    pub schema: String,
+    pub sequence: u64,
+    pub reset: bool,
+    pub sessions: BTreeMap<String, SessionCapture>,
+    pub projects: BTreeMap<String, Project>,
+}
 impl Default for Document {
     fn default() -> Self {
         Self {

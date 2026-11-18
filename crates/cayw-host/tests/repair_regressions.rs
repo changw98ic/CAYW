@@ -550,71 +550,42 @@ impl PermissionGate for PausedGate {
 }
 
 #[tokio::test]
-async fn host_wait_stops_keep_their_type_before_execution() {
-    for queued in [false, true] {
-        for cancelled in [false, true] {
-            tokio::time::timeout(Duration::from_secs(10), async {
-                let root = Root::new();
-                let gate = Arc::new(PausedGate {
-                    entered: tokio::sync::Notify::new(),
-                    release: tokio::sync::Notify::new(),
-                });
-                let audit = Arc::new(Audit::default());
-                let host = Host::new(
-                    root.path(),
-                    gate.clone(),
-                    audit.clone(),
-                    HostConfig {
-                        call_timeout: if cancelled {
-                            Some(Duration::from_secs(5))
-                        } else {
-                            Some(Duration::from_millis(100))
-                        },
-                        ..Default::default()
-                    },
-                )
-                .unwrap();
-                let blocker_cancel = CancellationToken::new();
-                let mut blocker =
-                    Box::pin(host.call("fs.stat", json!({"path":"."}), blocker_cancel.clone()));
-                tokio::select! {
-                    result = &mut blocker => panic!("permission wait returned early: {result:?}"),
-                    () = gate.entered.notified() => {},
-                }
-                let cancel = CancellationToken::new();
-                let error = if queued {
-                    let mut waiting =
-                        Box::pin(host.call("fs.stat", json!({"path":"."}), cancel.clone()));
-                    assert!(futures::poll!(&mut waiting).is_pending());
-                    if cancelled {
-                        cancel.cancel();
-                    }
-                    let error = waiting.await.unwrap_err();
-                    blocker_cancel.cancel();
-                    assert!(blocker.await.is_err());
-                    error
-                } else {
-                    if cancelled {
-                        blocker_cancel.cancel();
-                    }
-                    blocker.await.unwrap_err()
-                };
-                assert_eq!(
-                    error.stop,
-                    Some(if cancelled {
-                        CapabilityStop::Cancelled
-                    } else {
-                        CapabilityStop::Timeout
-                    }),
-                    "queued={queued}, cancelled={cancelled}: {error:?}"
-                );
-                assert!(!error.outcome_unknown);
-                assert!(!host.outcome_unknown());
-                assert!(audit.records.lock().unwrap().is_empty());
-            })
-            .await
-            .expect("Host permission and queue waits must finish");
+async fn cancelled_admission_never_starts_execution() {
+    for second_call in [false, true] {
+        let root = Root::new();
+        let gate = Arc::new(PausedGate {
+            entered: tokio::sync::Notify::new(),
+            release: tokio::sync::Notify::new(),
+        });
+        let audit = Arc::new(Audit::default());
+        let host = Host::new(
+            root.path(),
+            gate.clone(),
+            audit.clone(),
+            HostConfig::default(),
+        )
+        .unwrap();
+        let first_cancel = CancellationToken::new();
+        let mut first = Box::pin(host.call("fs.stat", json!({"path":"."}), first_cancel.clone()));
+        tokio::select! {
+            result = &mut first => panic!("permission wait returned early: {result:?}"),
+            () = gate.entered.notified() => {},
         }
+        if second_call {
+            let cancel = CancellationToken::new();
+            let mut waiting = Box::pin(host.call("fs.stat", json!({"path":"."}), cancel.clone()));
+            assert!(futures::poll!(&mut waiting).is_pending());
+            cancel.cancel();
+            let error = waiting.await.unwrap_err();
+            assert_eq!(error.stop, Some(CapabilityStop::Cancelled));
+            assert!(!error.outcome_unknown);
+        }
+        first_cancel.cancel();
+        let error = first.await.unwrap_err();
+        assert_eq!(error.stop, Some(CapabilityStop::Cancelled));
+        assert!(!error.outcome_unknown);
+        assert!(!host.outcome_unknown());
+        assert!(audit.records.lock().unwrap().is_empty());
     }
 }
 

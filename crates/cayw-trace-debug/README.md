@@ -21,14 +21,14 @@ cargo +1.95.0 build -p cayw-trace-debug --bin cayw-trace-debug --locked --offlin
 
 ```sh
 target/debug/cayw-trace-debug \
-  --store /absolute/path/to/trace.json \
+  --store /absolute/path/to/trace.sqlite \
   --session SESSION_ID \
   --web-addr 127.0.0.1:0
 ```
 
 启动后打开标准输出中的 `web_url`，输入网页令牌。`--session` 可重复指定，可观察多个会话。只能绑定本机地址。按 Ctrl+C 停止插件。
 
-追踪文件保存运行源码、输入、上下文、原始事件和全部内容版本。新文件权限为 `0600`，同一文件只允许一个插件进程打开。追踪文件不设置累计字节、事件、执行或内容版本数量上限。文件通过缓冲流式读写保存，写入完成并同步后再原子替换；磁盘或格式错误仍直接报错。当前投影和网页状态仍完整载入内存，记录增长会增加内存、读取和保存成本；尚未实现分段存储和按需加载。
+追踪文件保存运行源码、输入、上下文、原始事件和全部内容版本。新文件权限为 `0600`，同一文件只允许一个插件进程打开。追踪文件不设置累计字节、事件、执行或内容版本数量上限。文件使用 SQLite 事务保存，原始事件按游标追加，只有变化的项目投影更新。旧 JSON 文件在首次打开时迁移：先保存字节完全相同的 `.json-evidence.json` 证据，再构建并同步临时数据库，最后原子替换原路径。迁移后同一路径仅使用 SQLite；磁盘、格式或事务错误直接报错。已有原始事件仍载入进程内存，内存和启动读取成本随记录增长。网页 `/api/state` 使用 `cayw.trace.state.v1` 增量项目响应，原始事件展开时从认证的 `/api/events/{session}/{cursor}` 按需读取；磁盘文档导出格式仍为 `cayw.trace.v1`。
 
 ## 实际离线演示
 
@@ -67,7 +67,7 @@ python3 -I scripts/validate-trace-debug.py task \
   --output /absolute/new/trace-demo --wait-read
 ```
 
-任务会在 `input` 节点请求读取 `approval-input.json`。该读取没有预授权，因此任务命令会等待。演示的 IPC 请求和单次 Host 等待均限定为 180 秒，须在此期间完成批准。网页的模块图、节点图、时间线和详情都会显示“等待响应”。在另一终端批准这一次固定文件读取：
+任务会在 `input` 节点请求读取 `approval-input.json`。该读取没有预授权，因此任务命令会等待。演示的 IPC 请求限定为 180 秒，须在此期间完成批准；Host 的执行时限从授权和排队结束后开始计算。网页的模块图、节点图、时间线和详情都会显示“等待响应”。在另一终端批准这一次固定文件读取：
 
 ```sh
 python3 -I scripts/validate-trace-debug.py approve-read \

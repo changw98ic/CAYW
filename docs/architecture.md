@@ -150,6 +150,12 @@ Agent 的内存历史由 Runtime 与持久记录衔接。上下文包含消息�
 
 宿主通过 `AgentControl::stop_with_error` 停止当前 Agent 时，具体原因以 `error` 终态返回；主动取消仍使用 `abort`，返回 `aborted`。停止原因只属于当前运行，空闲时设置不影响未来运行。Runtime 在未知副作用触发停止时传递明确的未知结果说明；子调用、任务和原始记录中的未知状态仍独立保留。该 Rust 控制接口不暴露为模型工具或新的 IPC 方法，Core、IPC 和检查器协议版本不变。
 
+能力调用的执行时限在审批通过并取得执行名额后开始。排队和审批等待由调用取消令牌及 Runtime 的任务总时限控制，不能消耗尚未开始的能力执行时限。Runtime 的已知宿主失败和总时限错误通过 `stop_with_error` 传递原始原因；它们不等于用户取消。对话工具卡根据持久执行终态更新当前状态，原始工具返回仍保留；运行检查器的总耗时延伸至后续执行终态。
+
+模型可经同一受控 CodeMode 路径调用 `artifacts.put`、`artifacts.list`、`plannotator.list` 和 `session.run_inspector`。会话身份由当前调用绑定，参数不能指定另一 Session。原生产物记录与工作区文件不同；读取执行记录或创建产物都不代表用户验收。批注提交仍属于宿主接口，模型不能代替用户提交批准反馈。
+
+Trace 网页状态使用 `cayw.trace.state.v1`：首次响应 `reset=true`，后续按 `after` 序号返回发生变化的项目及会话采集状态；客户端合并项目，断开后重新获取起始快照。原始事件通过受同一鉴权保护的 `/api/events/{session}/{cursor}` 按需读取。磁盘捕获的 `cayw.trace.v1` 和 Core 协议不因此改名；网页状态与完整捕获是不同数据合同。
+
 ## 主 session、上下文管理与恢复点
 
 本节说明组件职责和语义；完整设计见[记忆、上下文与主动工作设计](memory-context-work.md)。

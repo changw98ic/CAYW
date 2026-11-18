@@ -48,6 +48,7 @@ mod session;
 mod session_context;
 mod shared_read;
 mod values;
+mod visual_tools;
 mod work_items;
 mod work_router;
 mod work_tools;

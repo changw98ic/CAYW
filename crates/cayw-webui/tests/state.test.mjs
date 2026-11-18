@@ -422,3 +422,17 @@ test('committed history is never used as an active stream checkpoint', () => {
   assert.equal(view.liveMessage,null);
   assert.equal(view.liveText,'');
 });
+
+test('late cell terminal updates the card and survives reconnect without rewriting the receipt', () => {
+  const message = {role:'toolResult', tool_name:'execute_code', tool_call_id:'call', content:[], is_error:false, structured_content:{cell_id:'cell',status:'running',vm_alive:true,outputs:[]}};
+  const original = JSON.stringify(message);
+  let view = initial({messages:[message], executions:[{execution_id:'cell',state:'running',terminal:null}]});
+  const execution = {execution_id:'cell',state:'failed',terminal:{type:'failed',error:'actual host failure'}};
+  view = consumeEvents(view,[{session_id:'s1',cursor:11,event:{type:'execution_finished',execution}}]);
+  assert.equal(messagePresentation(message,view.executions.cell).status,'failed');
+  assert.equal(messagePresentation(message,view.executions.cell).text,'actual host failure');
+  const reconnected = initial({cursor:11,messages:[message],executions:[execution]});
+  assert.equal(messagePresentation(message,reconnected.executions.cell).status,'failed');
+  assert.equal(JSON.stringify(message),original);
+  assert.equal(messagePresentation(message,{...execution,execution_id:'other'}).status,'running');
+});

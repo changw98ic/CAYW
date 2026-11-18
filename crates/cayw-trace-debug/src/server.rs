@@ -26,7 +26,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::{
     Error, TraceStore,
-    types::{Document, Edit, Undo},
+    types::{Edit, Undo},
 };
 use cayw_codeintel::{DefinitionQuery, SymbolVersionBridge};
 
@@ -92,6 +92,7 @@ pub async fn serve_with_codeintel(
         .route("/styles.css", get(styles))
         .route("/favicon.svg", get(favicon))
         .route("/api/state", get(state_route))
+        .route("/api/events/{session}/{cursor}", get(event_route))
         .route(
             "/api/codeintel/definitions",
             post(codeintel_definitions_route),
@@ -262,8 +263,7 @@ fn query_after(query: Option<&str>) -> Result<Option<u64>, ()> {
     Ok(after)
 }
 
-/// Return the whole [`Document`]. Without `after` this is a plain snapshot;
-/// with `after` it waits (bounded) for a newer store sequence.
+/// Return only projects changed since `after`; raw evidence is loaded on demand.
 async fn state_route(State(state): State<Arc<Server>>, uri: Uri) -> Response {
     let after = match query_after(uri.query()) {
         Ok(after) => after,
@@ -271,41 +271,50 @@ async fn state_route(State(state): State<Arc<Server>>, uri: Uri) -> Response {
             return error_response(
                 StatusCode::BAD_REQUEST,
                 "invalid_request",
-                "The only accepted query parameter is a non-negative integer `after`",
+                "Expected non-negative integer after",
             );
         }
     };
-    let document = match after {
-        None => state.store.snapshot(),
-        Some(after) => match wait_for_change(&state, after).await {
-            Some(document) => document,
-            None => {
-                return error_response(
-                    StatusCode::SERVICE_UNAVAILABLE,
-                    "shutting_down",
-                    "Trace debug server is shutting down",
-                );
-            }
-        },
-    };
-    Json(document).into_response()
+    if let Some(after) = after
+        && !wait_for_change(&state, after).await
+    {
+        return error_response(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "shutting_down",
+            "Trace debug server is shutting down",
+        );
+    }
+    Json(state.store.state_update(after)).into_response()
 }
 
-async fn wait_for_change(state: &Server, after: u64) -> Option<Document> {
+async fn wait_for_change(state: &Server, after: u64) -> bool {
     let deadline = tokio::time::Instant::now() + LONG_POLL_TIMEOUT;
     loop {
-        let document = state.store.snapshot();
-        if document.sequence > after {
-            return Some(document);
+        if state.store.sequence() != after {
+            return true;
         }
         let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
         if remaining.is_zero() {
-            return Some(document);
+            return true;
         }
         tokio::select! {
-            _ = state.cancel.cancelled() => return None,
+            _ = state.cancel.cancelled() => return false,
             _ = tokio::time::sleep(POLL_INTERVAL.min(remaining)) => {}
         }
+    }
+}
+
+async fn event_route(
+    State(state): State<Arc<Server>>,
+    Path((session, cursor)): Path<(String, u64)>,
+) -> Response {
+    match state.store.event(&session, cursor) {
+        Some(record) => Json(record).into_response(),
+        None => error_response(
+            StatusCode::NOT_FOUND,
+            "not_found",
+            "No event at this session cursor",
+        ),
     }
 }
 
@@ -480,7 +489,7 @@ async fn edit_route(
         .edit(&project_id, edit, state.cancel.child_token())
         .await
     {
-        Ok(document) => Json(document).into_response(),
+        Ok(_) => Json(state.store.state_update(None)).into_response(),
         Err(error) => store_error(error),
     }
 }
@@ -506,7 +515,7 @@ async fn undo_route(
         .undo(&project_id, undo, state.cancel.child_token())
         .await
     {
-        Ok(document) => Json(document).into_response(),
+        Ok(_) => Json(state.store.state_update(None)).into_response(),
         Err(error) => store_error(error),
     }
 }
@@ -538,7 +547,7 @@ fn store_error(error: Error) -> Response {
             error_response(StatusCode::UNPROCESSABLE_ENTITY, "invalid", &message)
         }
         Error::Conflict(message) => error_response(StatusCode::CONFLICT, "conflict", &message),
-        Error::Io(_) => error_response(
+        Error::Io(_) | Error::Database(_) => error_response(
             StatusCode::INTERNAL_SERVER_ERROR,
             "store_io",
             "Trace file could not be read or written",

@@ -2,6 +2,7 @@
 pub mod capture;
 pub mod engine;
 pub mod server;
+mod storage;
 pub mod symbol_graph;
 pub mod types;
 
@@ -14,7 +15,7 @@ use cayw_core::EventRecord;
 use std::{
     env,
     fs::{File, OpenOptions},
-    io::{BufReader, BufWriter, Read, Write},
+    io::{BufReader, Read},
     os::unix::fs::OpenOptionsExt,
     path::{Path, PathBuf},
     sync::{Arc, Mutex},
@@ -30,6 +31,8 @@ pub enum Error {
     Io(#[from] std::io::Error),
     #[error("追踪数据格式：{0}")]
     Json(serde_json::Error),
+    #[error("Trace database: {0}")]
+    Database(#[from] rusqlite::Error),
 }
 
 impl From<serde_json::Error> for Error {
@@ -43,8 +46,8 @@ impl From<serde_json::Error> for Error {
 
 /// Preserve byte-exact evidence independently of the source file, including
 /// when validation fails and a user later repairs the original in place.
-fn archive_v3_document(path: &Path) -> Result<(), Error> {
-    let mut archive = path.with_extension("v3-evidence.json");
+fn archive_document(path: &Path, suffix: &str) -> Result<(), Error> {
+    let mut archive = path.with_extension(suffix);
     reject_symlink(&archive)?;
     if archive.try_exists()? {
         let mut source = File::open(path)?;
@@ -64,7 +67,7 @@ fn archive_v3_document(path: &Path) -> Result<(), Error> {
             return Ok(());
         }
         // A repaired input is another piece of evidence, never an overwrite.
-        archive = path.with_extension(format!("v3-{}.evidence.json", uuid::Uuid::new_v4()));
+        archive = path.with_extension(format!("{}-{suffix}", uuid::Uuid::new_v4()));
     }
 
     let temp = path.with_extension(format!("{}.evidence.tmp", uuid::Uuid::new_v4()));
@@ -107,7 +110,7 @@ fn read_document(path: &Path) -> Result<(Document, bool), Error> {
         .and_then(serde_json::Value::as_array_mut)
     {
         if events.iter().any(|event| event["protocol_version"] == 3) {
-            archive_v3_document(path)?;
+            archive_document(path, "v3-evidence.json")?;
         }
         for event in events {
             if event["protocol_version"] == 3 {
@@ -123,9 +126,21 @@ fn read_document(path: &Path) -> Result<(Document, bool), Error> {
     Ok((serde_json::from_value(raw)?, migrated))
 }
 
+fn projection_clone(document: &Document) -> Document {
+    Document {
+        schema: document.schema.clone(),
+        sequence: document.sequence,
+        sessions: document.sessions.clone(),
+        projects: document.projects.clone(),
+        events: Vec::new(),
+        metrics: document.metrics.clone(),
+    }
+}
+
 pub struct TraceStore {
-    path: PathBuf,
+    database: Mutex<rusqlite::Connection>,
     document: Mutex<Document>,
+    project_changes: Mutex<std::collections::BTreeMap<String, (u64, Vec<u8>)>>,
     edits: tokio::sync::Mutex<()>,
     /// Shared F04 bridge used to hang declared nodes onto engineering versions.
     linker: SymbolGraphLinker,
@@ -198,12 +213,24 @@ impl TraceStore {
         lock.try_lock()
             .map_err(|_| Error::Conflict("追踪文件正由另一个插件进程使用".into()))?;
         reject_symlink(&path)?;
-        let (document, migrated) = read_document(&path)?;
+        let (database, document, migrated) = storage::open(&path)?;
         if document.schema != TRACE_SCHEMA {
             return Err(Error::Invalid("追踪文件版本不受支持".into()));
         }
         let store = Arc::new(Self {
-            path,
+            database: Mutex::new(database),
+            project_changes: Mutex::new(
+                document
+                    .projects
+                    .iter()
+                    .map(|(id, project)| {
+                        Ok((
+                            id.clone(),
+                            (document.sequence, serde_json::to_vec(project)?),
+                        ))
+                    })
+                    .collect::<Result<_, serde_json::Error>>()?,
+            ),
             document: Mutex::new(document),
             edits: tokio::sync::Mutex::new(()),
             linker: SymbolGraphLinker::new(bridge),
@@ -251,6 +278,80 @@ impl TraceStore {
             .clone()
     }
 
+    /// Read progress without cloning raw event history.
+    pub fn sequence(&self) -> u64 {
+        self.document
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .sequence
+    }
+
+    pub fn session_cursor(&self, session: &str) -> u64 {
+        self.document
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .sessions
+            .get(session)
+            .map_or(0, |capture| capture.after)
+    }
+
+    fn track_project_changes(&self, document: &Document) -> Result<(), Error> {
+        let mut changes = self
+            .project_changes
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        for (id, project) in &document.projects {
+            let bytes = serde_json::to_vec(project)?;
+            if changes
+                .get(id)
+                .is_none_or(|(_, previous)| *previous != bytes)
+            {
+                changes.insert(id.clone(), (document.sequence, bytes));
+            }
+        }
+        Ok(())
+    }
+
+    pub fn state_update(&self, after: Option<u64>) -> StateUpdate {
+        let document = self
+            .document
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let changes = self
+            .project_changes
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let reset = after.is_none_or(|after| after > document.sequence);
+        let projects = document
+            .projects
+            .iter()
+            .filter(|(id, _)| {
+                reset
+                    || changes
+                        .get(*id)
+                        .is_some_and(|(sequence, _)| *sequence > after.unwrap())
+            })
+            .map(|(id, project)| (id.clone(), project.clone()))
+            .collect();
+        StateUpdate {
+            schema: "cayw.trace.state.v1".into(),
+            sequence: document.sequence,
+            reset,
+            sessions: document.sessions.clone(),
+            projects,
+        }
+    }
+
+    pub fn event(&self, session: &str, cursor: u64) -> Option<EventRecord> {
+        self.document
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .events
+            .iter()
+            .find(|record| record.session_id == session && record.cursor == cursor)
+            .cloned()
+    }
+
     pub fn bridge(&self) -> Arc<SymbolVersionBridge> {
         self.linker.shared_bridge()
     }
@@ -273,7 +374,7 @@ impl TraceStore {
             .document
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let mut next = current.clone();
+        let mut next = projection_clone(&current);
         let mut changed = false;
         for project in next.projects.values_mut() {
             let before = (project.symbol_hangs.clone(), project.gaps.clone());
@@ -287,40 +388,23 @@ impl TraceStore {
                 .sequence
                 .checked_add(1)
                 .ok_or_else(|| Error::Invalid("追踪序号耗尽".into()))?;
-            self.persist(&next)?;
+            self.persist(&next, &[])?;
+            self.track_project_changes(&next)?;
+            next.events = std::mem::take(&mut current.events);
             *current = next;
         }
         Ok(())
     }
 
-    fn persist(&self, document: &Document) -> Result<(), Error> {
-        let temp = self
-            .path
-            .with_extension(format!("{}.tmp", uuid::Uuid::new_v4()));
-        let result = (|| -> Result<(), Error> {
-            let file = OpenOptions::new()
-                .write(true)
-                .create_new(true)
-                .mode(0o600)
-                .open(&temp)?;
-            let mut writer = BufWriter::new(file);
-            serde_json::to_writer(&mut writer, document)?;
-            writer.flush()?;
-            writer.get_ref().sync_all()?;
-            std::fs::rename(&temp, &self.path)?;
-            File::open(
-                self.path
-                    .parent()
-                    .filter(|p| !p.as_os_str().is_empty())
-                    .unwrap_or(Path::new(".")),
-            )?
-            .sync_all()?;
-            Ok(())
-        })();
-        if result.is_err() {
-            let _ = std::fs::remove_file(&temp);
-        }
-        result
+    fn persist(&self, document: &Document, events: &[EventRecord]) -> Result<(), Error> {
+        storage::persist(
+            &mut self
+                .database
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+            document,
+            events,
+        )
     }
 
     fn commit(&self, mut document: Document) -> Result<(), Error> {
@@ -335,7 +419,8 @@ impl TraceStore {
             .sequence
             .checked_add(1)
             .ok_or_else(|| Error::Invalid("追踪序号耗尽".into()))?;
-        self.persist(&document)?;
+        self.persist(&document, &[])?;
+        self.track_project_changes(&document)?;
         *current = document;
         Ok(())
     }
@@ -348,7 +433,7 @@ impl TraceStore {
             .document
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let mut next = current.clone();
+        let mut next = projection_clone(&current);
         let mut changed = false;
         for event in events {
             let after = next
@@ -360,7 +445,12 @@ impl TraceStore {
                 return Err(Error::Invalid("Runtime 事件版本不受支持".into()));
             }
             if event.cursor <= after {
-                if !next.events.iter().any(|record| record == event) {
+                if !current
+                    .events
+                    .iter()
+                    .chain(next.events.iter())
+                    .any(|record| record == event)
+                {
                     return Err(Error::Invalid("同一会话游标的原始事件不一致".into()));
                 }
                 continue;
@@ -385,7 +475,11 @@ impl TraceStore {
                 link_project(project, &self.linker, self.workspace_root.as_deref());
             }
             next.sequence += 1;
-            self.persist(&next)?;
+            self.persist(&next, &next.events)?;
+            self.track_project_changes(&next)?;
+            let added = std::mem::take(&mut next.events);
+            next.events = std::mem::take(&mut current.events);
+            next.events.extend(added);
             *current = next;
         }
         Ok(())
@@ -403,10 +497,12 @@ impl TraceStore {
         {
             return Ok(());
         }
-        let mut next = current.clone();
+        let mut next = projection_clone(&current);
         next.sessions.entry(session_id.into()).or_default().error = message;
         next.sequence += 1;
-        self.persist(&next)?;
+        self.persist(&next, &[])?;
+        self.track_project_changes(&next)?;
+        next.events = std::mem::take(&mut current.events);
         *current = next;
         Ok(())
     }
@@ -599,7 +695,7 @@ impl TraceStore {
             .document
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let mut next = current.clone();
+        let mut next = projection_clone(&current);
         let project = next
             .projects
             .get_mut(project_id)
@@ -614,7 +710,9 @@ impl TraceStore {
                 .push(started.elapsed().as_secs_f64() * 1000.0);
         }
         next.sequence += 1;
-        self.persist(&next)?;
+        self.persist(&next, &[])?;
+        self.track_project_changes(&next)?;
+        next.events = std::mem::take(&mut current.events);
         *current = next;
         Ok(current.clone())
     }

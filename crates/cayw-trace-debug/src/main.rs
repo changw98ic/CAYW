@@ -137,11 +137,7 @@ pub(crate) async fn observe(
         backoff = Duration::from_millis(200);
         let mut limit = 32_u64;
         loop {
-            let after = store
-                .snapshot()
-                .sessions
-                .get(&session)
-                .map_or(0, |capture| capture.after);
+            let after = store.session_cursor(&session);
             let response = client
                 .request_with_cancel(
                     "session.events",

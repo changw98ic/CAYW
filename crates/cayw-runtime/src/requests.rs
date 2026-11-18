@@ -102,6 +102,7 @@ pub(crate) fn operation_definitions_for_config(
     let mut definitions = host.capabilities();
     definitions.extend(crate::values::definitions());
     definitions.extend(crate::collaboration::definitions());
+    definitions.extend(crate::visual_tools::definitions());
     definitions.extend(crate::children::definitions(config));
     definitions.extend(crate::content::definitions(config.content.as_ref()));
     definitions.extend(crate::background::definitions(

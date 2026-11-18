@@ -15,6 +15,7 @@ use std::{
 struct Fixture {
     script: String,
     choice: &'static str,
+    decision_delay: Duration,
     state: Mutex<(usize, Option<CellPage>)>,
 }
 
@@ -99,11 +100,19 @@ impl Provider for Fixture {
             message.content = vec![Content::text("complete")];
             message.stop_reason = StopReason::Stop;
         }
-        Box::pin(futures::stream::iter([AssistantEvent::Done { message }]))
+        let delay = if step == 1 {
+            self.decision_delay
+        } else {
+            Duration::ZERO
+        };
+        Box::pin(futures::stream::once(async move {
+            tokio::time::sleep(delay).await;
+            AssistantEvent::Done { message }
+        }))
     }
 }
 
-async fn run(choice: &'static str, request_authority: bool) {
+async fn run(choice: &'static str, request_authority: bool, decision_delay: Duration) {
     let root = tempfile::tempdir().unwrap();
     let workspace = root.path().join("workspace");
     std::fs::create_dir(&workspace).unwrap();
@@ -112,7 +121,7 @@ async fn run(choice: &'static str, request_authority: bool) {
     } else {
         "return cayw.call('fs.write',{path='result.txt',content='model approved'})"
     };
-    let config = RuntimeConfig {
+    let mut config = RuntimeConfig {
         approval_mode: ApprovalMode::ModelAuto,
         max_run_time: Some(Duration::from_secs(15)),
         request_policy: request_authority.then(|| RequestPolicy {
@@ -126,9 +135,13 @@ async fn run(choice: &'static str, request_authority: bool) {
         }),
         ..Default::default()
     };
+    if !decision_delay.is_zero() {
+        config.host.call_timeout = Some(Duration::from_secs(2));
+    }
     let provider = Arc::new(Fixture {
         script: script.into(),
         choice,
+        decision_delay,
         state: Mutex::new((0, None)),
     });
     let runtime = Runtime::open(
@@ -171,17 +184,17 @@ async fn run(choice: &'static str, request_authority: bool) {
 
 #[tokio::test]
 async fn model_allows_original_waiting_cell_without_human_or_approval_recursion() {
-    run("allow_once", false).await;
+    run("allow_once", false, Duration::ZERO).await;
 }
 
 #[tokio::test]
 async fn model_denies_original_waiting_cell_without_effect() {
-    run("deny", false).await;
+    run("deny", false, Duration::ZERO).await;
 }
 
 #[tokio::test]
 async fn model_decides_request_authority_and_upstream_approval_separately() {
-    run("allow_once", true).await;
+    run("allow_once", true, Duration::ZERO).await;
 }
 
 #[test]
@@ -190,4 +203,9 @@ fn sdk_defaults_to_explicit_approval() {
         RuntimeConfig::default().approval_mode,
         ApprovalMode::Explicit
     );
+}
+
+#[tokio::test]
+async fn model_decision_after_execution_budget_still_runs_original_call_once() {
+    run("allow_once", false, Duration::from_secs(3)).await;
 }

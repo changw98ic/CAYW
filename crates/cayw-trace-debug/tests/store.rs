@@ -254,3 +254,47 @@ fn symlinks_cannot_replace_an_existing_trace_file() {
     assert!(TraceStore::open(&path).is_err());
     assert_eq!(std::fs::read(&target).unwrap(), b"untouched");
 }
+
+#[test]
+fn json_migration_preserves_original_bytes_and_appends_transactionally() {
+    let dir = tempfile::tempdir().unwrap();
+    let original = initialized(&dir.path().join("source.sqlite")).snapshot();
+    let path = dir.path().join("trace.json");
+    let bytes = serde_json::to_vec_pretty(&original).unwrap();
+    std::fs::write(&path, &bytes).unwrap();
+    let store = TraceStore::open(&path).unwrap();
+    assert_eq!(
+        std::fs::read(path.with_extension("json-evidence.json")).unwrap(),
+        bytes
+    );
+    assert_eq!(
+        serde_json::to_value(store.snapshot()).unwrap(),
+        serde_json::to_value(&original).unwrap()
+    );
+    let connection = rusqlite::Connection::open(&path).unwrap();
+    // Abort after the header update: the whole transaction must roll back.
+    connection.execute_batch("CREATE TRIGGER fail_append BEFORE INSERT ON trace_events BEGIN SELECT RAISE(ABORT, 'injected disk write failure'); END;").unwrap();
+    let next = event(
+        6,
+        CoreEvent::Host {
+            kind: "verification".into(),
+            data: json!({"retained":true}),
+        },
+    );
+    assert!(store.ingest(std::slice::from_ref(&next)).is_err());
+    assert_eq!(store.session_cursor("session"), 5);
+    drop(store);
+    let store = TraceStore::open(&path).unwrap();
+    assert_eq!(store.session_cursor("session"), 5);
+    assert_eq!(store.snapshot().events, original.events);
+    connection.execute_batch("DROP TRIGGER fail_append; CREATE TRIGGER preserve_raw BEFORE UPDATE ON trace_events BEGIN SELECT RAISE(ABORT, 'historical rewrite'); END;").unwrap();
+    store.ingest(std::slice::from_ref(&next)).unwrap();
+    store
+        .connection_error("session", Some("disconnected".into()))
+        .unwrap();
+    drop(store);
+    let store = TraceStore::open(&path).unwrap();
+    assert_eq!(store.session_cursor("session"), 6);
+    assert_eq!(&store.snapshot().events[..5], original.events.as_slice());
+    assert_eq!(store.snapshot().events[5], next);
+}

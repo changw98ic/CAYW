@@ -3,7 +3,7 @@
 
   if (typeof document === 'undefined') return;
 
-  var SCHEMA = 'cayw.trace.v1';
+  var SCHEMA = 'cayw.trace.state.v1';
   var SVG_NS = 'http://www.w3.org/2000/svg';
   var STATUS_LABELS = {
     running: '运行中',
@@ -52,7 +52,6 @@
   var nodeElements = new Map();
   var nodeCenters = new Map();
   var moduleElements = new Map();
-  var evidenceIndexDoc = null;
   var evidenceIndex = new Map();
   var openEvidence = new Set();
 
@@ -332,44 +331,40 @@
     return step.status;
   }
 
-  function findEvidence(project, cursor) {
-    if (!doc || !Array.isArray(doc.events) || cursor === null || cursor === undefined) return null;
-    if (evidenceIndexDoc !== doc) {
-      evidenceIndexDoc = doc;
-      evidenceIndex = new Map();
-      doc.events.forEach(function (record) {
-        if (record && record.session_id !== undefined && record.cursor !== undefined) {
-          evidenceIndex.set(record.session_id + '\u001f' + record.cursor, record);
-        }
-      });
-    }
-    var session = project ? project.session_id : null;
-    if (session === null || session === undefined) return null;
-    return evidenceIndex.get(session + '\u001f' + cursor) || null;
-  }
-
   function evidenceDetails(project, cursor) {
     var details = el('details', 'evidence-details');
     if (cursor === null || cursor === undefined) {
       details.append(el('summary', null, '无证据游标'));
       return details;
     }
-    var record = findEvidence(project, cursor);
-    details.append(el('summary', null, '游标 ' + cursor + (record ? ' · 查看 Document.events 原始 JSON' : ' · Document.events 中没有对应记录')));
-    if (record) {
-      details.append(preText(jsonText(record), false));
-    } else {
-      details.append(el('p', 'small muted',
-        'Document.events 中没有 session_id=' + (project ? project.session_id : '—') +
-        '、cursor=' + cursor + ' 的原始记录；页面不会补造证据。'));
+    details.append(el('summary', null, '游标 ' + cursor + ' · 查看原始 JSON'));
+    var body = el('div');
+    details.append(body);
+    var key = project.session_id + '\u001f' + cursor;
+    var loading = false;
+    async function load() {
+      if (!details.open || loading) return;
+      var record = evidenceIndex.get(key);
+      if (record) { body.replaceChildren(preText(jsonText(record), false)); return; }
+      loading = true;
+      body.textContent = '正在读取原始记录…';
+      try {
+        var response = await api('/api/events/' + encodeURIComponent(project.session_id) + '/' + cursor, {}, 12000);
+        if (response.status !== 200) throw new Error('HTTP ' + response.status);
+        if (response.payload.session_id !== project.session_id || response.payload.cursor !== cursor) throw new Error('事件身份不一致');
+        evidenceIndex.set(key, response.payload);
+        body.replaceChildren(preText(jsonText(response.payload), false));
+      } catch (error) {
+        body.textContent = '原始记录读取失败：' + error.message + '。重新展开可重试。';
+      } finally { loading = false; }
     }
-    var evidenceKey = (project ? project.session_id : '') + '\u001f' + cursor;
-    details.open = openEvidence.has(evidenceKey);
+    details.open = openEvidence.has(key);
     details.addEventListener('toggle', function () {
       if (!details.isConnected) return;
-      if (details.open) openEvidence.add(evidenceKey);
-      else openEvidence.delete(evidenceKey);
+      if (details.open) { openEvidence.add(key); load(); }
+      else openEvidence.delete(key);
     });
+    if (details.open) load();
     return details;
   }
 
@@ -552,6 +547,7 @@
       }
       connected = true;
       doc = null;
+      evidenceIndex.clear();
       editorKey = null;
       reportGlobal(null);
       ui['web-token'].value = '';
@@ -654,6 +650,10 @@
     }
     if (!options || !options.force) {
       if (doc && next.sequence === doc.sequence) return true;
+    }
+    if (!next.reset) {
+      if (!doc) { reportGlobal('增量状态缺少起始快照，请重新连接。'); return false; }
+      next = Object.assign({}, next, {projects: Object.assign({}, doc.projects, next.projects)});
     }
     // Promote a newly captured graph over the bootstrap call record. Existing
     // graph/history selections remain stable while later tasks arrive.
