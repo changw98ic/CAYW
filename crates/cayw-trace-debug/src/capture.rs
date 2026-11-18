@@ -30,6 +30,54 @@ pub const TRACE_NODE_KIND: &str = "trace_node";
 const OBSERVED_PREFIX: &str = "observed:";
 const MAX_METRICS_SAMPLES: usize = 1024;
 
+/// Stage only the rows the projection can update. The caller merges them
+/// after the same database transaction has appended the source events.
+pub(crate) fn load_affected_projects(current: &Document, next: &mut Document, event: &EventRecord) {
+    let mut load = |id: &str| {
+        if !next.projects.contains_key(id)
+            && let Some(project) = current.projects.get(id)
+        {
+            next.projects.insert(id.to_owned(), project.clone());
+        }
+    };
+    match &event.event {
+        CoreEvent::ExecutionStarted { execution }
+        | CoreEvent::ExecutionYielded { execution }
+        | CoreEvent::ExecutionFinished { execution } => load(&execution.execution_id),
+        CoreEvent::CapabilityPlanned { call }
+        | CoreEvent::CapabilityStarted { call }
+        | CoreEvent::CapabilitySettled { call }
+        | CoreEvent::CapabilityReconciled { call, .. } => load(&call.key.execution_id),
+        CoreEvent::AttemptRecovered {
+            executions,
+            capabilities,
+            ..
+        } => {
+            for execution in executions {
+                load(&execution.execution_id);
+            }
+            for call in capabilities {
+                load(&call.key.execution_id);
+            }
+        }
+        CoreEvent::Host { kind, data } if kind == TRACE_NODE_KIND => {
+            if let Some(id) = data.get("execution_id").and_then(Value::as_str) {
+                load(id);
+            }
+        }
+        CoreEvent::AttemptFinished { lease } => {
+            for project in current.projects.values().filter(|project| {
+                project.session_id == event.session_id
+                    && project.attempt_id == lease.attempt_id
+                    && project.runtime_status == Status::Running
+            }) {
+                load(&project.id);
+            }
+        }
+        _ => {}
+    }
+}
+
 /// Apply one ordered Core event to the projection.
 ///
 /// The caller has already verified that this event is the next cursor in its
@@ -2071,7 +2119,7 @@ mod tests {
             );
             let events = vec![original, update, following];
             store.ingest(&events).unwrap();
-            let document = store.snapshot();
+            let document = store.snapshot().unwrap();
             let project = &document.projects["e1"];
             assert_eq!(project.calls.len(), 1);
             assert_eq!(project.calls[0].outcome.as_ref(), Some(&outcome));
@@ -2082,8 +2130,8 @@ mod tests {
             assert_eq!(document.sessions["s1"].after, 3);
             drop(store);
             let reopened = crate::TraceStore::open(path).unwrap();
-            assert_eq!(reopened.snapshot().events, events);
-            assert_eq!(reopened.snapshot().sessions["s1"].after, 3);
+            assert_eq!(reopened.snapshot().unwrap().events, events);
+            assert_eq!(reopened.snapshot().unwrap().sessions["s1"].after, 3);
         }
     }
 

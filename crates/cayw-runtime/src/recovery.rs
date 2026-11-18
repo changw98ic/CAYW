@@ -429,6 +429,7 @@ impl Runtime {
         // Failed Cells writes retain both its freeze and the admission slot.
         self.inner.queue.recover(id)?;
         self.inner.changed.notify_waiters();
+        self.inner.submissions_changed.notify_waiters();
         self.get(id)
     }
 
@@ -468,6 +469,7 @@ impl Runtime {
         let facts = Facts::read(self, id)?;
         self.sync_cells(&owners, &facts)?;
         self.inner.changed.notify_waiters();
+        self.inner.submissions_changed.notify_waiters();
         self.get(id)
     }
 
@@ -530,6 +532,7 @@ impl Runtime {
         let facts = Facts::read(self, id)?;
         self.sync_cells(&owners, &facts)?;
         self.inner.changed.notify_waiters();
+        self.inner.submissions_changed.notify_waiters();
         self.get(id)
     }
 

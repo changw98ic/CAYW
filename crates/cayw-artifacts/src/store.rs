@@ -1,25 +1,77 @@
 //! Session-scoped HTML artifact store with snapshot recovery (F09).
 
 use std::collections::BTreeMap;
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
+use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 use serde::{Deserialize, Serialize};
 
 use crate::identity::{validate_body, validate_id, validate_title};
 use crate::types::{
-    ArtifactError, ArtifactPreview, ArtifactRecord, PutArtifactRequest, UpdateArtifactRequest,
+    ArtifactError, ArtifactPreview, ArtifactRecord, ArtifactSummary, PutArtifactRequest,
+    UpdateArtifactRequest,
 };
 
-/// In-memory artifact catalog keyed by `artifact_id`.
+/// Session-owned artifact catalog. Runtime opens the on-disk database lazily.
 #[derive(Debug, Default)]
 pub struct ArtifactStore {
-    inner: Mutex<StoreInner>,
+    path: Option<PathBuf>,
+    connection: Mutex<Option<Connection>>,
 }
 
-#[derive(Debug, Default, Clone, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct StoreInner {
-    artifacts: BTreeMap<String, ArtifactRecord>,
+fn storage_error(error: impl std::fmt::Display) -> ArtifactError {
+    ArtifactError::Io(error.to_string())
+}
+
+fn lookup(
+    connection: &Connection,
+    id: &str,
+    session: Option<&str>,
+) -> Result<Option<ArtifactRecord>, ArtifactError> {
+    let body: Option<String> = connection
+        .query_row(
+            "SELECT body FROM artifact_cards WHERE id=?1 AND (?2 IS NULL OR session_id=?2)",
+            params![id, session],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(storage_error)?;
+    body.map(|body| serde_json::from_str(&body).map_err(storage_error))
+        .transpose()
+}
+
+fn read_rows(
+    connection: &Connection,
+    session: Option<&str>,
+) -> Result<Vec<ArtifactRecord>, ArtifactError> {
+    let mut query = match session {
+        Some(_) => connection.prepare("SELECT body FROM artifact_cards WHERE session_id=?1"),
+        None => connection.prepare("SELECT body FROM artifact_cards ORDER BY id"),
+    }
+    .map_err(storage_error)?;
+    let mut rows = match session {
+        Some(id) => query.query([id]),
+        None => query.query([]),
+    }
+    .map_err(storage_error)?;
+    let mut artifacts = Vec::new();
+    while let Some(row) = rows.next().map_err(storage_error)? {
+        let body: String = row.get(0).map_err(storage_error)?;
+        artifacts.push(serde_json::from_str(&body).map_err(storage_error)?);
+    }
+    Ok(artifacts)
+}
+
+fn insert(connection: &Connection, record: &ArtifactRecord) -> Result<(), ArtifactError> {
+    let body = serde_json::to_string(record).map_err(storage_error)?;
+    connection
+        .execute(
+            "INSERT INTO artifact_cards(id,session_id,body) VALUES(?1,?2,?3)",
+            params![record.artifact_id, record.session_id, body],
+        )
+        .map_err(storage_error)?;
+    Ok(())
 }
 
 /// Portable snapshot for process-restart recovery tests.
@@ -34,6 +86,37 @@ impl ArtifactStore {
         Self::default()
     }
 
+    pub fn durable(path: PathBuf) -> Self {
+        Self {
+            path: Some(path),
+            connection: Mutex::new(None),
+        }
+    }
+
+    fn with_db<T>(
+        &self,
+        operation: impl FnOnce(&mut Connection) -> Result<T, ArtifactError>,
+    ) -> Result<T, ArtifactError> {
+        let mut database = self.connection.lock().expect("artifact store lock");
+        if database.is_none() {
+            let connection = match &self.path {
+                Some(path) => Connection::open(path),
+                None => Connection::open_in_memory(),
+            }
+            .map_err(storage_error)?;
+            connection.execute_batch(
+                "CREATE TABLE IF NOT EXISTS artifact_cards(
+                    id TEXT PRIMARY KEY NOT NULL,
+                    session_id TEXT NOT NULL,
+                    body TEXT NOT NULL
+                 );
+                 CREATE INDEX IF NOT EXISTS artifact_cards_by_session ON artifact_cards(session_id);"
+            ).map_err(storage_error)?;
+            *database = Some(connection);
+        }
+        operation(database.as_mut().expect("artifact database opened"))
+    }
+
     pub fn put(&self, req: PutArtifactRequest) -> Result<ArtifactRecord, ArtifactError> {
         validate_id("artifact_id", &req.artifact_id).map_err(ArtifactError::Invalid)?;
         validate_id("session_id", &req.session_id).map_err(ArtifactError::Invalid)?;
@@ -43,10 +126,6 @@ impl ArtifactStore {
             validate_id("result_handle", handle).map_err(ArtifactError::Invalid)?;
         }
 
-        let mut guard = self.inner.lock().expect("artifact store lock");
-        if guard.artifacts.contains_key(&req.artifact_id) {
-            return Err(ArtifactError::AlreadyExists(req.artifact_id));
-        }
         let record = ArtifactRecord {
             artifact_id: req.artifact_id.clone(),
             session_id: req.session_id,
@@ -58,10 +137,17 @@ impl ArtifactStore {
             updated_at_ms: req.at_ms,
             result_handle: req.result_handle,
         };
-        guard
-            .artifacts
-            .insert(record.artifact_id.clone(), record.clone());
-        Ok(record)
+        self.with_db(|connection| {
+            let tx = connection
+                .transaction_with_behavior(TransactionBehavior::Immediate)
+                .map_err(storage_error)?;
+            if lookup(&tx, &record.artifact_id, None)?.is_some() {
+                return Err(ArtifactError::AlreadyExists(record.artifact_id));
+            }
+            insert(&tx, &record)?;
+            tx.commit().map_err(storage_error)?;
+            Ok(record)
+        })
     }
 
     pub fn update(&self, req: UpdateArtifactRequest) -> Result<ArtifactRecord, ArtifactError> {
@@ -82,50 +168,57 @@ impl ArtifactStore {
             validate_body(body).map_err(ArtifactError::Invalid)?;
         }
 
-        let mut guard = self.inner.lock().expect("artifact store lock");
-        let existing = guard
-            .artifacts
-            .get_mut(&req.artifact_id)
-            .ok_or_else(|| ArtifactError::NotFound(req.artifact_id.clone()))?;
-        if existing.session_id != req.session_id {
-            return Err(ArtifactError::SessionMismatch {
-                artifact_id: req.artifact_id,
-                owner: existing.session_id.clone(),
-                claimed: req.session_id,
-            });
-        }
-        if let Some(expected) = req.expected_content_version
-            && expected != existing.content_version
-        {
-            return Err(ArtifactError::VersionMismatch {
-                artifact_id: req.artifact_id,
-                expected,
-                actual: existing.content_version,
-            });
-        }
-        let next_version = existing
-            .content_version
-            .checked_add(1)
-            .ok_or_else(|| ArtifactError::Invalid("content_version overflow".into()))?;
-        if let Some(title) = new_title {
-            existing.title = title;
-        }
-        if let Some(body) = req.body {
-            existing.body = body;
-        }
-        existing.content_version = next_version;
-        existing.updated_at_ms = req.at_ms;
-        Ok(existing.clone())
+        self.with_db(|connection| {
+            let tx = connection
+                .transaction_with_behavior(TransactionBehavior::Immediate)
+                .map_err(storage_error)?;
+            let mut existing = lookup(&tx, &req.artifact_id, None)?
+                .ok_or_else(|| ArtifactError::NotFound(req.artifact_id.clone()))?;
+            if existing.session_id != req.session_id {
+                return Err(ArtifactError::SessionMismatch {
+                    artifact_id: req.artifact_id,
+                    owner: existing.session_id.clone(),
+                    claimed: req.session_id,
+                });
+            }
+            if let Some(expected) = req.expected_content_version
+                && expected != existing.content_version
+            {
+                return Err(ArtifactError::VersionMismatch {
+                    artifact_id: req.artifact_id,
+                    expected,
+                    actual: existing.content_version,
+                });
+            }
+            let next_version = existing
+                .content_version
+                .checked_add(1)
+                .ok_or_else(|| ArtifactError::Invalid("content_version overflow".into()))?;
+            if let Some(title) = new_title {
+                existing.title = title;
+            }
+            if let Some(body) = req.body {
+                existing.body = body;
+            }
+            existing.content_version = next_version;
+            existing.updated_at_ms = req.at_ms;
+            let body = serde_json::to_string(&existing).map_err(storage_error)?;
+            tx.execute(
+                "UPDATE artifact_cards SET body=?1 WHERE id=?2",
+                params![body, existing.artifact_id],
+            )
+            .map_err(storage_error)?;
+            tx.commit().map_err(storage_error)?;
+            Ok(existing)
+        })
     }
 
     pub fn get(&self, artifact_id: &str) -> Result<ArtifactRecord, ArtifactError> {
         validate_id("artifact_id", artifact_id).map_err(ArtifactError::Invalid)?;
-        let guard = self.inner.lock().expect("artifact store lock");
-        guard
-            .artifacts
-            .get(artifact_id)
-            .cloned()
-            .ok_or_else(|| ArtifactError::NotFound(artifact_id.to_owned()))
+        self.with_db(|connection| {
+            lookup(connection, artifact_id, None)?
+                .ok_or_else(|| ArtifactError::NotFound(artifact_id.to_owned()))
+        })
     }
 
     /// Renderer projection for UI / read-only consumers (not the storage record).
@@ -134,15 +227,22 @@ impl ArtifactStore {
         Ok(ArtifactPreview::from_record(&record))
     }
 
+    pub fn preview_for_session(
+        &self,
+        artifact_id: &str,
+        session_id: &str,
+    ) -> Result<ArtifactPreview, ArtifactError> {
+        validate_id("artifact_id", artifact_id).map_err(ArtifactError::Invalid)?;
+        self.with_db(|connection| {
+            let record = lookup(connection, artifact_id, Some(session_id))?
+                .ok_or_else(|| ArtifactError::NotFound(artifact_id.to_owned()))?;
+            Ok(ArtifactPreview::from_record(&record))
+        })
+    }
+
     pub fn list_by_session(&self, session_id: &str) -> Result<Vec<ArtifactRecord>, ArtifactError> {
         validate_id("session_id", session_id).map_err(ArtifactError::Invalid)?;
-        let guard = self.inner.lock().expect("artifact store lock");
-        let mut out: Vec<_> = guard
-            .artifacts
-            .values()
-            .filter(|r| r.session_id == session_id)
-            .cloned()
-            .collect();
+        let mut out = self.with_db(|connection| read_rows(connection, Some(session_id)))?;
         out.sort_by(|a, b| {
             a.created_at_ms
                 .cmp(&b.created_at_ms)
@@ -151,11 +251,28 @@ impl ArtifactStore {
         Ok(out)
     }
 
-    pub fn export_snapshot(&self) -> ArtifactSnapshot {
-        let guard = self.inner.lock().expect("artifact store lock");
-        ArtifactSnapshot {
-            artifacts: guard.artifacts.values().cloned().collect(),
-        }
+    pub fn summaries(&self, session_id: &str) -> Result<Vec<ArtifactSummary>, ArtifactError> {
+        self.with_db(|connection| {
+            let mut query = connection
+                .prepare(
+                    "SELECT json_remove(body, '$.body') FROM artifact_cards WHERE session_id=?1
+                 ORDER BY json_extract(body, '$.created_at_ms'), id",
+                )
+                .map_err(storage_error)?;
+            query
+                .query_map([session_id], |row| row.get::<_, String>(0))
+                .map_err(storage_error)?
+                .map(|row| {
+                    serde_json::from_str(&row.map_err(storage_error)?).map_err(storage_error)
+                })
+                .collect()
+        })
+    }
+
+    pub fn export_snapshot(&self) -> Result<ArtifactSnapshot, ArtifactError> {
+        Ok(ArtifactSnapshot {
+            artifacts: self.with_db(|connection| read_rows(connection, None))?,
+        })
     }
 
     pub(crate) fn prepare_snapshot(
@@ -181,15 +298,25 @@ impl ArtifactStore {
         Ok(map)
     }
 
-    pub(crate) fn commit_prepared(&self, artifacts: BTreeMap<String, ArtifactRecord>) {
-        let mut guard = self.inner.lock().expect("artifact store lock");
-        guard.artifacts = artifacts;
+    pub(crate) fn commit_prepared(
+        &self,
+        artifacts: BTreeMap<String, ArtifactRecord>,
+    ) -> Result<(), ArtifactError> {
+        self.with_db(|connection| {
+            let tx = connection
+                .transaction_with_behavior(TransactionBehavior::Immediate)
+                .map_err(storage_error)?;
+            tx.execute("DELETE FROM artifact_cards", [])
+                .map_err(storage_error)?;
+            for record in artifacts.values() {
+                insert(&tx, record)?;
+            }
+            tx.commit().map_err(storage_error)
+        })
     }
 
     pub fn restore_snapshot(&self, snapshot: ArtifactSnapshot) -> Result<(), ArtifactError> {
-        let map = Self::prepare_snapshot(snapshot)?;
-        self.commit_prepared(map);
-        Ok(())
+        self.commit_prepared(Self::prepare_snapshot(snapshot)?)
     }
 }
 

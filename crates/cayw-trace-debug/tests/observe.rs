@@ -69,7 +69,7 @@ async fn large_event_pages_are_read_without_skipping() -> Result<(), Box<dyn Err
 
     let deadline = std::time::Instant::now() + Duration::from_secs(20);
     let saved = loop {
-        let document = store.snapshot();
+        let document = store.snapshot().unwrap();
         let after = document.sessions.get(&session).map(|capture| capture.after);
         if after == Some(cursor) {
             break document;

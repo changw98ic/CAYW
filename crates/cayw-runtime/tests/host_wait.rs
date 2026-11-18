@@ -4,7 +4,7 @@
 //! awaited Host call pauses that clock. These tests use the real Runtime, the
 //! real Host gate and a fixed offline provider:
 //! - a human answer after 6 seconds still lands and the run completes;
-//! - a short explicit `host.call_timeout` ends the wait as a known failure;
+//! - an explicit `host.call_timeout` does not time out a human answer;
 //! - the Runtime's absolute `max_run_time` still ends an unanswered wait even
 //!   though the VM compute clock is paused.
 //!
@@ -186,29 +186,64 @@ async fn default_compute_timeout_does_not_end_a_six_second_human_wait() {
 }
 
 #[tokio::test]
-async fn short_host_call_timeout_ends_the_wait_as_a_known_failure() {
+async fn short_host_call_timeout_leaves_the_question_available_for_an_answer() {
     let mut config = RuntimeConfig {
         permissions: vec![ask_permission()],
         ..Default::default()
     };
-    // The service stops at 3/4 of the Host deadline, before the Host's own
-    // unknown-outcome timeout and far before CodeMode's 60-second host wait.
-    config.host.call_timeout = Some(Duration::from_millis(1500));
+    let call_timeout = Duration::from_millis(1500);
+    config.host.call_timeout = Some(call_timeout);
     let (_dir, rt) = setup(config);
     let id = rt.create(None).unwrap().id;
     let task = start(&rt, &id);
     let question = pending(&rt, &id).await;
 
-    let outcome = timeout(Duration::from_secs(15), task)
+    tokio::time::sleep(call_timeout).await;
+    assert_eq!(rt.questions(&id).unwrap()[0].state, QuestionState::Pending);
+    rt.answer_question(&id, &question.id, "staging", "host-user")
+        .unwrap();
+    let view = timeout(Duration::from_secs(15), task)
         .await
-        .expect("the configured Host deadline must end the wait")
-        .expect("the worker task must not panic");
-    let _ = outcome;
-    // The agent turns the known tool failure into its final answer.
+        .expect("the answered run must finish")
+        .unwrap()
+        .unwrap();
+    assert_eq!(view.state, SessionState::Idle);
+    assert_eq!(rt.tasks(&id).unwrap()[0].state, TaskState::Completed);
+    assert!(matches!(
+        settled_ask(&rt, &id),
+        Some(CapabilityOutcome::Completed { .. })
+    ));
+}
+
+#[tokio::test]
+async fn waiting_for_a_human_releases_the_only_execution_slot() {
+    let (_dir, rt) = setup(RuntimeConfig {
+        max_concurrent_runs: 1,
+        permissions: vec![ask_permission()],
+        ..Default::default()
+    });
+    let first = rt.create(None).unwrap().id;
+    let second = rt.create(None).unwrap().id;
+    let left = start(&rt, &first);
+    let left_question = pending(&rt, &first).await;
+    let right = start(&rt, &second);
+    let right_question = pending(&rt, &second).await;
     assert_eq!(
-        assert_known_ended_wait(&rt, &id, &question.id),
-        TaskState::Completed
+        rt.questions(&first).unwrap()[0].state,
+        QuestionState::Pending
     );
+    let (left, right) = timeout(Duration::from_secs(15), async {
+        rt.answer_question(&second, &right_question.id, "production", "host-user")
+            .unwrap();
+        let finished_second = right.await.unwrap().unwrap();
+        rt.answer_question(&first, &left_question.id, "staging", "host-user")
+            .unwrap();
+        (left.await.unwrap().unwrap(), finished_second)
+    })
+    .await
+    .unwrap();
+    assert_eq!(left.state, SessionState::Idle);
+    assert_eq!(right.state, SessionState::Idle);
 }
 
 #[tokio::test]
@@ -222,9 +257,7 @@ async fn runtime_absolute_deadline_still_ends_a_paused_human_wait() {
     let task = start(&rt, &id);
     let question = pending(&rt, &id).await;
 
-    // The default Host deadline is 60 seconds and the service stop is 45
-    // seconds. Finishing now therefore proves the Runtime's absolute task
-    // deadline still applies while the CodeMode compute clock is paused.
+    // The Runtime's task deadline still applies while the compute clock is paused.
     let outcome = timeout(Duration::from_secs(20), task)
         .await
         .expect("Runtime max_run_time must end the paused human wait")

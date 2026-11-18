@@ -18,9 +18,15 @@ use axum::{
     response::{IntoResponse, Response},
     routing::{get, post},
 };
+use cayw_run_inspector::RuntimeEventInspector;
 use serde::{Deserialize, de::DeserializeOwned};
 use serde_json::json;
-use std::{net::SocketAddr, sync::Arc, time::Duration};
+use std::{
+    collections::BTreeMap,
+    net::SocketAddr,
+    sync::{Arc, Mutex},
+    time::Duration,
+};
 use tokio::net::TcpListener;
 use tokio_util::sync::CancellationToken;
 
@@ -35,8 +41,16 @@ const LONG_POLL_TIMEOUT: Duration = Duration::from_secs(25);
 /// The store has no notification channel contract, so poll its sequence.
 const POLL_INTERVAL: Duration = Duration::from_millis(250);
 
+#[derive(Default)]
+struct InspectorPrefix {
+    cursor: u64,
+    order: Vec<String>,
+    sessions: BTreeMap<String, RuntimeEventInspector>,
+}
+
 struct Server {
     store: Arc<TraceStore>,
+    inspector: Mutex<InspectorPrefix>,
     web_token: String,
     authorities: Vec<String>,
     cancel: CancellationToken,
@@ -81,6 +95,7 @@ pub async fn serve_with_codeintel(
     }
     let state = Arc::new(Server {
         store,
+        inspector: Mutex::new(InspectorPrefix::default()),
         web_token,
         authorities: authorities(address),
         cancel: cancel.clone(),
@@ -309,8 +324,9 @@ async fn event_route(
     Path((session, cursor)): Path<(String, u64)>,
 ) -> Response {
     match state.store.event(&session, cursor) {
-        Some(record) => Json(record).into_response(),
-        None => error_response(
+        Ok(Some(record)) => Json(record).into_response(),
+        Err(error) => store_error(error),
+        Ok(None) => error_response(
             StatusCode::NOT_FOUND,
             "not_found",
             "No event at this session cursor",
@@ -441,31 +457,96 @@ async fn run_inspector_route(State(state): State<Arc<Server>>, uri: Uri) -> Resp
             );
         }
     };
-    let document = state.store.snapshot();
-    let events_total = document.events.len() as u64;
-    let start = after.min(events_total) as usize;
-    let end = match limit {
-        Some(limit) => start.saturating_add(limit).min(document.events.len()),
-        None => document.events.len(),
-    };
-    let (timelines, snapshots) =
-        cayw_run_inspector::timelines_and_snapshots_from_runtime_events_window(
-            &document.events,
-            start,
-            end,
-        );
-    let next_after = end as u64;
+    let (events_total, start, end, read, timelines, snapshots) =
+        match inspector_window(&state, after, limit) {
+            Ok(window) => window,
+            Err(error) => return store_error(error),
+        };
     Json(json!({
         "protocol_version": cayw_run_inspector::RUN_INSPECTOR_PROTOCOL_VERSION,
         "timelines": timelines,
         "snapshots": snapshots,
         "events_total": events_total,
-        "after": start as u64,
-        "events_scanned": (end - start) as u64,
-        "has_more": end < document.events.len(),
-        "next_after": next_after,
+        "after": start,
+        "events_scanned": end - start,
+        "events_read": read,
+        "has_more": end < events_total,
+        "next_after": end,
     }))
     .into_response()
+}
+
+type InspectorWindow = (
+    u64,
+    u64,
+    u64,
+    u64,
+    Vec<cayw_run_inspector::RunTimeline>,
+    Vec<cayw_run_inspector::SessionRunSnapshot>,
+);
+
+fn inspector_window(
+    state: &Server,
+    after: u64,
+    limit: Option<usize>,
+) -> Result<InspectorWindow, Error> {
+    let mut prefix = state
+        .inspector
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let database = || {
+        state
+            .store
+            .database
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    };
+    let total = crate::storage::event_count(&database())?;
+    let begin = after.min(total);
+    let end = limit.map_or(total, |size| begin.saturating_add(size as u64).min(total));
+    if begin == end {
+        return Ok((total, begin, end, 0, Vec::new(), Vec::new()));
+    }
+    // Older windows may rebuild their prefix; forward pages reuse the previous one.
+    let mut staged = if prefix.cursor <= begin {
+        InspectorPrefix {
+            cursor: prefix.cursor,
+            order: prefix.order.clone(),
+            sessions: prefix
+                .sessions
+                .iter()
+                .map(|(id, inspector)| (id.clone(), inspector.clone().continue_after(0)))
+                .collect(),
+        }
+    } else {
+        InspectorPrefix::default()
+    };
+    let from = staged.cursor;
+    while staged.cursor < end {
+        let to = (staged.cursor + cayw_core::MAX_EVENT_PAGE as u64).min(end);
+        let events = crate::storage::event_window(&database(), staged.cursor, to)?;
+        if events.len() as u64 != to - staged.cursor {
+            return Err(Error::Invalid("追踪事件序号缺失".into()));
+        }
+        for event in events {
+            staged.cursor += 1;
+            let inspector = staged
+                .sessions
+                .entry(event.session_id.clone())
+                .or_insert_with(|| {
+                    staged.order.push(event.session_id.clone());
+                    RuntimeEventInspector::new(&event.session_id, 0)
+                });
+            inspector.push_archive(&event, staged.cursor > begin);
+        }
+    }
+    let (timelines, snapshots) = staged
+        .order
+        .iter()
+        .filter_map(|id| staged.sessions[id].clone().finish_archive())
+        .unzip();
+    *prefix = staged;
+    Ok((total, begin, end, end - from, timelines, snapshots))
 }
 
 async fn edit_route(

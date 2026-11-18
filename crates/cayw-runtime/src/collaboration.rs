@@ -24,7 +24,7 @@ use serde_json::{Value, json};
 use std::{
     collections::{BTreeMap, BTreeSet},
     sync::Arc,
-    time::{Duration, Instant},
+    time::Duration,
 };
 use uuid::Uuid;
 
@@ -223,38 +223,21 @@ pub(crate) async fn invoke(
         _ => return Err(CapabilityError::new("collaboration capability is unknown")),
     };
     let host = crate::bridge::scoped_host(base, scope)?;
-    // The Host's external executor maps its own cancellation and deadline to
-    // `outcome_unknown`. Collaboration calls keep their caller token outside the
-    // Host, observe it in the service, and stop just before the Host deadline so
-    // cancellation or an unanswered question settles as a known failure while
-    // the durable question/plan fact stays in Core. The stop time is enforced
-    // inside the service instead of by dropping the Host future, because a
-    // dropped Host call conservatively records an unknown outcome.
-    let stop_at = scope
-        .context
-        .inner
-        .config
-        .host
-        .call_timeout
-        .map(|host_timeout| Instant::now() + host_timeout.saturating_sub(host_timeout / 4));
-    let service = Service {
-        scope,
-        caller_cancel: cancel.clone(),
-        stop_at,
-        prepared,
-    };
-    host.call_service(&definition, arguments, CancellationToken::new(), &service)
+    let service = Service { scope, prepared };
+    host.call_service(&definition, arguments, cancel, &service)
         .await
 }
 
 struct Service<'a> {
     scope: &'a Arc<crate::cells::CallScope>,
-    caller_cancel: CancellationToken,
-    stop_at: Option<Instant>,
     prepared: PreparedCollaboration,
 }
 #[async_trait]
 impl cayw_host::ExternalHost for Service<'_> {
+    fn waits_for_user(&self) -> bool {
+        matches!(self.prepared, PreparedCollaboration::Ask(_))
+    }
+
     async fn call(
         &self,
         name: &str,
@@ -262,19 +245,8 @@ impl cayw_host::ExternalHost for Service<'_> {
         cancel: CancellationToken,
     ) -> Result<Value, CapabilityError> {
         match (&self.prepared, name) {
-            (PreparedCollaboration::Ask(input), ASK) => {
-                ask(
-                    self.scope,
-                    input,
-                    &self.caller_cancel,
-                    &cancel,
-                    self.stop_at,
-                )
-                .await
-            }
-            (PreparedCollaboration::Plan(input), PLAN) => {
-                plan(self.scope, input, &self.caller_cancel, &cancel)
-            }
+            (PreparedCollaboration::Ask(input), ASK) => ask(self.scope, input, &cancel).await,
+            (PreparedCollaboration::Plan(input), PLAN) => plan(self.scope, input, &cancel),
             _ => Err(CapabilityError::new("collaboration capability is unknown")),
         }
     }
@@ -286,23 +258,16 @@ impl cayw_host::ExternalHost for Service<'_> {
 async fn ask(
     scope: &Arc<crate::cells::CallScope>,
     input: &AskInput,
-    caller_cancel: &CancellationToken,
     host_cancel: &CancellationToken,
-    stop_at: Option<Instant>,
 ) -> Result<Value, CapabilityError> {
     let context = &scope.context;
     context.check(host_cancel).map_err(known)?;
-    if caller_cancel.is_cancelled() {
+    if host_cancel.is_cancelled() {
         return Err(CapabilityError::new(
             "user.ask was cancelled before the question was persisted",
         ));
     }
     scope.check_authority(host_cancel)?;
-    if stop_at.is_some_and(|stop| Instant::now() >= stop) {
-        return Err(CapabilityError::new(
-            "user.ask reached its host deadline before the question was persisted",
-        ));
-    }
     // Everything at or before this cursor predates the question. Polling from
     // here is bounded by the events this call appends plus the answer.
     let after = context
@@ -338,15 +303,21 @@ async fn ask(
         ),
         armed: true,
     };
-    let result = wait_for_answer(
-        scope,
-        &question_id,
-        after,
-        caller_cancel,
-        host_cancel,
-        stop_at,
-    )
-    .await;
+    let cell = &scope.key.execution_id;
+    let result = match context.activity.waiting_dependency(context, cell) {
+        Ok(()) => {
+            let answer = wait_for_answer(scope, &question_id, after, host_cancel).await;
+            if !host_cancel.is_cancelled() && !context.cancel.is_cancelled() {
+                context
+                    .activity
+                    .resume_cell(context, cell, host_cancel)
+                    .await
+                    .map_err(known)?;
+            }
+            answer
+        }
+        Err(error) => Err(known(error)),
+    };
     stopped.armed = false;
     result
 }
@@ -375,21 +346,14 @@ async fn wait_for_answer(
     scope: &Arc<crate::cells::CallScope>,
     question_id: &str,
     after: u64,
-    caller_cancel: &CancellationToken,
     host_cancel: &CancellationToken,
-    stop_at: Option<Instant>,
 ) -> Result<Value, CapabilityError> {
     let context = &scope.context;
     let mut cursor = after;
     loop {
-        if caller_cancel.is_cancelled() {
+        if host_cancel.is_cancelled() {
             return Err(CapabilityError::new(format!(
                 "question {question_id} expired: the original capability was cancelled"
-            )));
-        }
-        if stop_at.is_some_and(|stop| Instant::now() >= stop) {
-            return Err(CapabilityError::new(format!(
-                "question {question_id} expired: the collaboration call reached its host deadline"
             )));
         }
         scope.check_authority(host_cancel).map_err(|error| {
@@ -407,7 +371,7 @@ async fn wait_for_answer(
         if let Some((answer, answered_at)) = answer {
             // The response is only accepted while the original exact permission
             // and cancellation state remain current.
-            if caller_cancel.is_cancelled() {
+            if host_cancel.is_cancelled() {
                 return Err(CapabilityError::new(format!(
                     "question {question_id} expired: the original capability was cancelled"
                 )));
@@ -423,24 +387,11 @@ async fn wait_for_answer(
             }));
         }
         tokio::select! { biased;
-            _ = caller_cancel.cancelled() => return Err(CapabilityError::new(format!(
-                "question {question_id} expired: the original capability was cancelled"
-            ))),
             _ = host_cancel.cancelled() => return Err(CapabilityError::new(format!(
                 "question {question_id} expired: the original capability was cancelled"
             ))),
             _ = context.cancel.cancelled() => return Err(CapabilityError::new(format!(
                 "question {question_id} expired: the task was cancelled"
-            ))),
-            _ = async {
-                match stop_at {
-                    Some(stop) => {
-                        tokio::time::sleep(stop.saturating_duration_since(Instant::now())).await
-                    }
-                    None => std::future::pending::<()>().await,
-                }
-            } => return Err(CapabilityError::new(format!(
-                "question {question_id} expired: the collaboration call reached its host deadline"
             ))),
             _ = context.inner.changed.notified() => {},
             _ = tokio::time::sleep(Duration::from_millis(50)) => {},
@@ -508,12 +459,11 @@ fn read_answer(
 fn plan(
     scope: &Arc<crate::cells::CallScope>,
     input: &PlanInput,
-    caller_cancel: &CancellationToken,
     host_cancel: &CancellationToken,
 ) -> Result<Value, CapabilityError> {
     let context = &scope.context;
     context.check(host_cancel).map_err(known)?;
-    if caller_cancel.is_cancelled() {
+    if host_cancel.is_cancelled() {
         return Err(CapabilityError::new(
             "plan.update was cancelled before the plan was recorded",
         ));

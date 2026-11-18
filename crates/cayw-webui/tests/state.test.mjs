@@ -69,11 +69,11 @@ test('interrupted calls never prevent forking a frozen StrongFlow session', () =
   assert.equal(canFork({ ...view, activeAttempt: { lease, after: 10, terminal: null } }), false, 'an active attempt still needs its durable terminal');
 });
 
-test('interrupted tool results are presented as interrupted without host reconciliation', () => {
+test('an unknown side effect stays distinct from a confirmed interruption', () => {
   const presentation = messagePresentation({ role: 'toolResult', tool_name: 'execute_code', content: [], is_error: true, outcome_unknown: true, structured_content: { status: 'outcome_unknown', outputs: [{ output: { type: 'json', value: { content: 'unconfirmed' } } }] } });
-  assert.equal(presentation.status, 'interrupted');
-  assert.equal(presentation.title, '已中断');
-  assert.equal(presentation.text, '本次工具执行已中断。');
+  assert.equal(presentation.status, 'outcome_unknown');
+  assert.equal(presentation.title, '结果待核对');
+  assert.match(presentation.text, /执行可能已写入/);
   assert.deepEqual(presentation.values, []);
   assert.doesNotMatch(presentation.raw, /宿主|核对|待核对/);
 });

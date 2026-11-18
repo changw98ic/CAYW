@@ -300,6 +300,7 @@ async fn demo_runs_real_host_graph_and_switches_branches() -> TestResult {
     store.ingest(&initial_events)?;
     let captured_project = store
         .snapshot()
+        .unwrap()
         .projects
         .get(&initial_id)
         .cloned()
@@ -643,7 +644,7 @@ async fn node_waits_for_real_read_approval_and_replay_uses_its_captured_response
     let id = manifest_execution(&waiting, "issue31-waiting").expect("waiting graph manifest");
     let store = TraceStore::open(temporary.path().join("waiting-trace.json"))?;
     store.ingest(&waiting)?;
-    let snapshot = store.snapshot();
+    let snapshot = store.snapshot().unwrap();
     let project = &snapshot.projects[&id];
     assert_eq!(project.runtime_status, Status::Running);
     assert_eq!(project.latest().unwrap().steps[0].status, Status::Running);
@@ -665,7 +666,7 @@ async fn node_waits_for_real_read_approval_and_replay_uses_its_captured_response
     tokio::time::timeout(Duration::from_secs(15), run).await???;
     let completed = events(&client, &demo.session_id).await?;
     store.ingest(&completed)?;
-    let snapshot = store.snapshot();
+    let snapshot = store.snapshot().unwrap();
     let project = &snapshot.projects[&id];
     assert_eq!(project.runtime_status, Status::Failed);
     assert_eq!(project.calls[0].node_id.as_deref(), Some("input"));

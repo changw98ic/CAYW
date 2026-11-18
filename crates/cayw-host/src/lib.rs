@@ -82,10 +82,16 @@ pub trait AuditSink: Send + Sync {
 /// established, return `CapabilityError::unknown` and retain reconciliation data.
 #[async_trait]
 pub trait ExternalHost: Send + Sync {
-    /// Trusted orchestration services may delegate every workspace operation to
-    /// another Host call. They do not hold the workspace fence or execution lane
-    /// while awaiting those calls; authorization, audit and budgets still apply.
+    /// Trusted services with no direct workspace access own their own state or
+    /// delegate workspace operations to other Host calls. They release the
+    /// workspace lane; authorization, audit and budgets still apply.
     fn delegates_workspace_calls(&self) -> bool {
+        false
+    }
+
+    /// A trusted Runtime service that waits for a human answer, observes
+    /// cancellation itself, and never operates on workspace resources.
+    fn waits_for_user(&self) -> bool {
         false
     }
 
@@ -1304,6 +1310,9 @@ impl Host {
                 let external = service
                     .or(self.external.as_deref())
                     .ok_or_else(|| failure("external service is not configured"))?;
+                if service.is_some_and(ExternalHost::waits_for_user) {
+                    return external.call(name, args, cancel.clone()).await;
+                }
                 tokio::select! {
                     biased;
                     _ = cancel.cancelled() => Err(CapabilityError::unknown("external capability cancelled after admission")),
@@ -1440,22 +1449,34 @@ impl Host {
         cancel: CancellationToken,
         service: Option<&dyn ExternalHost>,
     ) -> Result<Value, CapabilityError> {
+        let human_wait = service.is_some_and(ExternalHost::waits_for_user);
         // Wait for any already-started call on this lane before validating or
         // asking permission, but do not hold the lane across an async permission
         // wait so another cell can run approval.pending / approval.decide.
-        tokio::select! { biased;
-            _ = cancel.cancelled() => return Err(self.diagnostic(CapabilityError::stopped(CapabilityStop::Cancelled, "capability cancelled while queued"))),
-            guard = self.execution.lock() => drop(guard),
+        if !human_wait {
+            tokio::select! { biased;
+                _ = cancel.cancelled() => return Err(self.diagnostic(CapabilityError::stopped(CapabilityStop::Cancelled, "capability cancelled while queued"))),
+                guard = self.execution.lock() => drop(guard),
+            }
         }
         let (mut call, mut lane) = self
-            .admit_owned(capability, arguments, cancel, service.is_some(), true)
+            .admit_owned(
+                capability,
+                arguments,
+                cancel,
+                service.is_some(),
+                !human_wait,
+            )
             .await?;
         let name = capability.definition.name.as_str();
         let delegated = service.is_some_and(ExternalHost::delegates_workspace_calls);
         let may_mutate = service.is_some()
             || catalog::may_mutate(name)
             || matches!(capability.executor, Executor::External);
-        let mutation = if may_mutate && !delegated {
+        if human_wait {
+            call.deadline = None;
+        }
+        let mutation = if may_mutate && !delegated && !human_wait {
             match self
                 .mutation(
                     name,

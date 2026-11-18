@@ -355,7 +355,7 @@ async fn symbol_production_and_local_recompute_pipeline() {
         .unwrap();
 
     // 验证初始状态 (Verify initial trace snapshot)
-    let snap1 = store.snapshot();
+    let snap1 = store.snapshot().unwrap();
     let proj1 = &snap1.projects["exec-pipeline"];
     assert_eq!(proj1.version(), 1);
     assert_eq!(proj1.evaluations.len(), 1);
@@ -431,7 +431,7 @@ async fn symbol_production_and_local_recompute_pipeline() {
     .unwrap();
 
     store.refresh_symbol_hangs().unwrap();
-    let snap3 = store.snapshot();
+    let snap3 = store.snapshot().unwrap();
     let proj3 = &snap3.projects["exec-pipeline"];
     let refreshed_hang = proj3.symbol_hangs.get("calculate").expect("calculate hang");
     assert_eq!(

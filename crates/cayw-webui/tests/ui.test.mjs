@@ -90,7 +90,7 @@ test('second external task replaces first external task id while owned prompts r
   ];
   assert.equal(selectActiveTaskId(tasks, 's1', view.snapshot), 'ext-2');
 
-  // Even when external task 1 is still draining and external task 2 is waiting_approval or queued, stop targets task 2.
+  // A follow-up without a worker must never replace the current attempt as the stop target.
   assert.equal(
     selectActiveTaskId(
       [
@@ -100,7 +100,7 @@ test('second external task replaces first external task id while owned prompts r
       's1',
       snapshot({ cursor: 13, state: 'running', attempt: lease1 })
     ),
-    'ext-2'
+    'ext-1'
   );
   assert.equal(
     selectActiveTaskId(

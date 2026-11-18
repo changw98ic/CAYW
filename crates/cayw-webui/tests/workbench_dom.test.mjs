@@ -1,4 +1,4 @@
-// Conversation behavior. The page no longer has workbench panels.
+// Conversation behavior and session-scoped panels.
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
@@ -174,6 +174,35 @@ test('workbench_dom: launch hash opens and scopes one workspace before runtime c
   assert.equal(app.calls.find(call => call.method === 'settings.workspace')?.workspace_id, workspaceId);
 });
 
+test('conversation reads the artifact version list before fetching one preview', async t => {
+  const current = { id: 's1', label: '会话 1', cursor: 10, state: 'idle', messages: [], attempt: null, pending_approvals: [] };
+  const app = await setupApp(t, async (method, params) => {
+    switch (method) {
+      case 'session.list': return [current];
+      case 'session.get': return current;
+      case 'session.events': return [];
+      case 'artifacts.list':
+        assert.deepEqual(params, { session_id: 's1', summary: true });
+        return [{ artifact_id: 'card', title: '验收', content_version: 2 }];
+      case 'artifacts.preview':
+        return { artifact_id: 'card', session_id: 's1', title: '验收', content_version: 2, html: '<p>已保存</p>' };
+      default: return {};
+    }
+  });
+  await app.ui['session-list'].querySelectorAll('button')[0].dispatch('click');
+  assert.equal(app.ui['session-artifacts'].hidden, false);
+  app.ui['session-artifacts'].open = true;
+  await app.ui['session-artifacts'].dispatch('toggle');
+  assert.equal(app.calls.filter(call => call.method === 'artifacts.preview').length, 0);
+  const [card] = app.ui['artifact-items'].querySelectorAll('button');
+  assert.match(card.textContent, /版本 2/);
+  await card.dispatch('click');
+  const [frame] = app.ui['artifact-preview'].children;
+  assert.equal(frame.tagName, 'iframe');
+  assert.equal(frame.sandbox, '');
+  assert.match(frame.srcdoc, /<p>已保存<\/p>/);
+});
+
 test('workbench_dom: interrupted tool history is presented cleanly and never locks the next prompt', async t => {
   const interrupted = {
     role: 'toolResult',
@@ -205,8 +234,8 @@ test('workbench_dom: interrupted tool history is presented cleanly and never loc
   await app.waitTick();
   assert.equal(app.ui['session-state'].textContent, '就绪', 'an interrupted tool leaves the session ready');
   assert.equal(app.ui['blocked-notice'].hidden, true, 'no reconciliation notice is shown');
-  assert.ok(app.ui.messages.textContent.includes('已中断'), 'interrupted tool result is presented as interrupted');
-  assert.ok(!app.ui.messages.textContent.includes('待核对') && !app.ui.messages.textContent.includes('宿主核对'), 'no host reconciliation demand');
+  assert.ok(app.ui.messages.textContent.includes('结果待核对'), 'unknown tool result remains distinct from an interruption');
+  assert.match(app.ui.messages.textContent, /核对后再决定是否重试/);
   assert.equal(app.ui.prompt.disabled, false);
 
   app.ui.prompt.value = '继续下一个任务';

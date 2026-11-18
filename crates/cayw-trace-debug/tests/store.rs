@@ -189,7 +189,12 @@ async fn edits_reopen_undo_and_stale_saves_preserve_actual_results() {
     assert!(TraceStore::open(&path).is_err());
     drop(store);
     let reopened = TraceStore::open(&path).unwrap();
-    assert_eq!(reopened.snapshot().projects["exec"].evaluations.len(), 3);
+    assert_eq!(
+        reopened.snapshot().unwrap().projects["exec"]
+            .evaluations
+            .len(),
+        3
+    );
     use std::os::unix::fs::PermissionsExt;
     assert_eq!(
         std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
@@ -202,7 +207,7 @@ async fn invalid_edits_fail_before_advancing_the_saved_version() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("trace.json");
     let store = initialized(&path);
-    let before = store.snapshot();
+    let before = store.snapshot().unwrap();
     let edit = Edit {
         expected_version: 1,
         node_id: "input".into(),
@@ -216,13 +221,13 @@ async fn invalid_edits_fail_before_advancing_the_saved_version() {
         .await
         .unwrap_err();
     assert!(matches!(error, Error::Invalid(_)), "{error:?}");
-    let after = store.snapshot();
+    let after = store.snapshot().unwrap();
     assert_eq!(after.sequence, before.sequence);
     assert_eq!(after.projects["exec"].version(), 1);
     assert_eq!(after.projects["exec"].evaluations.len(), 1);
     drop(store);
     let reopened = TraceStore::open(&path).unwrap();
-    let persisted = reopened.snapshot();
+    let persisted = reopened.snapshot().unwrap();
     assert_eq!(persisted.projects["exec"].version(), 1);
     assert_eq!(persisted.projects["exec"].evaluations.len(), 1);
 }
@@ -236,12 +241,12 @@ fn cursor_gaps_never_advance_saved_position() {
             .ingest(&[event(2, CoreEvent::AttemptStarted { lease: lease() })])
             .is_err()
     );
-    assert!(!store.snapshot().sessions.contains_key("session"));
+    assert!(!store.snapshot().unwrap().sessions.contains_key("session"));
     let first = event(1, CoreEvent::AttemptStarted { lease: lease() });
     store.ingest(std::slice::from_ref(&first)).unwrap();
-    let sequence = store.snapshot().sequence;
+    let sequence = store.snapshot().unwrap().sequence;
     store.ingest(&[first]).unwrap();
-    assert_eq!(store.snapshot().sequence, sequence);
+    assert_eq!(store.snapshot().unwrap().sequence, sequence);
 }
 
 #[test]
@@ -258,7 +263,9 @@ fn symlinks_cannot_replace_an_existing_trace_file() {
 #[test]
 fn json_migration_preserves_original_bytes_and_appends_transactionally() {
     let dir = tempfile::tempdir().unwrap();
-    let original = initialized(&dir.path().join("source.sqlite")).snapshot();
+    let original = initialized(&dir.path().join("source.sqlite"))
+        .snapshot()
+        .unwrap();
     let path = dir.path().join("trace.json");
     let bytes = serde_json::to_vec_pretty(&original).unwrap();
     std::fs::write(&path, &bytes).unwrap();
@@ -268,7 +275,7 @@ fn json_migration_preserves_original_bytes_and_appends_transactionally() {
         bytes
     );
     assert_eq!(
-        serde_json::to_value(store.snapshot()).unwrap(),
+        serde_json::to_value(store.snapshot().unwrap()).unwrap(),
         serde_json::to_value(&original).unwrap()
     );
     let connection = rusqlite::Connection::open(&path).unwrap();
@@ -286,7 +293,7 @@ fn json_migration_preserves_original_bytes_and_appends_transactionally() {
     drop(store);
     let store = TraceStore::open(&path).unwrap();
     assert_eq!(store.session_cursor("session"), 5);
-    assert_eq!(store.snapshot().events, original.events);
+    assert_eq!(store.snapshot().unwrap().events, original.events);
     connection.execute_batch("DROP TRIGGER fail_append; CREATE TRIGGER preserve_raw BEFORE UPDATE ON trace_events BEGIN SELECT RAISE(ABORT, 'historical rewrite'); END;").unwrap();
     store.ingest(std::slice::from_ref(&next)).unwrap();
     store
@@ -295,6 +302,9 @@ fn json_migration_preserves_original_bytes_and_appends_transactionally() {
     drop(store);
     let store = TraceStore::open(&path).unwrap();
     assert_eq!(store.session_cursor("session"), 6);
-    assert_eq!(&store.snapshot().events[..5], original.events.as_slice());
-    assert_eq!(store.snapshot().events[5], next);
+    assert_eq!(
+        &store.snapshot().unwrap().events[..5],
+        original.events.as_slice()
+    );
+    assert_eq!(store.snapshot().unwrap().events[5], next);
 }

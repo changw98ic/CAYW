@@ -1,6 +1,6 @@
 //! Transactional trace capture: append raw events, replace only changed projects.
 use crate::{Document, Error, Metrics, Project, SessionCapture};
-use rusqlite::{Connection, params};
+use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 use std::{
     collections::BTreeMap,
@@ -56,31 +56,10 @@ pub(crate) fn open(path: &Path) -> Result<(Connection, Document, bool), Error> {
                 }
                 document.projects.insert(id, p);
             }
-            let mut q = connection
-                .prepare("SELECT session,cursor,body FROM trace_events ORDER BY ordinal")?;
-            for row in q.query_map([], |r| {
-                Ok((
-                    r.get::<_, String>(0)?,
-                    r.get::<_, String>(1)?,
-                    r.get::<_, String>(2)?,
-                ))
-            })? {
-                let (session, cursor, body) = row?;
-                let event: cayw_core::EventRecord = serde_json::from_str(&body)?;
-                if event.session_id != session
-                    || event.cursor.to_string() != cursor
-                    || event.protocol_version != cayw_core::PROTOCOL_VERSION
-                {
-                    return Err(Error::Invalid(
-                        "Trace event identity or protocol mismatch".into(),
-                    ));
-                }
-                document.events.push(event);
-            }
         }
         return Ok((connection, document, false));
     }
-    let (document, migrated) = crate::read_document(path)?;
+    let (mut document, migrated) = crate::read_document(path)?;
     if document.schema != crate::TRACE_SCHEMA {
         return Err(Error::Invalid("Trace schema is unsupported".into()));
     }
@@ -118,7 +97,69 @@ pub(crate) fn open(path: &Path) -> Result<(Connection, Document, bool), Error> {
     };
     result?;
     cleanup?;
+    document.events.clear();
     Ok((Connection::open(path)?, document, migrated))
+}
+
+pub(crate) fn event_count(connection: &Connection) -> Result<u64, Error> {
+    let ordinal: i64 = connection.query_row(
+        "SELECT COALESCE(MAX(ordinal),0) FROM trace_events",
+        [],
+        |row| row.get(0),
+    )?;
+    u64::try_from(ordinal).map_err(|_| Error::Invalid("Trace event ordinal is invalid".into()))
+}
+
+pub(crate) fn event_window(
+    connection: &Connection,
+    after: u64,
+    end: u64,
+) -> Result<Vec<cayw_core::EventRecord>, Error> {
+    let mut query = connection.prepare(
+        "SELECT session,cursor,body FROM trace_events WHERE ordinal>?1 AND ordinal<=?2 ORDER BY ordinal"
+    )?;
+    let mut rows = query.query(params![after as i64, end as i64])?;
+    let mut events = Vec::new();
+    while let Some(row) = rows.next()? {
+        let session: String = row.get(0)?;
+        let cursor: String = row.get(1)?;
+        let body: String = row.get(2)?;
+        events.push(decode_event(&session, &cursor, &body)?);
+    }
+    Ok(events)
+}
+
+pub(crate) fn events(connection: &Connection) -> Result<Vec<cayw_core::EventRecord>, Error> {
+    event_window(connection, 0, event_count(connection)?)
+}
+
+fn decode_event(session: &str, cursor: &str, body: &str) -> Result<cayw_core::EventRecord, Error> {
+    let event: cayw_core::EventRecord = serde_json::from_str(body)?;
+    if event.session_id != session
+        || event.cursor.to_string() != cursor
+        || event.protocol_version != cayw_core::PROTOCOL_VERSION
+    {
+        return Err(Error::Invalid(
+            "Trace event identity or protocol mismatch".into(),
+        ));
+    }
+    Ok(event)
+}
+
+pub(crate) fn event(
+    connection: &Connection,
+    session: &str,
+    cursor: u64,
+) -> Result<Option<cayw_core::EventRecord>, Error> {
+    let body: Option<String> = connection
+        .query_row(
+            "SELECT body FROM trace_events WHERE session=?1 AND cursor=?2",
+            params![session, cursor.to_string()],
+            |row| row.get(0),
+        )
+        .optional()?;
+    body.map(|body| decode_event(session, &cursor.to_string(), &body))
+        .transpose()
 }
 
 pub(crate) fn persist(

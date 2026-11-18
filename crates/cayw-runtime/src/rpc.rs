@@ -62,6 +62,21 @@ struct Session {
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
+struct SessionGet {
+    session_id: String,
+    if_cursor: Option<u64>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ArtifactList {
+    session_id: String,
+    #[serde(default)]
+    summary: bool,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct ContentInspect {
     session_id: String,
     task_id: Option<String>,
@@ -75,6 +90,14 @@ struct Prompt {
     #[serde(default)]
     images: Vec<ImageInput>,
 }
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SubmitFollowUp {
+    session_id: String,
+    text: String,
+    request_id: String,
+}
+
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Events {
@@ -827,8 +850,13 @@ impl Runtime {
                 encode(self.list()?)
             }
             "session.get" => {
-                let p: Session = parse(params)?;
-                encode(self.get(&p.session_id)?)
+                let p: SessionGet = parse(params)?;
+                let view = self.get(&p.session_id)?;
+                if p.if_cursor == Some(view.cursor) {
+                    Ok(Value::Null)
+                } else {
+                    encode(view)
+                }
             }
             "session.events" => {
                 let p: Events = parse(params)?;
@@ -866,6 +894,19 @@ impl Runtime {
                     images: p.images,
                 };
                 encode(self.prompt_input(&p.session_id, input, cancel).await?)
+            }
+            "task.submit_follow_up" => {
+                let p: SubmitFollowUp = parse(params)?;
+                let id = uuid::Uuid::parse_str(&p.request_id)
+                    .map_err(|error| RpcError::new("invalid_params", error.to_string()))?;
+                encode(self.submit_follow_up(
+                    &p.session_id,
+                    TaskInput {
+                        text: p.text,
+                        images: vec![],
+                    },
+                    id,
+                )?)
             }
             "session.cancel" => {
                 let p: crate::CancelTarget = parse(params)?;
@@ -1072,8 +1113,12 @@ impl Runtime {
                 encode(self.preview_artifact(&p.artifact_id)?)
             }
             "artifacts.list" => {
-                let p: Session = parse(params)?;
-                encode(self.list_artifacts(&p.session_id)?)
+                let p: ArtifactList = parse(params)?;
+                if p.summary {
+                    encode(self.summarize_artifacts(&p.session_id)?)
+                } else {
+                    encode(self.list_artifacts(&p.session_id)?)
+                }
             }
             "artifacts.action" => {
                 let p: crate::ActionRequest = parse(params)?;
@@ -1118,6 +1163,7 @@ impl RpcHandler for Runtime {
         params: Value,
         cancel: CancellationToken,
     ) -> Result<Value, RpcError> {
+        self.ensure_submissions();
         let context = operation_context(method, &params);
         self.dispatch_rpc(method, params, cancel)
             .await

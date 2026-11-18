@@ -144,7 +144,8 @@ use tokio::sync::Notify;
 #[derive(Clone)]
 pub struct RuntimeConfig {
     pub max_concurrent_runs: usize,
-    /// Includes running, approval-waiting and draining tasks. One live task per session.
+    /// Includes running, approval-waiting and draining tasks. Only one task
+    /// per session can claim execution at a time.
     pub max_queued_runs: usize,
     /// Promote a ready task after this many other dispatches. New arrivals cannot
     /// increase its bound of fairness_after_dispatches + max_queued_runs - 1.
@@ -416,6 +417,10 @@ pub(crate) struct Inner {
     session_controls: Mutex<BTreeMap<String, cayw_agent::AgentControl>>,
     binding_cache: session::BindingCache,
     changed: Notify,
+    submissions_changed: Arc<Notify>,
+    submission_loop_started: AtomicBool,
+    submission_error: Mutex<Option<String>>,
+    inspector_prefix: Mutex<Option<(String, u64, cayw_run_inspector::RuntimeEventInspector)>>,
     approvals: Notify,
     maintenance_cancel: CancellationToken,
     /// Per-session background memory-writer queue state so consecutive turns on
@@ -760,6 +765,10 @@ impl Runtime {
                 session_controls: Mutex::new(BTreeMap::new()),
                 binding_cache: session::BindingCache::default(),
                 changed: Notify::new(),
+                submissions_changed: Arc::new(Notify::new()),
+                submission_loop_started: AtomicBool::new(false),
+                submission_error: Mutex::new(None),
+                inspector_prefix: Mutex::new(None),
                 approvals: Notify::new(),
                 maintenance_cancel: CancellationToken::new(),
                 memory_writer_queues: Mutex::new(BTreeMap::new()),
@@ -778,9 +787,11 @@ impl Runtime {
                 config,
             }),
         };
-        *crate::lock(&rt.inner.artifacts) = artifacts::new_state(Arc::downgrade(&rt.inner));
+        *crate::lock(&rt.inner.artifacts) =
+            artifacts::new_state(Arc::downgrade(&rt.inner), store_path.as_ref());
         rt.capabilities()?; // Validate actual injected Host configuration before serving.
         rt.ensure_due_reports();
+        rt.ensure_submissions();
         Ok(rt)
     }
     /// Trusted host access to Core storage. Runtime recovery must use
@@ -1997,6 +2008,13 @@ impl Runtime {
     pub fn health(&self) -> Result<Health, RuntimeError> {
         let (running, queued) = self.inner.queue.counts()?;
         let selection = lock(&self.inner.selection);
+        let mut disabled_services = self.inner.disabled_services.clone();
+        if let Some(reason) = lock(&self.inner.submission_error).clone() {
+            disabled_services.push(DisabledService {
+                name: "follow_up_scheduler".into(),
+                reason,
+            });
+        }
         Ok(Health {
             status: "ok",
             protocol_version: cayw_core::PROTOCOL_VERSION,
@@ -2006,7 +2024,7 @@ impl Runtime {
             provider: selection.model.provider.clone(),
             model: selection.model.id.clone(),
             approval_mode: self.inner.config.approval_mode,
-            disabled_services: self.inner.disabled_services.clone(),
+            disabled_services,
         })
     }
     pub fn create(&self, label: Option<String>) -> Result<SessionView, RuntimeError> {
@@ -2036,7 +2054,6 @@ impl Runtime {
         after: u64,
         limit: usize,
     ) -> Result<Vec<EventRecord>, RuntimeError> {
-        self.get(id)?;
         Ok(self.inner.store.events(id, after, limit)?)
     }
     /// Fold durable session events into a run-inspector view (F06).
@@ -2083,8 +2100,14 @@ impl Runtime {
         let end = limit.map_or(events_total, |limit| {
             after.saturating_add(limit as u64).min(events_total)
         });
-        let mut inspector = cayw_run_inspector::RuntimeEventInspector::new(id, after);
-        let mut cursor = 0;
+        let (mut cursor, mut inspector) = lock(&self.inner.inspector_prefix)
+            .as_ref()
+            .filter(|(session, cursor, _)| session == id && *cursor <= after)
+            .map_or_else(
+                || (0, cayw_run_inspector::RuntimeEventInspector::new(id, after)),
+                |(_, cursor, prefix)| (*cursor, prefix.clone().continue_after(after)),
+            );
+        let mut events_read = 0;
         while after < end && cursor < end {
             let want = (end - cursor).min(cayw_core::MAX_EVENT_PAGE as u64) as usize;
             let page = self.inner.store.events(id, cursor, want)?;
@@ -2095,9 +2118,13 @@ impl Runtime {
                 .into());
             }
             cursor = page.last().expect("nonempty page").cursor;
+            events_read += page.len() as u64;
             for record in &page {
                 inspector.push(record);
             }
+        }
+        if after < end {
+            *lock(&self.inner.inspector_prefix) = Some((id.to_owned(), cursor, inspector.clone()));
         }
         let events_scanned = end - after;
         let next_after = end;
@@ -2109,6 +2136,7 @@ impl Runtime {
                 events_total,
                 after,
                 events_scanned,
+                events_read,
                 has_more,
                 next_after,
             },

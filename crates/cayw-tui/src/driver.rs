@@ -186,6 +186,17 @@ impl Driver {
                             applied
                         }
                     }
+                    "task.submit_follow_up" => {
+                        if let (Some(task), Some(text)) =
+                            (value["id"].as_str(), request.params["text"].as_str())
+                            && value["session_id"].as_str() == Some(id.as_str())
+                        {
+                            app.follow_up_admitted(&id, text, task);
+                            Ok(())
+                        } else {
+                            Err("未收到原排队任务编号".into())
+                        }
+                    }
                     "session.cancel" => {
                         if let Some(cancelled) = value["cancelled"].as_bool() {
                             app.cancel_acknowledged(&id, cancelled);

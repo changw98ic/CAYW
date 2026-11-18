@@ -205,6 +205,7 @@ async fn run_inspector_pages_beyond_first_1000_events() {
     assert_eq!(full.events_total, view.cursor);
     assert_eq!(full.after, 0);
     assert_eq!(full.events_scanned, view.cursor);
+    assert_eq!(full.events_read, view.cursor);
     assert!(!full.has_more, "full scan must not claim truncation");
     assert_eq!(full.next_after, view.cursor);
     assert_eq!(
@@ -232,6 +233,7 @@ async fn run_inspector_pages_beyond_first_1000_events() {
         )
         .unwrap();
     assert_eq!(page2.after, page1.next_after);
+    assert_eq!(page2.events_read, page2.events_scanned);
     assert_eq!(
         page2.events_scanned,
         view.cursor - page1.next_after,

@@ -113,6 +113,11 @@ pub enum Command {
         session_id: String,
         text: String,
     },
+    QueueFollowUp {
+        session_id: String,
+        text: String,
+        request_id: String,
+    },
     Cancel {
         session_id: String,
         task_id: String,
@@ -148,6 +153,14 @@ impl Command {
             Self::Prompt { session_id, text } => (
                 "session.prompt",
                 json!({"session_id":session_id,"text":text}),
+            ),
+            Self::QueueFollowUp {
+                session_id,
+                text,
+                request_id,
+            } => (
+                "task.submit_follow_up",
+                json!({"session_id":session_id, "text":text, "request_id":request_id}),
             ),
             // Transport resolves only this retained Task into its full queue identity.
             Self::Cancel {
@@ -685,6 +698,7 @@ pub struct App {
     pub connected: bool,
     pub status: String,
     drafts: BTreeMap<String, Editor>,
+    follow_ups: BTreeMap<(String, String), (String, u64)>,
     pub quitting: bool,
 }
 
@@ -949,6 +963,24 @@ impl App {
         } else {
             vec![]
         }
+    }
+
+    pub fn follow_up_admitted(&mut self, session: &str, text: &str, task: &str) {
+        let key = (session.to_owned(), text.to_owned());
+        if let Some((_, revision)) = self.follow_ups.remove(&key) {
+            let editor = if self.selected_id.as_deref() == Some(session) {
+                Some(&mut self.input)
+            } else {
+                self.drafts.get_mut(session)
+            };
+            if let Some(editor) = editor
+                && editor.revision() == revision
+                && editor.text() == text
+            {
+                editor.clear();
+            }
+        }
+        self.status = format!("已受理任务 {task}");
     }
 
     pub fn prompt_completed(&mut self, id: &str) {
@@ -1306,6 +1338,13 @@ impl App {
         if !self.connected || self.input.text().trim().is_empty() {
             return vec![];
         }
+        if self.selected().is_some_and(|session| {
+            session.pending_prompt.as_ref().is_some_and(|prompt| {
+                prompt.editor_revision == self.input.revision() && prompt.text == self.input.text()
+            })
+        }) {
+            return vec![];
+        }
         // While the main-session conversation shows an approval question, an
         // exact option typed as the whole message is the user's answer. It is
         // matched by the program and never sent to the model.
@@ -1316,6 +1355,30 @@ impl App {
         {
             self.input.clear();
             return self.answer(reply);
+        }
+        if let Some(session) = self.selected().filter(|session| {
+            session.synced
+                && !session.frozen
+                && (session.request_pending
+                    || session.state == "running"
+                    || session.state == "awaiting_approval"
+                    || self
+                        .follow_ups
+                        .contains_key(&(session.id.clone(), self.input.text().to_owned())))
+        }) {
+            let session_id = session.id.clone();
+            let text = self.input.text().to_owned();
+            let (request_id, revision) = self
+                .follow_ups
+                .entry((session_id.clone(), text.clone()))
+                .or_insert_with(|| (uuid::Uuid::new_v4().to_string(), self.input.revision()));
+            *revision = self.input.revision();
+            self.status = "正在提交下一项…".into();
+            return vec![Command::QueueFollowUp {
+                session_id,
+                text,
+                request_id: request_id.clone(),
+            }];
         }
         let Some(session) = self.selected().filter(|session| session.can_prompt()) else {
             self.status = "Send blocked: wait for completion, approval, or reconnection.".into();
@@ -1505,13 +1568,10 @@ pub fn string<'a>(value: &'a Value, key: &str) -> &'a str {
 }
 
 pub fn message_text(message: &Value) -> String {
-    if let Some(content) = message["content"].as_str() {
-        return sanitize(content);
-    }
-    message["content"]
-        .as_array()
-        .map(|parts| {
-            parts
+    let content = match &message["content"] {
+        Value::String(content) => sanitize(content),
+        Value::Array(parts) => sanitize(
+            &parts
                 .iter()
                 .filter_map(|part| match part["type"].as_str() {
                     Some("text") => Some(string(part, "text").to_owned()),
@@ -1520,9 +1580,15 @@ pub fn message_text(message: &Value) -> String {
                     _ => None,
                 })
                 .collect::<Vec<_>>()
-                .join("\n")
-        })
-        .map_or_else(String::new, |text| sanitize(&text))
+                .join("\n"),
+        ),
+        _ => String::new(),
+    };
+    if message["outcome_unknown"].as_bool() == Some(true) {
+        format!("结果待核对 · {content}")
+    } else {
+        content
+    }
 }
 
 fn push_log(logs: &mut Vec<String>, entry: String) {

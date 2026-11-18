@@ -14,14 +14,16 @@ fn capture_can_cross_32_mib_reopen_and_continue() {
 
     let reopened = TraceStore::open(&path).unwrap();
     assert_eq!(
-        reopened.snapshot().sessions["session"].error.as_ref(),
+        reopened.snapshot().unwrap().sessions["session"]
+            .error
+            .as_ref(),
         Some(&message)
     );
     reopened
         .connection_error("next-session", Some("still recording".into()))
         .unwrap();
     drop(reopened);
-    let saved = TraceStore::open(&path).unwrap().snapshot();
+    let saved = TraceStore::open(&path).unwrap().snapshot().unwrap();
     assert_eq!(saved.sessions["session"].error.as_ref(), Some(&message));
     assert_eq!(
         saved.sessions["next-session"].error.as_deref(),
@@ -92,7 +94,7 @@ fn ingestion_preserves_more_than_100000_events_and_256_executions() {
     store.ingest(&events).unwrap();
     drop(store);
     let reopened = TraceStore::open(&path).unwrap();
-    let snapshot = reopened.snapshot();
+    let snapshot = reopened.snapshot().unwrap();
     assert_eq!(snapshot.events, events);
     assert_eq!(snapshot.projects.len(), 257);
     assert_eq!(snapshot.sessions["session"].after, events.len() as u64);
@@ -202,7 +204,7 @@ async fn editing_and_undo_continue_after_256_versions() {
         .unwrap();
     assert_eq!(undone.projects["project"].version(), 258);
     drop(store);
-    let saved = TraceStore::open(&path).unwrap().snapshot();
+    let saved = TraceStore::open(&path).unwrap().snapshot().unwrap();
     assert_eq!(saved.projects["project"].revisions.len(), 258);
     assert_eq!(saved.projects["project"].evaluations.len(), 258);
 }
@@ -229,7 +231,7 @@ fn large_event_capture_reopens_without_losing_payloads_or_cursor() {
     assert!(std::fs::metadata(&path).unwrap().len() > 32 * 1024 * 1024);
     drop(store);
     let store = TraceStore::open(&path).unwrap();
-    assert_eq!(store.snapshot().events, events);
+    assert_eq!(store.snapshot().unwrap().events, events);
     let next = event(
         10,
         cayw_core::CoreEvent::Host {
@@ -239,7 +241,7 @@ fn large_event_capture_reopens_without_losing_payloads_or_cursor() {
     );
     store.ingest(std::slice::from_ref(&next)).unwrap();
     drop(store);
-    let saved = TraceStore::open(&path).unwrap().snapshot();
+    let saved = TraceStore::open(&path).unwrap().snapshot().unwrap();
     assert_eq!(saved.sessions["session"].after, 10);
     assert_eq!(saved.events.len(), 10);
     assert_eq!(saved.events.last(), Some(&next));

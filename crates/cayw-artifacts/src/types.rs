@@ -43,6 +43,34 @@ pub struct ArtifactRecord {
     pub result_handle: Option<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ArtifactSummary {
+    pub artifact_id: String,
+    pub session_id: String,
+    pub kind: ArtifactKind,
+    pub title: String,
+    pub content_version: u64,
+    pub created_at_ms: u64,
+    pub updated_at_ms: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub result_handle: Option<String>,
+}
+
+impl From<ArtifactRecord> for ArtifactSummary {
+    fn from(record: ArtifactRecord) -> Self {
+        Self {
+            artifact_id: record.artifact_id,
+            session_id: record.session_id,
+            kind: record.kind,
+            title: record.title,
+            content_version: record.content_version,
+            created_at_ms: record.created_at_ms,
+            updated_at_ms: record.updated_at_ms,
+            result_handle: record.result_handle,
+        }
+    }
+}
+
 /// Renderer-facing preview projection (not the storage record).
 ///
 /// UI / WebUI / TUI consume this shape to render HTML; they do not need the

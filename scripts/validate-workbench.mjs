@@ -290,7 +290,11 @@ try {
   assert.equal(preview.content_type, 'text/html; charset=utf-8');
   assert.match(preview.html, /Real Runtime artifact/);
   await record('artifact-preview', preview);
-  checks('Artifact list and preview stay on Runtime RPC; the conversation page has no artifact panel');
+  await page.locator('#session-artifacts > summary').click();
+  await page.getByRole('button', {name: 'Stored by real Runtime · 版本 1'}).click();
+  await page.locator('#artifact-status').getByText('已打开 Stored by real Runtime · 版本 1').waitFor();
+  assert.equal(await page.locator('#artifact-preview iframe').getAttribute('sandbox'), '');
+  checks('The conversation opens one Runtime artifact by identity in an isolated preview');
   const crossService = [];
   const crossServiceReads = [];
   const crossServiceErrors = [];

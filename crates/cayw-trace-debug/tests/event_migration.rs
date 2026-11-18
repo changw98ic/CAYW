@@ -25,9 +25,9 @@ fn v3_trace_preserves_exact_evidence_and_deduplicates_canonical_core_replay() {
     std::fs::write(&path, &bytes).unwrap();
     let canonical = cayw_core::migrate_v3_event_json(&raw["events"][0].to_string()).unwrap();
     let store = TraceStore::open(&path).unwrap();
-    assert_eq!(store.snapshot().events, vec![canonical.clone()]);
+    assert_eq!(store.snapshot().unwrap().events, vec![canonical.clone()]);
     store.ingest(std::slice::from_ref(&canonical)).unwrap();
-    assert_eq!(store.snapshot().events.len(), 1);
+    assert_eq!(store.snapshot().unwrap().events.len(), 1);
     assert_eq!(
         std::fs::read(path.with_extension("v3-evidence.json")).unwrap(),
         bytes
@@ -35,7 +35,7 @@ fn v3_trace_preserves_exact_evidence_and_deduplicates_canonical_core_replay() {
     drop(store);
     let reopened = TraceStore::open(&path).unwrap();
     reopened.ingest(std::slice::from_ref(&canonical)).unwrap();
-    assert_eq!(reopened.snapshot().events, vec![canonical]);
+    assert_eq!(reopened.snapshot().unwrap().events, vec![canonical]);
     assert_eq!(
         std::fs::read(path.with_extension("v3-evidence.json")).unwrap(),
         bytes

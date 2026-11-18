@@ -587,7 +587,13 @@ async fn removed_artifact_rpc_aliases_reject_without_side_effects() {
             .unwrap_err();
         assert_eq!(error.code, "method_not_found", "{method}");
     }
-    assert!(rt.export_artifact_recovery().artifacts.artifacts.is_empty());
+    assert!(
+        rt.export_artifact_recovery()
+            .unwrap()
+            .artifacts
+            .artifacts
+            .is_empty()
+    );
 }
 
 #[tokio::test]
@@ -991,7 +997,7 @@ async fn recovery_interleaved_with_inflight_dispatch_preserves_cancellation_and_
     let live = rt.get_artifact_action("act-recovering").unwrap();
     assert_eq!(live.status, ActionStatus::Accepted);
     assert_eq!(
-        rt.export_artifact_recovery().actions.actions,
+        rt.export_artifact_recovery().unwrap().actions.actions,
         vec![live.clone()]
     );
 
@@ -1001,7 +1007,7 @@ async fn recovery_interleaved_with_inflight_dispatch_preserves_cancellation_and_
     assert_eq!(rt.get_artifact_action("act-recovering").unwrap(), live);
 
     // A conflicting snapshot cannot replace the identity of the live dispatch.
-    let mut conflicting = rt.export_artifact_recovery();
+    let mut conflicting = rt.export_artifact_recovery().unwrap();
     let mut older_record = live.clone();
     older_record.status = ActionStatus::Applied;
     older_record.session_id = "older-session".into();

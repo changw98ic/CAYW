@@ -125,7 +125,7 @@ async fn wb03_transactional_snapshot_recovery_preserves_store_on_action_failure(
         })
         .unwrap();
 
-    let mut bundle = runtime.export_artifact_recovery();
+    let mut bundle = runtime.export_artifact_recovery().unwrap();
     assert_eq!(bundle.artifacts.artifacts.len(), 1);
 
     // Formulate a recovery bundle with a new valid artifact and an INVALID action
@@ -815,7 +815,7 @@ async fn rt01_peer_marker_does_not_clear_unpersisted_or_mismatched_memory_unknow
                 ActionStatus::OutcomeUnknown
             );
             // A later recovery record has no matching durable decision.
-            let mut recovery = runtime.export_artifact_recovery();
+            let mut recovery = runtime.export_artifact_recovery().unwrap();
             let local = recovery
                 .actions
                 .actions

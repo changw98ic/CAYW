@@ -238,7 +238,7 @@ impl TraceStore {
             _lock: lock,
         });
         // A lost plugin process cannot resume a partially evaluated Lua stack.
-        let mut recovered = store.snapshot();
+        let mut recovered = store.projection();
         let mut changed = migrated;
         for project in recovered.projects.values_mut() {
             if project.version() > 1
@@ -271,11 +271,27 @@ impl TraceStore {
         Ok(store)
     }
 
-    pub fn snapshot(&self) -> Document {
+    fn projection(&self) -> Document {
         self.document
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .clone()
+    }
+
+    /// Full export. Normal observation reads the projection or a single event.
+    pub fn snapshot(&self) -> Result<Document, Error> {
+        let current = self
+            .document
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut document = projection_clone(&current);
+        document.events = storage::events(
+            &self
+                .database
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+        )?;
+        Ok(document)
     }
 
     /// Read progress without cloning raw event history.
@@ -342,14 +358,15 @@ impl TraceStore {
         }
     }
 
-    pub fn event(&self, session: &str, cursor: u64) -> Option<EventRecord> {
-        self.document
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .events
-            .iter()
-            .find(|record| record.session_id == session && record.cursor == cursor)
-            .cloned()
+    pub fn event(&self, session: &str, cursor: u64) -> Result<Option<EventRecord>, Error> {
+        storage::event(
+            &self
+                .database
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+            session,
+            cursor,
+        )
     }
 
     pub fn bridge(&self) -> Arc<SymbolVersionBridge> {
@@ -390,7 +407,6 @@ impl TraceStore {
                 .ok_or_else(|| Error::Invalid("追踪序号耗尽".into()))?;
             self.persist(&next, &[])?;
             self.track_project_changes(&next)?;
-            next.events = std::mem::take(&mut current.events);
             *current = next;
         }
         Ok(())
@@ -433,7 +449,14 @@ impl TraceStore {
             .document
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let mut next = projection_clone(&current);
+        let mut next = Document {
+            schema: current.schema.clone(),
+            sequence: current.sequence,
+            sessions: current.sessions.clone(),
+            metrics: current.metrics.clone(),
+            projects: Default::default(),
+            events: Vec::new(),
+        };
         let mut changed = false;
         for event in events {
             let after = next
@@ -445,11 +468,8 @@ impl TraceStore {
                 return Err(Error::Invalid("Runtime 事件版本不受支持".into()));
             }
             if event.cursor <= after {
-                if !current
-                    .events
-                    .iter()
-                    .chain(next.events.iter())
-                    .any(|record| record == event)
+                if !next.events.iter().any(|record| record == event)
+                    && self.event(&event.session_id, event.cursor)?.as_ref() != Some(event)
                 {
                     return Err(Error::Invalid("同一会话游标的原始事件不一致".into()));
                 }
@@ -463,6 +483,7 @@ impl TraceStore {
                     event.cursor
                 )));
             }
+            capture::load_affected_projects(&current, &mut next, event);
             capture::apply(&mut next, event)?;
             next.events.push(event.clone());
             let session = next.sessions.entry(event.session_id.clone()).or_default();
@@ -477,10 +498,10 @@ impl TraceStore {
             next.sequence += 1;
             self.persist(&next, &next.events)?;
             self.track_project_changes(&next)?;
-            let added = std::mem::take(&mut next.events);
-            next.events = std::mem::take(&mut current.events);
-            next.events.extend(added);
-            *current = next;
+            current.projects.append(&mut next.projects);
+            current.sessions = next.sessions;
+            current.metrics = next.metrics;
+            current.sequence = next.sequence;
         }
         Ok(())
     }
@@ -497,13 +518,19 @@ impl TraceStore {
         {
             return Ok(());
         }
-        let mut next = projection_clone(&current);
+        let mut next = Document {
+            schema: current.schema.clone(),
+            sequence: current.sequence,
+            sessions: current.sessions.clone(),
+            metrics: current.metrics.clone(),
+            projects: Default::default(),
+            events: Vec::new(),
+        };
         next.sessions.entry(session_id.into()).or_default().error = message;
         next.sequence += 1;
         self.persist(&next, &[])?;
-        self.track_project_changes(&next)?;
-        next.events = std::mem::take(&mut current.events);
-        *current = next;
+        current.sessions = next.sessions;
+        current.sequence = next.sequence;
         Ok(())
     }
 
@@ -514,7 +541,7 @@ impl TraceStore {
         cancel: CancellationToken,
     ) -> Result<Document, Error> {
         let _editing = self.edits.lock().await;
-        let mut document = self.snapshot();
+        let mut document = self.projection();
         let project = document
             .projects
             .get_mut(project_id)
@@ -552,7 +579,7 @@ impl TraceStore {
         cancel: CancellationToken,
     ) -> Result<Document, Error> {
         let _editing = self.edits.lock().await;
-        let document = self.snapshot();
+        let document = self.projection();
         let project = document
             .projects
             .get(project_id)
@@ -609,16 +636,18 @@ impl TraceStore {
         let calls = project.calls.clone();
         let runtime_status = project.runtime_status.clone();
         let project_trace_error = project.trace_error.clone();
-        project.revisions.push(Revision {
+        let revision = Revision {
             version,
             parent: Some(parent),
             changed_node: changed_node.clone(),
             plan: plan.clone(),
             created_at_ms: now_ms(),
             reason: reason.into(),
-        });
-        link_project(project, &self.linker, self.workspace_root.as_deref());
-        self.commit(document)?;
+        };
+        self.change_project(project_id, parent, |project, _| {
+            project.revisions.push(revision);
+            link_project(project, &self.linker, self.workspace_root.as_deref());
+        })?;
         let local_mode = if changed_node.is_some() {
             "recompute"
         } else {
@@ -690,31 +719,49 @@ impl TraceStore {
                     },
                 }
             };
-        // Ingest may have advanced while the VM ran; append onto its current state.
+        self.change_project(project_id, version, |project, metrics| {
+            project.evaluations.push(result);
+            if metrics.save_to_result_ms.len() < 1024 {
+                metrics
+                    .save_to_result_ms
+                    .push(started.elapsed().as_secs_f64() * 1000.0);
+            }
+        })?;
+        self.snapshot()
+    }
+
+    fn change_project(
+        &self,
+        project_id: &str,
+        expected_version: u64,
+        change: impl FnOnce(&mut Project, &mut Metrics),
+    ) -> Result<(), Error> {
         let mut current = self
             .document
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let mut next = projection_clone(&current);
-        let project = next
+        let mut project = current
             .projects
-            .get_mut(project_id)
-            .ok_or_else(|| Error::Invalid("运行记录丢失".into()))?;
-        if project.version() != version {
-            return Err(Error::Conflict("内容版本已变化，旧结果未应用".into()));
-        }
-        project.evaluations.push(result);
-        if next.metrics.save_to_result_ms.len() < 1024 {
-            next.metrics
-                .save_to_result_ms
-                .push(started.elapsed().as_secs_f64() * 1000.0);
-        }
-        next.sequence += 1;
+            .get(project_id)
+            .ok_or_else(|| Error::Invalid("找不到这次运行".into()))?
+            .clone();
+        check_revision(&project, expected_version)?;
+        let mut metrics = current.metrics.clone();
+        change(&mut project, &mut metrics);
+        let mut next = Document {
+            schema: current.schema.clone(),
+            sequence: current.sequence + 1,
+            sessions: current.sessions.clone(),
+            projects: [(project_id.to_owned(), project)].into(),
+            events: Vec::new(),
+            metrics,
+        };
         self.persist(&next, &[])?;
         self.track_project_changes(&next)?;
-        next.events = std::mem::take(&mut current.events);
-        *current = next;
-        Ok(current.clone())
+        current.projects.append(&mut next.projects);
+        current.sequence = next.sequence;
+        current.metrics = next.metrics;
+        Ok(())
     }
 }
 

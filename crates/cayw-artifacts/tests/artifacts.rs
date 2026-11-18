@@ -60,7 +60,7 @@ fn restart_recovery_restores_artifacts_by_session() {
         })
         .unwrap();
 
-    let bundle = ws.export_recovery();
+    let bundle = ws.export_recovery().unwrap();
     let restored = ArtifactWorkspace::new();
     restored.restore_recovery(bundle).unwrap();
 
@@ -269,7 +269,7 @@ fn transactional_snapshot_recovery_preserves_store_on_action_failure() {
     put_card(&ws, "card-original", "sess-1", "<p>original</p>", 100);
 
     // Prepare a recovery bundle where artifacts are valid, but actions contain an invalid action_id
-    let mut bundle = ws.export_recovery();
+    let mut bundle = ws.export_recovery().unwrap();
     bundle.artifacts = ArtifactSnapshot {
         artifacts: vec![ArtifactRecord {
             artifact_id: "card-new".into(),
@@ -614,7 +614,7 @@ fn action_state_survives_refresh_snapshot() {
         Some(&"\"r2\"".to_string())
     );
 
-    let bundle = ws.export_recovery();
+    let bundle = ws.export_recovery().unwrap();
     let restored = ArtifactWorkspace::new();
     restored.restore_recovery(bundle).unwrap();
     assert_eq!(

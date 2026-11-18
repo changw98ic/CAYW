@@ -12,9 +12,10 @@ use cayw_ai::CancellationToken;
 use cayw_artifacts::{
     ActionIntent, ActionKind, ActionOutcome, ActionProtocol, ActionRecord, ActionRequest,
     ActionStatus, ArtifactError, ArtifactPreview, ArtifactReconciledOutcome,
-    ArtifactReconciliation, ArtifactRecord, ArtifactStore, ArtifactWorkspace, FollowUpDispatch,
-    HostActionDispatch, HostDispatchError, HostDispatchResult, PutArtifactRequest, RecoveryBundle,
-    SharedHostDispatch, ToolDispatch, UpdateArtifactRequest, load_recovery, validate_id,
+    ArtifactReconciliation, ArtifactRecord, ArtifactStore, ArtifactSummary, ArtifactWorkspace,
+    FollowUpDispatch, HostActionDispatch, HostDispatchError, HostDispatchResult,
+    PutArtifactRequest, RecoveryBundle, SharedHostDispatch, ToolDispatch, UpdateArtifactRequest,
+    load_recovery, validate_id,
 };
 use cayw_codemode::{CapabilityError, CapabilityHost};
 use cayw_host::{AuditSink, Host, PermissionGate};
@@ -529,15 +530,21 @@ impl AuditSink for ArtifactAudit {
     }
 }
 
-pub(crate) fn new_state(inner: Weak<Inner>) -> ArtifactState {
+pub(crate) fn new_state(inner: Weak<Inner>, store_path: &std::path::Path) -> ArtifactState {
     let dispatch: SharedHostDispatch = Arc::new(RuntimeHostDispatch::new(inner));
     ArtifactState {
-        workspace: ArtifactWorkspace::with_dispatch(dispatch),
+        workspace: ArtifactWorkspace::with_store(
+            dispatch,
+            ArtifactStore::durable(store_path.with_extension("artifacts.sqlite")),
+        ),
     }
 }
 
 fn map_artifact(error: ArtifactError) -> RuntimeError {
-    RuntimeError::InvalidInput(error.to_string())
+    match error {
+        ArtifactError::Io(_) => RuntimeError::Workspace(error.to_string()),
+        _ => RuntimeError::InvalidInput(error.to_string()),
+    }
 }
 
 fn record_artifact_audit(
@@ -1292,6 +1299,16 @@ impl Runtime {
             .map_err(map_artifact)
     }
 
+    pub(crate) fn summarize_artifacts(
+        &self,
+        session_id: &str,
+    ) -> Result<Vec<ArtifactSummary>, RuntimeError> {
+        self.inner.store.snapshot(session_id)?;
+        self.artifact_store()
+            .summaries(session_id)
+            .map_err(map_artifact)
+    }
+
     /// Dispatch a card/form/chart action through the real Runtime/Host consumer.
     ///
     /// Also appends a unified `artifact.action.*` row to the Runtime audit journal
@@ -1352,8 +1369,8 @@ impl Runtime {
             .map_err(map_artifact)
     }
 
-    /// Replace the in-memory workspace from `{workspace}/artifacts/recovery.json`,
-    /// keeping the live Runtime/Host dispatch bridge.
+    /// Restore cards and actions from an explicit recovery bundle, retaining
+    /// the live Runtime/Host dispatch bridge.
     pub fn load_artifact_recovery(&self) -> Result<(), RuntimeError> {
         let bundle = load_recovery(&self.inner.root).map_err(map_artifact)?;
         lock(&self.inner.artifacts)
@@ -1362,8 +1379,11 @@ impl Runtime {
             .map_err(map_artifact)
     }
 
-    pub fn export_artifact_recovery(&self) -> RecoveryBundle {
-        lock(&self.inner.artifacts).workspace.export_recovery()
+    pub fn export_artifact_recovery(&self) -> Result<RecoveryBundle, RuntimeError> {
+        lock(&self.inner.artifacts)
+            .workspace
+            .export_recovery()
+            .map_err(map_artifact)
     }
 
     pub fn restore_artifact_recovery(&self, bundle: RecoveryBundle) -> Result<(), RuntimeError> {

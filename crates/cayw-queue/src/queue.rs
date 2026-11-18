@@ -762,7 +762,12 @@ impl Queue {
         }
         tx.execute_batch(
             "DROP INDEX IF EXISTS runtime_one_live_task;
-             CREATE UNIQUE INDEX runtime_one_live_task ON runtime_tasks(session) WHERE state IN ('queued','running','waiting_approval','draining');",
+             CREATE UNIQUE INDEX runtime_one_live_task ON runtime_tasks(session)
+               WHERE state IN ('running','waiting_approval','draining') OR (state='queued' AND worker IS NOT NULL);
+             CREATE TABLE IF NOT EXISTS runtime_user_submissions(
+               request_id TEXT PRIMARY KEY,
+               task_id TEXT NOT NULL UNIQUE REFERENCES runtime_tasks(id)
+             );",
         )?;
         tx.commit()?;
         Ok(Self {
@@ -842,6 +847,42 @@ impl Queue {
         capacity: usize,
         dispatch: Option<&TaskDispatch>,
     ) -> Result<TaskRecord, QueueError> {
+        self.enqueue_entry(
+            session, input, intent, priority, resources, capacity, dispatch, None,
+        )
+    }
+
+    pub fn enqueue_submission(
+        &self,
+        session: &str,
+        input: &TaskInput,
+        capacity: usize,
+        request_id: &str,
+    ) -> Result<TaskRecord, QueueError> {
+        self.enqueue_entry(
+            session,
+            input,
+            &TaskIntent::General,
+            TaskPriority::Normal,
+            &TaskResources::default(),
+            capacity,
+            None,
+            Some(request_id),
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn enqueue_entry(
+        &self,
+        session: &str,
+        input: &TaskInput,
+        intent: &TaskIntent,
+        priority: TaskPriority,
+        resources: &TaskResources,
+        capacity: usize,
+        dispatch: Option<&TaskDispatch>,
+        submission: Option<&str>,
+    ) -> Result<TaskRecord, QueueError> {
         let input_json = serde_json::to_string(input)?;
         intent.validate()?;
         if let Some(dispatch) = dispatch {
@@ -868,10 +909,24 @@ impl Queue {
                 return Ok(existing);
             }
         }
+        if let Some(request_id) = submission {
+            let existing = tx.query_row(
+                &format!("SELECT {COLUMNS} FROM runtime_tasks WHERE id=(SELECT task_id FROM runtime_user_submissions WHERE request_id=?1)"),
+                [request_id], row,
+            ).optional()?;
+            if let Some(existing) = existing {
+                if existing.input != *input || existing.session_id != session {
+                    return Err(QueueError::DispatchConflict);
+                }
+                return Ok(existing);
+            }
+        }
         resources.validate(&resource_policy_in(&tx)?)?;
-        let duplicate: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM runtime_tasks WHERE session=?1 AND state IN ('queued','running','waiting_approval','draining'))",[session],|r|r.get(0))?;
-        if duplicate {
-            return Err(QueueError::Busy);
+        if submission.is_none() {
+            let duplicate: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM runtime_tasks WHERE session=?1 AND state IN ('queued','running','waiting_approval','draining'))",[session],|r|r.get(0))?;
+            if duplicate {
+                return Err(QueueError::Busy);
+            }
         }
         let count: i64 = tx.query_row(
             "SELECT count(*) FROM runtime_tasks WHERE state IN ('queued','running','waiting_approval','draining')",
@@ -887,6 +942,12 @@ impl Queue {
         } else {
             tx.execute("INSERT INTO runtime_tasks(id,session,input_json,state,queued_at,intent,priority,declared_memory_bytes) VALUES (?1,?2,?3,'queued',?4,?5,?6,?7)",params![id,session,input_json,sql_u64(timestamp_ms())?,serde_json::to_string(intent)?,priority_sql(priority),counter_sql(resources.declared_memory_bytes)?])?;
         }
+        if let Some(request_id) = submission {
+            tx.execute(
+                "INSERT INTO runtime_user_submissions(request_id,task_id) VALUES(?1,?2)",
+                params![request_id, id],
+            )?;
+        }
         let task = tx.query_row(
             &format!("SELECT {COLUMNS} FROM runtime_tasks WHERE id=?1"),
             [id],
@@ -895,6 +956,23 @@ impl Queue {
         tx.commit()?;
         Ok(task)
     }
+    /// Oldest unclaimed user submission for each session that can claim work.
+    pub fn queued_submissions(&self) -> Result<Vec<String>, QueueError> {
+        let db = lock(&self.connection);
+        let mut query = db.prepare(
+            "SELECT q.id FROM runtime_tasks q JOIN runtime_user_submissions s ON s.task_id=q.id
+             WHERE q.state='queued' AND q.worker IS NULL AND q.cancel_requested=0
+             AND NOT EXISTS (
+               SELECT 1 FROM runtime_tasks a WHERE a.session=q.session AND a.id<>q.id
+               AND (a.state IN ('running','waiting_approval','draining')
+                    OR (a.state='queued' AND (a.worker IS NOT NULL OR a.ticket<q.ticket)))
+             ) ORDER BY q.ticket",
+        )?;
+        Ok(query
+            .query_map([], |row| row.get(0))?
+            .collect::<Result<_, _>>()?)
+    }
+
     /// Response-loss lookup. A dispatcher that did not receive the create result
     /// asks here first instead of creating a second task.
     pub fn find_by_dispatch_key(&self, key: &str) -> Result<Option<TaskRecord>, QueueError> {
@@ -1038,6 +1116,18 @@ impl Queue {
             return Err(QueueError::InvalidInput(
                 "only an uncancelled queued task without an attempt may be resumed".into(),
             ));
+        }
+        let occupied: bool = tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM runtime_tasks active
+             JOIN runtime_tasks target ON target.id=?1 AND target.session=active.session
+             WHERE active.id<>target.id AND
+               (active.state IN ('running','waiting_approval','draining')
+                OR (active.state='queued' AND active.worker IS NOT NULL)))",
+            [id],
+            |r| r.get(0),
+        )?;
+        if occupied {
+            return Err(QueueError::Busy);
         }
         let ready: (Option<i64>, Option<i64>) = tx.query_row(
             "SELECT ready_since_dispatch,ready_order FROM runtime_tasks WHERE id=?1",

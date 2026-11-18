@@ -8,7 +8,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .ok_or("expected copied trace path")?;
     let store = TraceStore::open(&path)?;
     let started = Instant::now();
-    let capture = serde_json::to_vec(&store.snapshot())?;
+    let capture = serde_json::to_vec(&store.snapshot()?)?;
     let capture_ms = started.elapsed().as_secs_f64() * 1000.0;
     let started = Instant::now();
     let initial = store.state_update(None);
@@ -33,11 +33,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     store.ingest(std::slice::from_ref(&event))?;
     let append_ms = started.elapsed().as_secs_f64() * 1000.0;
     let after_bytes = std::fs::metadata(&path)?.len();
-    let expected = store.snapshot().events.len();
+    let expected = store.snapshot()?.events.len();
     drop(store);
     let reopened = TraceStore::open(&path)?;
-    assert_eq!(reopened.snapshot().events.len(), expected);
-    assert_eq!(reopened.event(&event.session_id, event.cursor), Some(event));
+    assert_eq!(reopened.snapshot()?.events.len(), expected);
+    assert_eq!(
+        reopened.event(&event.session_id, event.cursor)?,
+        Some(event)
+    );
     println!(
         "{}",
         serde_json::json!({

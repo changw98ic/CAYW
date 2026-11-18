@@ -287,7 +287,13 @@ fn ingest_populates_symbol_hangs_via_linker_and_persists() {
     let store = TraceStore::open_with_bridge(&path, Arc::clone(&bridge)).unwrap();
     ingest_manifest(&store, demo_plan());
 
-    let project = store.snapshot().projects.get("exec").cloned().unwrap();
+    let project = store
+        .snapshot()
+        .unwrap()
+        .projects
+        .get("exec")
+        .cloned()
+        .unwrap();
     assert_eq!(project.symbol_hangs.len(), 2);
     assert_eq!(
         project.symbol_hangs["input"].file.version, 1,
@@ -306,7 +312,7 @@ fn ingest_populates_symbol_hangs_via_linker_and_persists() {
     // Persistence: reopen without the bridge still carries the hung snapshot.
     drop(store);
     let reopened = TraceStore::open(&path).unwrap();
-    let again = reopened.snapshot();
+    let again = reopened.snapshot().unwrap();
     let project = again.projects.get("exec").unwrap();
     assert_eq!(project.symbol_hangs.len(), 2);
     assert_eq!(project.symbol_hangs["input"].file.content_sha256, digest);
@@ -331,7 +337,7 @@ fn bridge_version_change_updates_hangs_through_refresh() {
             .unwrap();
     ingest_manifest(&store, demo_plan());
     assert_eq!(
-        store.snapshot().projects["exec"].symbol_hangs["input"]
+        store.snapshot().unwrap().projects["exec"].symbol_hangs["input"]
             .file
             .version,
         1
@@ -351,9 +357,9 @@ fn bridge_version_change_updates_hangs_through_refresh() {
         .unwrap();
     assert_eq!(published.version, 2);
 
-    let before_seq = store.snapshot().sequence;
+    let before_seq = store.snapshot().unwrap().sequence;
     store.refresh_symbol_hangs().unwrap();
-    let after = store.snapshot();
+    let after = store.snapshot().unwrap();
     assert!(
         after.sequence > before_seq,
         "refresh must advance sequence for HTTP watchers"
@@ -414,7 +420,13 @@ pub fn condition(x: i32) -> bool { x > 0 }
     );
     assert!(symbols.iter().any(|s| s.id.name == "condition"));
 
-    let project = store.snapshot().projects.get("exec").cloned().unwrap();
+    let project = store
+        .snapshot()
+        .unwrap()
+        .projects
+        .get("exec")
+        .cloned()
+        .unwrap();
     assert!(
         !project.symbol_hangs.is_empty(),
         "default-start ingest must yield non-empty symbol hangs when workspace has sources"
@@ -439,7 +451,13 @@ fn default_open_without_matching_workspace_file_still_skips_hang() {
         TraceStore::open_with_workspace(workspace.path().join("trace.json"), workspace.path())
             .unwrap();
     ingest_manifest(&store, demo_plan());
-    let project = store.snapshot().projects.get("exec").cloned().unwrap();
+    let project = store
+        .snapshot()
+        .unwrap()
+        .projects
+        .get("exec")
+        .cloned()
+        .unwrap();
     assert!(
         project.symbol_hangs.is_empty(),
         "missing workspace files must not invent hangs"
@@ -480,7 +498,7 @@ fn workspace_file_change_refreshes_indexed_symbols_on_reingest() {
     assert!(names_v1.contains(&"condition".into()));
     assert!(!names_v1.contains(&"revised".into()));
     assert_eq!(
-        store.snapshot().projects["exec"].symbol_hangs["input"]
+        store.snapshot().unwrap().projects["exec"].symbol_hangs["input"]
             .file
             .version,
         1
@@ -493,7 +511,7 @@ fn workspace_file_change_refreshes_indexed_symbols_on_reingest() {
 
     // refresh_symbol_hangs → link_project → feed_plan_from_workspace (same path as
     // ingest/revise). Also covers the explicit refresh-on-change product entry.
-    let before_seq = store.snapshot().sequence;
+    let before_seq = store.snapshot().unwrap().sequence;
     store.refresh_symbol_hangs().unwrap();
 
     let file_v2 = store
@@ -515,7 +533,7 @@ fn workspace_file_change_refreshes_indexed_symbols_on_reingest() {
     );
     assert!(names.contains(&"input"));
 
-    let after = store.snapshot();
+    let after = store.snapshot().unwrap();
     assert!(
         after.sequence > before_seq,
         "hang refresh must advance sequence for watchers"
@@ -542,11 +560,11 @@ fn failed_source_refresh_is_visible_without_discarding_runtime_events() {
         TraceStore::open_with_workspace(workspace.path().join("trace.json"), workspace.path())
             .unwrap();
     ingest_manifest(&store, demo_plan());
-    let before = store.snapshot();
+    let before = store.snapshot().unwrap();
     assert!(!before.projects["exec"].symbol_hangs.is_empty());
     std::fs::write(&source, [0xff]).unwrap();
     store.refresh_symbol_hangs().unwrap();
-    let failed = store.snapshot();
+    let failed = store.snapshot().unwrap();
     assert_eq!(failed.events, before.events);
     assert!(failed.projects["exec"].symbol_hangs.is_empty());
     assert!(
@@ -558,7 +576,7 @@ fn failed_source_refresh_is_visible_without_discarding_runtime_events() {
     assert!(failed.sequence > before.sequence);
     std::fs::write(&source, "pub fn input() {}\npub fn condition() {}\n").unwrap();
     store.refresh_symbol_hangs().unwrap();
-    let restored = store.snapshot();
+    let restored = store.snapshot().unwrap();
     assert!(!restored.projects["exec"].symbol_hangs.is_empty());
     assert!(
         !restored.projects["exec"]

@@ -91,7 +91,11 @@ impl ArtifactWorkspace {
 
     /// Workspace that hands `FollowUpTask` / `InvokeTool` to `dispatch`.
     pub fn with_dispatch(dispatch: SharedHostDispatch) -> Self {
-        let store = Arc::new(ArtifactStore::new());
+        Self::with_store(dispatch, ArtifactStore::new())
+    }
+
+    pub fn with_store(dispatch: SharedHostDispatch, store: ArtifactStore) -> Self {
+        let store = Arc::new(store);
         let actions = Arc::new(ActionProtocol::new(
             Arc::clone(&store),
             Arc::clone(&dispatch),
@@ -109,11 +113,11 @@ impl ArtifactWorkspace {
     }
 
     /// Export both artifact catalog and action log for recovery.
-    pub fn export_recovery(&self) -> RecoveryBundle {
-        RecoveryBundle {
-            artifacts: self.store.export_snapshot(),
+    pub fn export_recovery(&self) -> Result<RecoveryBundle, ArtifactError> {
+        Ok(RecoveryBundle {
+            artifacts: self.store.export_snapshot()?,
             actions: self.actions.export_snapshot(),
-        }
+        })
     }
 
     /// Replace both maps from a recovery bundle (simulates restart).
@@ -124,7 +128,7 @@ impl ArtifactWorkspace {
     pub fn restore_recovery(&self, bundle: RecoveryBundle) -> Result<(), ArtifactError> {
         let prepared_artifacts = ArtifactStore::prepare_snapshot(bundle.artifacts)?;
         let (prepared_actions, prepared_state) = ActionProtocol::prepare_snapshot(bundle.actions)?;
-        self.store.commit_prepared(prepared_artifacts);
+        self.store.commit_prepared(prepared_artifacts)?;
         self.actions
             .commit_prepared(prepared_actions, prepared_state);
         Ok(())
@@ -132,7 +136,7 @@ impl ArtifactWorkspace {
 
     /// Persist recovery under `{root}/artifacts/recovery.json`.
     pub fn save_to_disk(&self, root: &Path) -> Result<std::path::PathBuf, ArtifactError> {
-        save_recovery(root, &self.export_recovery())
+        save_recovery(root, &self.export_recovery()?)
     }
 
     /// Load recovery from `{root}/artifacts/recovery.json` into a new workspace

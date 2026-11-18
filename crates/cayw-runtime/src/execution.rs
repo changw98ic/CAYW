@@ -496,6 +496,7 @@ impl Drop for ActiveGuard {
         }
         drop(active);
         self.inner.changed.notify_waiters();
+        self.inner.submissions_changed.notify_waiters();
         if self.inner.config.main_session {
             self.inner.due_checks.notify_waiters();
         }
@@ -662,6 +663,80 @@ impl Runtime {
         self.inner.changed.notify_waiters();
         Ok(task)
     }
+    pub(crate) fn submit_follow_up(
+        &self,
+        session: &str,
+        input: crate::TaskInput,
+        request_id: uuid::Uuid,
+    ) -> Result<TaskRecord, RuntimeError> {
+        input.validate(
+            &lock(&self.inner.selection).model,
+            self.inner.config.max_prompt_bytes,
+        )?;
+        let _coordinate = self.inner.coordination.enter()?;
+        self.inner.store.snapshot(session)?;
+        let task = self.inner.queue.enqueue_submission(
+            session,
+            &input,
+            self.inner.config.max_queued_runs,
+            &request_id.to_string(),
+        )?;
+        self.ensure_submissions();
+        self.inner.submissions_changed.notify_waiters();
+        self.inner.changed.notify_waiters();
+        Ok(task)
+    }
+
+    pub(crate) fn ensure_submissions(&self) {
+        let Ok(handle) = tokio::runtime::Handle::try_current() else {
+            return;
+        };
+        if self
+            .inner
+            .submission_loop_started
+            .swap(true, Ordering::AcqRel)
+        {
+            return;
+        }
+        let owner = Arc::downgrade(&self.inner);
+        let changed = self.inner.submissions_changed.clone();
+        let cancel = self.inner.maintenance_cancel.clone();
+        handle.spawn(async move {
+            loop {
+                let notification = changed.notified();
+                let Some(inner) = owner.upgrade() else {
+                    return;
+                };
+                let rt = Runtime { inner };
+                let mut failure = None;
+                match rt.inner.queue.queued_submissions() {
+                    Ok(ids) => {
+                        for id in ids {
+                            match rt.start_queued(&id) {
+                                Ok(_)
+                                | Err(
+                                    RuntimeError::Busy
+                                    | RuntimeError::Frozen(_)
+                                    | RuntimeError::RecoveryRequired { .. },
+                                ) => {}
+                                Err(error) => {
+                                    failure = Some(error.to_string());
+                                }
+                            }
+                        }
+                    }
+                    Err(error) => failure = Some(error.to_string()),
+                }
+                *lock(&rt.inner.submission_error) = failure;
+                drop(rt);
+                tokio::select! {
+                    _ = cancel.cancelled() => return,
+                    _ = notification => {}
+                }
+            }
+        });
+    }
+
     /// Runs to a durable terminal. Dropping the caller cancels this worker; the
     /// owned cleanup continues to hold the persisted admission slot until done.
     pub async fn prompt(

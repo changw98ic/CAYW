@@ -78,6 +78,7 @@ pub const PUBLIC_METHODS: &[&str] = &[
     "session.events",
     "session.prompt",
     "task.enqueue",
+    "task.submit_follow_up",
     "task.resume",
     "task.get",
     "session.tasks",
@@ -1133,7 +1134,7 @@ fn persist_ownership_bind(
             io::Error::new(io::ErrorKind::InvalidData, "session receipt missing id")
         })?;
         ownership.bind_session(sid, device_id)?;
-    } else if method == "task.enqueue" {
+    } else if matches!(method, "task.enqueue" | "task.submit_follow_up") {
         let tid = result
             .get("id")
             .and_then(Value::as_str)
@@ -1153,6 +1154,7 @@ fn side_effecting(method: &str) -> bool {
             "session.create"
                 | "session.prompt"
                 | "task.enqueue"
+                | "task.submit_follow_up"
                 | "task.resume"
                 | "session.cancel"
                 | "approval.decide"

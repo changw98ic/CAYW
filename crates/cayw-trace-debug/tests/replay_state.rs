@@ -121,7 +121,7 @@ async fn check_saved_and_undone_results(a: &str, b: &str, context: Value, pointe
     let dir = tempfile::tempdir().unwrap();
     let store = TraceStore::open(dir.path().join("trace.json")).unwrap();
     store.ingest(&events).unwrap();
-    let captured = store.snapshot();
+    let captured = store.snapshot().unwrap();
     let observed = captured.projects["execution"].evaluations[0].clone();
     assert_eq!(observed.status, Status::Completed);
     assert_eq!(observed.mode, "observed");

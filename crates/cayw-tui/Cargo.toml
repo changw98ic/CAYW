@@ -16,6 +16,7 @@ serde.workspace = true
 serde_json.workspace = true
 tokio = { workspace = true, features = ["rt-multi-thread", "net", "signal"] }
 unicode-segmentation = "1.12"
+uuid = { version = "=1.27.0", features = ["v4"] }
 
 [dev-dependencies]
 async-trait.workspace = true

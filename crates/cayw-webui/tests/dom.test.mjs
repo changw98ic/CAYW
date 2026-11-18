@@ -112,24 +112,24 @@ test('unknown prompt stays locked through old idle, unrelated terminal and uncov
     if (method === 'session.prompt') return failure('unknown_timeout', true);
   });
   await app.send();
-  assert.equal(app.ui.prompt.disabled, true);
+  assert.equal(app.ui['send-button'].disabled, true);
   assert.match(app.ui['prompt-status'].textContent, /连接|结果.*确认|待确认/);
   await app.poll();
-  assert.equal(app.ui.prompt.disabled, true, 'same-cursor idle is not settlement');
+  assert.equal(app.ui['send-button'].disabled, true, 'same-cursor idle is not settlement');
   current = snapshot({ cursor: 12, state: 'running', attempt: lease() });
   events = [record(11, { type: 'attempt_started', lease: lease() }), record(12, { type: 'agent', event: { type: 'agent_end', messages: [] } })];
   await app.poll();
-  assert.equal(app.ui.prompt.disabled, true, 'agent_end does not finish an attempt');
+  assert.equal(app.ui['send-button'].disabled, true, 'agent_end does not finish an attempt');
   current = snapshot({ cursor: 14 });
   events.push(record(13, { type: 'attempt_finished', lease: lease('another-attempt') }, lease('another-attempt')));
   await app.poll();
-  assert.equal(app.ui.prompt.disabled, true, 'unrelated terminal must not release the lock');
+  assert.equal(app.ui['send-button'].disabled, true, 'unrelated terminal must not release the lock');
   events.push(record(15, { type: 'attempt_finished', lease: lease() }));
   await app.poll();
-  assert.equal(app.ui.prompt.disabled, true, 'snapshot before the consumed terminal cannot release the lock');
+  assert.equal(app.ui['send-button'].disabled, true, 'snapshot before the consumed terminal cannot release the lock');
   current = snapshot({ cursor: 15 });
   await app.poll();
-  assert.equal(app.ui.prompt.disabled, true, 'no attempt fact correlates an unknown prompt to its request');
+  assert.equal(app.ui['send-button'].disabled, true, 'no attempt fact correlates an unknown prompt to its request');
   assert.equal(app.calls.filter(call => call.method === 'task.resume').length, 1);
 });
 
@@ -213,7 +213,7 @@ test('successful prompt response waits for consumed durable terminal before next
     if (method === 'session.prompt') return snapshot({ cursor: 13 });
   });
   await app.send();
-  assert.equal(app.ui.prompt.disabled, true);
+  assert.equal(app.ui['send-button'].disabled, true);
   current = snapshot({ cursor: 13 });
   events = [record(11, { type: 'attempt_started', lease: lease() }), record(12, { type: 'agent', event: { type: 'agent_end', messages: [] } }), record(13, { type: 'attempt_finished', lease: lease() })];
   await app.poll();
@@ -254,7 +254,7 @@ test('session_frozen error survives bare Core idle snapshots and offers explicit
   });
   await app.send();
   await app.poll();
-  assert.equal(app.ui.prompt.disabled, true);
+  assert.equal(app.ui['send-button'].disabled, true);
   assert.match(app.ui['blocked-text'].textContent, /停住/);
   assert.equal(app.ui['open-fork'].hidden, false);
   assert.equal(app.ui['open-fork'].disabled, false);
@@ -334,7 +334,7 @@ test('frozen Runtime binding locks both prompt and fork until the active attempt
     if (method === 'session.get') return current;
     if (method === 'session.events') return [];
   });
-  assert.equal(app.ui.prompt.disabled,true);
+  assert.equal(app.ui['send-button'].disabled,true);
   assert.equal(app.ui['open-fork'].hidden,false);
   assert.equal(app.ui['open-fork'].disabled,true);
   current = snapshot({cursor:11,binding:{plugin:'strongflow',generation:4,frozen:true}});
@@ -351,13 +351,13 @@ test('a dropped HTTP write retains an uncertain lock even after disconnect and r
     if (method === 'session.prompt') return { disconnect:true };
   });
   await app.send();
-  assert.equal(app.ui.prompt.disabled,true);
+  assert.equal(app.ui['send-button'].disabled,true);
   assert.match(app.ui['prompt-status'].textContent,/还不能确定/);
   await app.ui.logout.dispatch('click');
   await app.ui['login-form'].dispatch('submit');
-  assert.equal(app.ui.prompt.disabled,true,'reauthentication is not settlement');
+  assert.equal(app.ui['send-button'].disabled,true,'reauthentication is not settlement');
   await app.poll();
-  assert.equal(app.ui.prompt.disabled,true);
+  assert.equal(app.ui['send-button'].disabled,true);
   assert.equal(app.calls.filter(call=>call.method==='task.resume').length,1);
 });
 
@@ -383,7 +383,7 @@ test('cancel response is not execution settlement and cannot unlock a pending pr
   events = [record(11,{type:'attempt_started',lease:lease()})];
   await app.poll();
   await app.ui['cancel-button'].dispatch('click');
-  assert.equal(app.ui.prompt.disabled,true);
+  assert.equal(app.ui['send-button'].disabled,true);
   current = snapshot({cursor:12});
   events.push(record(12,{type:'attempt_finished',lease:lease()}));
   resolvePrompt(failure('cancelled'));
@@ -477,7 +477,7 @@ test('a lost prompt response cannot borrow the first execution from another clie
   current = snapshot({cursor:12, messages:[{role:'user', content:'另一位客户端的任务'}, {role:'assistant', content:'已完成另一项任务'}]});
   await app.poll();
   await app.poll();
-  assert.equal(app.ui.prompt.disabled, true, 'a later execution has no authority over this lost request');
+  assert.equal(app.ui['send-button'].disabled, true, 'a later execution has no authority over this lost request');
   assert.match(app.ui['blocked-text'].textContent, /还不能确定/);
   assert.match(app.ui['blocked-text'].textContent, /不要再发一次/);
   assert.match(app.ui['blocked-text'].textContent, /不要重复停止/);
@@ -506,7 +506,7 @@ test('a no-op cancel after the terminal cannot strand a delayed successful promp
   await app.poll();
   assert.equal(app.ui['cancel-button'].disabled, false);
   await app.ui['cancel-button'].dispatch('click');
-  assert.equal(app.ui.prompt.disabled, true, 'the original HTTP operation has not returned');
+  assert.equal(app.ui['send-button'].disabled, true, 'the original HTTP operation has not returned');
   release(current);
   await pending;
   await app.poll();
@@ -541,13 +541,13 @@ for (const order of ['receipt-first', 'events-first', 'cancel-receipt-last']) {
     if (order !== 'cancel-receipt-last') { releaseCancel({cancelled:true}); await cancelling; }
     const complete = snapshot({cursor:12});
     if (order === 'receipt-first') { releasePrompt(complete); await pending; }
-    assert.equal(app.ui.prompt.disabled, true, 'no terminal has reached the browser');
+    assert.equal(app.ui['send-button'].disabled, true, 'no terminal has reached the browser');
     events = [record(11, {type:'attempt_started', lease:lease()}), record(12, {type:'attempt_finished', lease:lease()})];
     current = complete;
     await app.poll();
     if (order !== 'receipt-first') { releasePrompt(complete); await pending; }
     if (order === 'cancel-receipt-last') {
-      assert.equal(app.ui.prompt.disabled, true, 'pending cancel still needs its own receipt');
+      assert.equal(app.ui['send-button'].disabled, true, 'pending cancel still needs its own receipt');
       releaseCancel({cancelled:true});
       await cancelling;
     }
@@ -595,7 +595,7 @@ async function delayedEarlyCancel(t, otherCount = 121, replay = records => recor
   }
   current = snapshot({cursor:12 + otherCount * 2});
   for (let i = 0; i < Math.ceil(otherCount * 2 / 100); i++) await app.poll();
-  assert.equal(app.ui.prompt.disabled, true, 'other attempts and fresh idle cannot supply the missing prompt receipt');
+  assert.equal(app.ui['send-button'].disabled, true, 'other attempts and fresh idle cannot supply the missing prompt receipt');
   releasePrompt(snapshot({cursor:12}));
   await sending;
   return {...app, complete:current, setSnapshot:next => {current = next;}};
@@ -633,7 +633,7 @@ for (const [name, corrupt] of [
     let invalid = true;
     const app = await delayedEarlyCancel(t, 121, records => invalid ? corrupt(records) : records);
     await app.poll();
-    assert.equal(app.ui.prompt.disabled, true, 'idle cannot replace a correctly paired durable terminal');
+    assert.equal(app.ui['send-button'].disabled, true, 'idle cannot replace a correctly paired durable terminal');
     invalid = false;
     await app.poll();
     assert.equal(app.ui.prompt.disabled, false, 'a later valid read can recover without resending any write');
@@ -646,7 +646,7 @@ test('recovered terminal still requires a covering idle snapshot', async t => {
   const app = await delayedEarlyCancel(t);
   app.setSnapshot(snapshot({cursor:11}));
   await app.poll();
-  assert.equal(app.ui.prompt.disabled, true, 'an older snapshot cannot cover a newly recovered proof');
+  assert.equal(app.ui['send-button'].disabled, true, 'an older snapshot cannot cover a newly recovered proof');
   app.setSnapshot(app.complete);
   await app.poll();
   assert.equal(app.ui.prompt.disabled, false);

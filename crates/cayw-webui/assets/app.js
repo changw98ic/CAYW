@@ -64,9 +64,9 @@ export function messagePresentation(message, execution = null) {
       ? { ...original, status: execution.state, vm_alive: false, error: terminal.error ?? terminal.reason ?? null }
       : original;
     const knownPage = message.tool_name === 'execute_code' && object(page) && ['completed', 'failed', 'cancelled', 'outcome_unknown', 'interrupted', 'running', 'yielded'].includes(page.status) && Array.isArray(page.outputs);
-    const interrupted = Boolean(message.outcome_unknown || (knownPage && (page.outcome_unknown || page.status === 'outcome_unknown' || page.status === 'interrupted')));
-    const status = interrupted ? 'interrupted' : message.is_error && page?.status !== 'cancelled' ? 'failed' : knownPage ? page.status : 'record';
-    const title = ({ completed: '执行完成', failed: '执行未完成', cancelled: '已停止', interrupted: '已中断', running: '仍在执行', yielded: '等待继续', record: '工具返回了执行记录' })[status];
+    const unknown = Boolean(message.outcome_unknown || (knownPage && (page.outcome_unknown || page.status === 'outcome_unknown')));
+    const status = unknown ? 'outcome_unknown' : message.is_error && page?.status !== 'cancelled' ? 'failed' : knownPage ? page.status : 'record';
+    const title = ({ completed: '执行完成', failed: '执行未完成', cancelled: '已停止', interrupted: '已中断', outcome_unknown: '结果待核对', running: '仍在执行', yielded: '等待继续', record: '工具返回了执行记录' })[status];
     const values = [];
     if (knownPage && status === 'completed') {
       for (const item of page.outputs.slice(0, 20)) {
@@ -78,7 +78,8 @@ export function messagePresentation(message, execution = null) {
       }
     }
     let detail = '';
-    if (interrupted) detail = '本次工具执行已中断。';
+    if (unknown) detail = [page?.error, '执行可能已写入。请查看原始记录，核对后再决定是否重试。'].filter(Boolean).join('\n');
+    else if (status === 'interrupted') detail = page?.error || '本次工具执行已中断。';
     else if (status === 'cancelled') detail = '任务已停止。';
     else if (status === 'failed') {
       const reason = typeof page?.error === 'string' ? page.error : '';
@@ -95,7 +96,7 @@ export function messagePresentation(message, execution = null) {
 }
 
 export function createView(id) {
-  return { id, cursor: 0, snapshot: null, executions: {}, events: [], liveText: '', totalMessages: 0, snapshotAfter: 0, proofEpoch: 0, snapshotEpoch: 0, writes: [], faults: {}, activeAttempt: null, approvalQuestions: {} };
+  return { id, cursor: 0, snapshot: null, executions: {}, events: [], liveText: '', totalMessages: 0, snapshotAfter: 0, snapshotRequiredAfter: 0, proofEpoch: 0, snapshotEpoch: 0, writes: [], faults: {}, activeAttempt: null, approvalQuestions: {} };
 }
 
 const validLease = lease => object(lease) && ['session_id', 'attempt_id', 'worker_id'].every(key => typeof lease[key] === 'string' && lease[key].length > 0) && safeCursor(lease.fence) && lease.fence > 0;
@@ -312,16 +313,17 @@ export function selectActiveTaskId(tasks, sessionId, snapshot = null) {
   const attemptId = snapshot?.attempt?.attempt_id;
   if (typeof attemptId === 'string' && attemptId) {
     const matchedAttempt = candidates.slice().reverse().find(
-      task => task.attempt_id === attemptId && ['running', 'waiting_approval', 'awaiting_approval'].includes(task.state)
+      task => task.attempt_id === attemptId && ['running', 'waiting_approval', 'awaiting_approval', 'draining'].includes(task.state)
     );
     if (matchedAttempt) return matchedAttempt.id;
+    return null;
   }
   for (const states of [
     ['running', 'waiting_approval', 'awaiting_approval'],
     ['queued'],
     ['draining'],
   ]) {
-    const found = candidates.slice().reverse().find(task => states.includes(task.state));
+    const found = candidates.slice().reverse().find(task => states.includes(task.state) && (task.state !== 'queued' || task.worker_id));
     if (found) return found.id;
   }
   return null;
@@ -423,6 +425,7 @@ export function consumeEvents(view, records) {
   for (const record of records) {
     if (record.cursor <= view.cursor) continue;
     const event = declaredAgentEvent(record.event ?? record);
+    if (event.type !== 'message_update') next.snapshotRequiredAfter = record.cursor;
     if (record.cursor > (view.snapshot?.cursor ?? 0) && ['execution_started', 'execution_yielded', 'execution_finished'].includes(event.type)) {
       next.executions[event.execution.execution_id] = event.execution;
     } else if (record.cursor > (view.snapshot?.cursor ?? 0) && event.type === 'attempt_recovered') {
@@ -519,7 +522,9 @@ function boot() {
     'create-form', 'session-label', 'create-button', 'refresh-sessions', 'list-status', 'session-list',
     'conversation', 'session-title', 'session-state', 'global-error', 'poll-status', 'messages', 'history-note',
     'blocked-notice', 'blocked-text', 'open-fork', 'live-section', 'live-text',
-    'prompt-form', 'prompt', 'prompt-status', 'send-button', 'cancel-button', 'fork-dialog', 'fork-form',
+    'session-artifacts', 'artifact-status', 'artifact-items', 'artifact-preview', 'refresh-artifacts',
+    'task-queue', 'task-queue-items', 'task-queue-status', 'refresh-task-queue',
+    'prompt-form', 'prompt', 'prompt-status', 'send-button', 'queue-follow-up', 'cancel-button', 'fork-dialog', 'fork-form',
     'fork-label', 'fork-confirm', 'fork-error', 'fork-button', 'close-fork',
   ].map(id => [id, $(id)]));
   let authMode = 'local';
@@ -536,12 +541,14 @@ function boot() {
   let selected = null;
   let sessions = [];
   let views = new Map();
-  let promptPending = new Set();
+  let promptPending = new Map();
   let approvalPending = new Set();
   const taskAdmissions = new Map();
+  const drafts = new Map();
+  const followUps = new Map();
+  const submittingFollowUp = new Set();
   let selectionGeneration = 0;
   let listGeneration = 0;
-  let promptRevision = 0;
   let timer;
   let pollFailures = 0;
   const controllers = new Set();
@@ -561,11 +568,7 @@ function boot() {
   };
   const activeView = () => selected ? views.get(selected) : undefined;
   const setPromptValue = value => {
-    const next = String(value);
-    if (ui['prompt'].value !== next) {
-      ui['prompt'].value = next;
-      promptRevision++;
-    }
+    ui['prompt'].value = String(value);
   };
 
   async function rpc(method, params = {}, scope = sessionWorkspaces.get(params.session_id) || workspaceId) {
@@ -617,7 +620,7 @@ function boot() {
     // Keep unresolved operation evidence in this page's memory across
     // reauthentication. Aborting a connection never proves execution stopped.
     views = new Map([...views].filter(([,view]) => view.writes.length || view.activeAttempt || Object.keys(view.faults).length).map(([id,view]) => [id,{ ...view, writes:view.writes.map(write => ({ ...write, phase:'uncertain' })) }]));
-    promptPending = new Set();
+    promptPending = new Map();
     approvalPending = new Set();
     taskAdmissions.clear();
     ui['workspace'].hidden = true;
@@ -628,6 +631,8 @@ function boot() {
     ui['connection-status'].textContent = '尚未连接';
     ui['password'].value = '';
     ui['messages'].replaceChildren();
+    ui['artifact-items']?.replaceChildren();
+    ui['artifact-preview']?.replaceChildren();
     ui['live-text'].textContent = '';
     ui['session-list'].replaceChildren();
     setPromptValue('');
@@ -713,7 +718,13 @@ function boot() {
     sessionWorkspaces.set(id, workspaceId);
     if (!views.has(id)) rememberView(createView(id));
     ui['poll-status'].textContent = '正在读取会话…';
-    setPromptValue('');
+    if (ui['task-queue']) ui['task-queue'].open = false;
+    if (ui['session-artifacts']) {
+      ui['session-artifacts'].open = false;
+      ui['artifact-items'].replaceChildren();
+      ui['artifact-preview'].replaceChildren();
+    }
+    setPromptValue(drafts.get(id)?.text ?? '');
     report(null);
     renderSessionList();
     renderView();
@@ -859,9 +870,96 @@ function boot() {
     ui['live-section'].hidden = !view?.liveText;
   }
 
+  async function refreshTaskQueue() {
+    const id = selected;
+    const generation = selectionGeneration;
+    const scope = sessionWorkspaces.get(id) || workspaceId;
+    if (!id || !ui['task-queue']?.open) return;
+    const status = ui['task-queue-status'];
+    const list = ui['task-queue-items'];
+    status.textContent = '正在读取队列…';
+    try {
+      const tasks = await rpc('session.tasks', {session_id: id}, scope);
+      if (generation !== selectionGeneration) return;
+      if (!Array.isArray(tasks)) throw new Error('任务队列数据不完整。');
+      const queued = tasks.filter(task => task.state === 'queued');
+      const rows = queued.map(task => {
+        const label = clip(task.input.text, 120);
+        const row = el('li', '', label + ' ');
+        const cancel = el('button', 'quiet', '移除');
+        cancel.type = 'button';
+        cancel.setAttribute('aria-label', '移除排队任务 ' + label);
+        cancel.addEventListener('click', async () => {
+          try {
+            const target = {session_id: id, task_id: task.id, worker_id: task.worker_id ?? null, attempt_id: task.attempt_id ?? null, fence: task.fence};
+            await rpc('session.cancel', target, scope);
+            if (generation === selectionGeneration) await refreshTaskQueue();
+          } catch (error) {
+            if (generation === selectionGeneration) status.textContent = errorText(error);
+          }
+        });
+        row.append(cancel);
+        return row;
+      });
+      list.replaceChildren(...rows);
+      status.textContent = queued.length ? `${queued.length} 项排队中` : '没有待执行的任务。';
+    } catch (error) {
+      if (generation === selectionGeneration) status.textContent = errorText(error);
+    }
+  }
+
+  ui['task-queue']?.addEventListener('toggle', refreshTaskQueue);
+  ui['refresh-task-queue']?.addEventListener('click', refreshTaskQueue);
+
+  let artifactRequest = 0;
+  async function refreshArtifacts() {
+    const id = selected;
+    const generation = selectionGeneration;
+    const scope = sessionWorkspaces.get(id) || workspaceId;
+    if (!id || !ui['session-artifacts']?.open) return;
+    const status = ui['artifact-status'];
+    status.textContent = '正在读取产物…';
+    try {
+      const artifacts = await rpc('artifacts.list', { session_id: id, summary: true }, scope);
+      if (generation !== selectionGeneration) return;
+      if (!Array.isArray(artifacts)) throw new Error('产物列表不完整。');
+      ui['artifact-items'].replaceChildren(...artifacts.map(artifact => {
+        const row = el('li');
+        const open = el('button', 'quiet', `${artifact.title} · 版本 ${artifact.content_version}`);
+        open.type = 'button';
+        open.addEventListener('click', async () => {
+          const request = ++artifactRequest;
+          const current = () => generation === selectionGeneration && request === artifactRequest;
+          try {
+            const preview = await rpc('artifacts.preview', { artifact_id: artifact.artifact_id }, scope);
+            if (!current()) return;
+            if (preview?.session_id !== id || typeof preview.html !== 'string') throw new Error('产物预览不完整。');
+            const frame = el('iframe', 'artifact-frame');
+            frame.title = preview.title;
+            frame.setAttribute('sandbox', '');
+            frame.srcdoc = `<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; img-src data:">${preview.html}`;
+            ui['artifact-preview'].replaceChildren(frame);
+            status.textContent = `已打开 ${preview.title} · 版本 ${preview.content_version}`;
+          } catch (error) {
+            if (current()) status.textContent = errorText(error);
+          }
+        });
+        row.append(open);
+        return row;
+      }));
+      status.textContent = artifacts.length ? '' : '这段会话还没有产物。';
+    } catch (error) {
+      if (generation === selectionGeneration) status.textContent = errorText(error);
+    }
+  }
+  ui['session-artifacts']?.addEventListener('toggle', refreshArtifacts);
+  ui['refresh-artifacts']?.addEventListener('click', refreshArtifacts);
+
   function renderComposer() {
     const view = activeView();
     const snapshot = view?.snapshot;
+    if (ui['task-queue']) ui['task-queue'].hidden = !snapshot;
+    if (ui['session-artifacts']) ui['session-artifacts'].hidden = !snapshot;
     const pending = promptPending.has(selected);
     const busy = pending || sessionRunning(snapshot);
     const blocked = sessionBlocked(snapshot, view);
@@ -871,9 +969,16 @@ function boot() {
       const q = view?.approvalQuestions?.[id];
       return q ? q.approval_mode === 'model_auto' : runtimeApprovalMode === 'model_auto';
     });
-    ui['prompt'].disabled = !snapshot || Boolean(blocked) || busy;
-    ui['send-button'].disabled = ui['prompt'].disabled || !ui['prompt'].value.trim();
+    const followUp = busy || Boolean(blocked) || followUps.has(selected);
+    const pendingDraft = promptPending.get(selected);
+    const sameSubmission = pendingDraft && pendingDraft.text === ui['prompt'].value && pendingDraft.draft === drafts.get(selected);
+    ui['prompt'].disabled = !snapshot;
+    ui['send-button'].disabled = !snapshot || Boolean(blocked) || busy || !ui['prompt'].value.trim();
     ui['send-button'].textContent = pending ? '等待完成…' : '发送';
+    if (ui['queue-follow-up']) {
+      ui['queue-follow-up'].hidden = !followUp;
+      ui['queue-follow-up'].disabled = !snapshot || sameSubmission || submittingFollowUp.has(selected) || !ui['prompt'].value.trim();
+    }
     ui['cancel-button'].disabled = !snapshot || (!taskAdmissions.has(selected) && !view?.originalTaskId && !busy && !array(snapshot.pending_approvals).length) || (!busy && !view.writes.length && !view.activeAttempt && !array(snapshot.pending_approvals).length) || ui['cancel-button'].dataset.pending === 'true';
     ui['prompt-status'].textContent = array(snapshot?.pending_approvals).length && !view?.writes.some(write => write.phase === 'uncertain') ? (allAutoApprovals ? '模型正在自动评估授权，无需人工操作；也可以停止运行。' : '请在对话中的询问里选择选项，也可以停止运行。') : blocked || (busy ? '正在处理，可停止运行。' : decisionBusy ? '正在记录审批决定…' : 'Enter 换行，Ctrl / ⌘ + Enter 发送。');
   }
@@ -972,7 +1077,7 @@ function boot() {
       // Commit and render successfully consumed events before a later snapshot
       // request can fail. Reconnection then starts at exactly this cursor.
       rememberView(view);
-        ui['live-text'].textContent = view.liveText;
+      if (ui['live-text'].textContent !== view.liveText) ui['live-text'].textContent = view.liveText;
       ui['live-section'].hidden = !view.liveText;
       const terminalCursor = terminalReadCursor(view);
       if (terminalCursor !== null) {
@@ -983,15 +1088,30 @@ function boot() {
       view = views.get(id);
       const requestedAfter = view.cursor;
       const requestedEpoch = view.proofEpoch;
-      const snapshot = await rpc('session.get', { session_id: id });
+      // Text, thinking and tool argument fragments are already rendered from
+      // the log. Fetch a snapshot for committed state changes and recovery.
+      if (records.length && !pollFailures && view.snapshot.cursor < view.cursor &&
+          view.snapshot.cursor >= view.snapshotRequiredAfter && view.snapshotEpoch === requestedEpoch) {
+        if (records.length === 100) delay = 0;
+        return;
+      }
+      const canReuseSnapshot = view.snapshot?.cursor === view.cursor && !view.writes.length &&
+        !view.activeAttempt && !Object.keys(view.faults).length && !sessionRunning(view.snapshot);
+      const refreshed = await rpc('session.get', {
+        session_id: id,
+        ...(canReuseSnapshot ? { if_cursor: view.cursor } : {})
+      });
       if (login !== loginGeneration || generation !== selectionGeneration) return;
-      rememberView(applySnapshot(views.get(id), snapshot, false, requestedAfter, requestedEpoch));
+      const snapshot = refreshed === null ? view.snapshot : refreshed;
+      if (refreshed !== null) rememberView(applySnapshot(views.get(id), refreshed, false, requestedAfter, requestedEpoch));
       let auxError = null;
       try { await refreshActiveTaskId(id, login); } catch (error) { if (login !== loginGeneration || generation !== selectionGeneration) return; if (error.auth) throw error; auxError = error; rememberError(id, error); }
       try { await refreshApprovalQuestions(id, login); } catch (error) { if (login !== loginGeneration || generation !== selectionGeneration) return; if (error.auth) throw error; auxError = auxError ?? error; rememberError(id, error); }
       if (login !== loginGeneration || generation !== selectionGeneration) return;
-      updateSessionSummary(snapshot);
-      renderView();
+      if (refreshed !== null) {
+        updateSessionSummary(snapshot);
+        renderView();
+      }
       pollFailures = 0;
       ui['connection-status'].textContent = '已连接本机';
       if (auxError) {
@@ -1243,21 +1363,31 @@ await refreshSessions();
   });
 
   ui['prompt'].addEventListener('input', () => {
-    promptRevision++;
+    if (selected) drafts.set(selected, {text: ui['prompt'].value});
     renderComposer();
   });
   ui['prompt'].addEventListener('keydown', event => {
     if (event.key === 'Enter' && !event.isComposing && (event.ctrlKey || event.metaKey)) {
       event.preventDefault();
-      if (!ui['send-button'].disabled) ui['prompt-form'].requestSubmit();
+      const followUp = ui['queue-follow-up'];
+      const queued = followUps.get(selected)?.has(ui['prompt'].value.trim());
+      const busy = promptPending.has(selected) || sessionRunning(activeView()?.snapshot);
+      if ((busy || queued) && followUp && !followUp.hidden && !followUp.disabled) ui['prompt-form'].requestSubmit(followUp);
+      else if (!ui['send-button'].disabled) ui['prompt-form'].requestSubmit();
     }
   });
   ui['prompt-form'].addEventListener('submit', async event => {
     event.preventDefault();
-    if (ui['send-button'].disabled || !selected) return;
+    const isFollowUp = event.submitter?.id === 'queue-follow-up';
+    if (!selected || (isFollowUp ? ui['queue-follow-up'].disabled : ui['send-button'].disabled)) return;
     const id = selected;
     const draft = ui['prompt'].value;
-    const draftRevision = promptRevision;
+    const submittedDraft = drafts.get(id);
+    const clearSubmittedDraft = () => {
+      if (drafts.get(id) !== submittedDraft) return;
+      drafts.delete(id);
+      if (id === selected && ui['prompt'].value === draft) setPromptValue('');
+    };
     const text = draft.trim();
     const login = loginGeneration;
     const scope = workspaceId;
@@ -1273,7 +1403,41 @@ await refreshSessions();
       await replyApproval(id, pendingApproval.id ?? pendingApproval.approval_id, exactOption);
       return;
     }
-    promptPending.add(id);
+    if (isFollowUp) {
+      const submissions = followUps.get(id) ?? new Map();
+      const previous = submissions.get(text);
+      const bytes = crypto.getRandomValues(new Uint8Array(16));
+      bytes[6] = (bytes[6] & 15) | 64;
+      bytes[8] = (bytes[8] & 63) | 128;
+      const key = Array.from(bytes, byte => byte.toString(16).padStart(2, '0')).join('');
+      const request = previous ?? { session_id: id, text, request_id: key.replace(/^(.{8})(.{4})(.{4})(.{4})(.{12})$/, '$1-$2-$3-$4-$5') };
+      submissions.set(text, request);
+      followUps.set(id, submissions);
+      submittingFollowUp.add(id);
+      report(null);
+      renderComposer();
+      try {
+        const task = await rpc('task.submit_follow_up', request, scope);
+        if (login !== loginGeneration) return;
+        if (task?.session_id !== id || typeof task.id !== 'string') throw new RpcError('invalid_response', '未收到任务编号。', true);
+        submissions.delete(text);
+        if (!submissions.size) followUps.delete(id);
+        clearSubmittedDraft();
+        if (id === selected) {
+          ui['poll-status'].textContent = `已受理任务 ${task.id}`;
+          await refreshTaskQueue();
+        }
+      } catch (error) {
+        if (error.outcome_unknown === false) submissions.delete(text);
+        if (!submissions.size) followUps.delete(id);
+        if (id === selected && login === loginGeneration) handleError(error);
+      } finally {
+        submittingFollowUp.delete(id);
+        if (id === selected) renderComposer();
+      }
+      return;
+    }
+    promptPending.set(id, {text: draft, draft: submittedDraft});
     report(null);
     renderComposer();
     try {
@@ -1284,7 +1448,7 @@ await refreshSessions();
       const view = views.get(id);
       if (view) rememberView({ ...applySnapshot(view, snapshot, false, requestedAfter, requestedEpoch), liveText: '' });
       updateSessionSummary(snapshot);
-      if (id === selected && scope === workspaceId && promptRevision === draftRevision && ui['prompt'].value === draft) setPromptValue('');
+      clearSubmittedDraft();
       if (id === selected) renderView();
     } catch (error) {
       if (login !== loginGeneration) return;

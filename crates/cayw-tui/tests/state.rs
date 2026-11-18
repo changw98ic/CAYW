@@ -430,7 +430,7 @@ fn disconnected_send_requires_a_fresh_snapshot_before_another_mutation() {
 }
 
 #[test]
-fn owned_prompt_stays_pending_until_its_response_even_after_terminal_events() {
+fn a_new_draft_queues_while_the_original_prompt_waits_for_its_response() {
     let mut app = app("idle");
     app.input.insert("first");
     app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
@@ -443,12 +443,17 @@ fn owned_prompt_stays_pending_until_its_response_even_after_terminal_events() {
     )
     .unwrap();
     app.upsert_snapshot(snapshot("idle", 2), false).unwrap();
+    app.input.clear();
     app.input.insert("second");
+    let follow_up = app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
     assert!(
-        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
-            .is_empty()
+        matches!(&follow_up[..], [Command::QueueFollowUp { session_id, text, .. }] if session_id == "s1" && text == "second")
     );
+    assert!(app.selected().unwrap().request_pending);
+    app.follow_up_admitted("s1", "second", "queued-task");
+    assert!(app.input.text().is_empty());
     app.prompt_completed("s1");
+    app.input.insert("third");
     assert_eq!(
         app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
             .len(),

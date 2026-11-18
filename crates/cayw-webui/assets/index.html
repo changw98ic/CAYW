@@ -63,10 +63,23 @@
         <div id="messages" class="messages"><div class="empty"><h2>开始对话</h2><p>左边选一段已有的，或新建一段。</p></div></div>
         <section id="live-section" class="live-section" aria-label="正在回复" hidden><h2 class="small">正在回复</h2><pre id="live-text"></pre></section>
       </section>
+      <details id="session-artifacts" hidden>
+        <summary>会话产物</summary>
+        <button id="refresh-artifacts" type="button" class="quiet">刷新产物</button>
+        <p id="artifact-status" role="status"></p>
+        <ul id="artifact-items"></ul>
+        <div id="artifact-preview"></div>
+      </details>
+      <details id="task-queue" hidden>
+        <summary>任务队列</summary>
+        <button id="refresh-task-queue" type="button" class="quiet">刷新队列</button>
+        <p id="task-queue-status" role="status"></p>
+        <ul id="task-queue-items"></ul>
+      </details>
       <form id="prompt-form" class="composer">
         <label for="prompt" class="visually-hidden">发送消息</label>
         <textarea id="prompt" rows="3" placeholder="说你要做的事" disabled></textarea>
-        <div class="composer-footer"><span id="prompt-status" class="small muted" role="status">选好对话后就能输入。Enter 换行，Ctrl 或 ⌘ 加 Enter 发送。</span><div class="composer-actions"><button id="cancel-button" class="secondary" type="button" disabled>停止</button><button id="send-button" type="submit" disabled>发送</button></div></div>
+        <div class="composer-footer"><span id="prompt-status" class="small muted" role="status">选好对话后就能输入。Enter 换行，Ctrl 或 ⌘ 加 Enter 发送。</span><div class="composer-actions"><button id="cancel-button" class="secondary" type="button" disabled>停止</button><button id="queue-follow-up" type="submit" hidden>排为下一项</button><button id="send-button" type="submit" disabled>发送</button></div></div>
       </form>
     </main>
   </div>

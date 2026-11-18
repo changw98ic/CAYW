@@ -66,11 +66,12 @@ fn error_summary(result: &ToolResult) -> Option<String> {
     }
 }
 
+#[derive(Clone)]
 struct OpenCall {
     started_at_ms: u64,
 }
 
-#[derive(Default)]
+#[derive(Clone, Default)]
 struct ExecutionProjection {
     state: Option<ExecutionState>,
     terminal_at_ms: Option<u64>,
@@ -166,6 +167,7 @@ fn capability_diagnostic(call: &CapabilityCallRecord) -> Option<(StepOutcome, St
     ))
 }
 
+#[derive(Clone)]
 struct SessionBuilder {
     session_id: String,
     turn: u64,
@@ -490,67 +492,75 @@ pub fn timelines_and_snapshots_from_runtime_events_window(
             }
             builder.on_record(record, i >= clamped_start);
         }
-        let (all_steps, page_steps) = builder.finish();
-        if page_steps.is_empty() {
+        let Some((timeline, page_snapshot)) = archive_tracks(builder) else {
             continue;
-        }
-
-        let full_snapshot = SessionRunSnapshot {
-            session_id: session_id.clone(),
-            label: None,
-            task_fingerprint: None,
-            steps: all_steps,
         };
-        let page_snapshot = SessionRunSnapshot {
-            session_id: session_id.clone(),
-            label: None,
-            task_fingerprint: None,
-            steps: page_steps,
-        };
-
-        // Align track offset with the session's overall start time.
-        let session_t0 = full_snapshot.steps.first().map(|s| s.started_at_ms);
-        let track = build_duration_track_with_epoch(&page_snapshot, session_t0);
-
-        // Keep retry paths relevant to the steps in this window.
-        let all_retry_paths = build_retry_paths(&full_snapshot);
-        let page_step_ids: std::collections::HashSet<&str> = page_snapshot
-            .steps
-            .iter()
-            .map(|s| s.step_id.as_str())
-            .collect();
-        let retry_paths: Vec<RetryPath> = all_retry_paths
-            .into_iter()
-            .filter(|path| {
-                page_step_ids.contains(path.failure_step_id.as_str())
-                    || path
-                        .follow_up_step_ids
-                        .iter()
-                        .any(|id| page_step_ids.contains(id.as_str()))
-            })
-            .collect();
-
-        let failure_count = page_snapshot
-            .steps
-            .iter()
-            .filter(|step| step.outcome == StepOutcome::Failed)
-            .count() as u64;
-
-        let timeline = RunTimeline {
-            session_id: session_id.clone(),
-            label: None,
-            task_fingerprint: None,
-            step_count: page_snapshot.steps.len() as u64,
-            failure_count,
-            retry_paths,
-            track,
-        };
-
         snapshots.push(page_snapshot);
         timelines.push(timeline);
     }
 
     (timelines, snapshots)
+}
+
+fn archive_tracks(builder: SessionBuilder) -> Option<(RunTimeline, SessionRunSnapshot)> {
+    let session_id = builder.session_id.clone();
+    let (all_steps, page_steps) = builder.finish();
+    if page_steps.is_empty() {
+        return None;
+    }
+
+    let full_snapshot = SessionRunSnapshot {
+        session_id: session_id.clone(),
+        label: None,
+        task_fingerprint: None,
+        steps: all_steps,
+    };
+    let page_snapshot = SessionRunSnapshot {
+        session_id: session_id.clone(),
+        label: None,
+        task_fingerprint: None,
+        steps: page_steps,
+    };
+
+    // Align track offset with the session's overall start time.
+    let session_t0 = full_snapshot.steps.first().map(|s| s.started_at_ms);
+    let track = build_duration_track_with_epoch(&page_snapshot, session_t0);
+
+    // Keep retry paths relevant to the steps in this window.
+    let all_retry_paths = build_retry_paths(&full_snapshot);
+    let page_step_ids: std::collections::HashSet<&str> = page_snapshot
+        .steps
+        .iter()
+        .map(|s| s.step_id.as_str())
+        .collect();
+    let retry_paths: Vec<RetryPath> = all_retry_paths
+        .into_iter()
+        .filter(|path| {
+            page_step_ids.contains(path.failure_step_id.as_str())
+                || path
+                    .follow_up_step_ids
+                    .iter()
+                    .any(|id| page_step_ids.contains(id.as_str()))
+        })
+        .collect();
+
+    let failure_count = page_snapshot
+        .steps
+        .iter()
+        .filter(|step| step.outcome == StepOutcome::Failed)
+        .count() as u64;
+
+    let timeline = RunTimeline {
+        session_id: session_id.clone(),
+        label: None,
+        task_fingerprint: None,
+        step_count: page_snapshot.steps.len() as u64,
+        failure_count,
+        retry_paths,
+        track,
+    };
+
+    Some((timeline, page_snapshot))
 }
 
 /// Translate event records within a window then fold each session into a [`RunTimeline`].
@@ -608,8 +618,10 @@ pub struct RunInspectorPage {
     pub events_total: u64,
     /// Exclusive start cursor used for this response.
     pub after: u64,
-    /// How many Core events were scanned into this view.
+    /// Events in the requested window.
     pub events_scanned: u64,
+    /// Events read this time, including any uncached prefix.
+    pub events_read: u64,
     /// More durable events exist beyond [`Self::next_after`].
     pub has_more: bool,
     /// Pass as `after` on the next request when `has_more`.
@@ -626,6 +638,7 @@ pub struct RunInspectorView {
     pub events_total: u64,
     pub after: u64,
     pub events_scanned: u64,
+    pub events_read: u64,
     pub has_more: bool,
     pub next_after: u64,
 }
@@ -635,6 +648,7 @@ impl RunInspectorView {
         self.events_total = page.events_total;
         self.after = page.after;
         self.events_scanned = page.events_scanned;
+        self.events_read = page.events_read;
         self.has_more = page.has_more;
         self.next_after = page.next_after;
         self
@@ -644,6 +658,7 @@ impl RunInspectorView {
 /// Incremental fold for stores that read Core events in bounded pages.
 /// Feed the prefix through `after` as context, then the requested window.
 /// Only step projections and execution identities are retained, not raw events.
+#[derive(Clone)]
 pub struct RuntimeEventInspector {
     builder: SessionBuilder,
     after: u64,
@@ -657,10 +672,26 @@ impl RuntimeEventInspector {
         }
     }
 
+    /// Retain call and execution identities from a previously read prefix.
+    pub fn continue_after(mut self, after: u64) -> Self {
+        self.after = after;
+        self.builder.dirty_calls.clear();
+        self.builder.dirty_executions.clear();
+        self
+    }
+
     pub fn push(&mut self, record: &EventRecord) {
         if record.session_id == self.builder.session_id {
             self.builder.on_record(record, record.cursor > self.after);
         }
+    }
+
+    pub fn push_archive(&mut self, record: &EventRecord, emit: bool) {
+        self.builder.on_record(record, emit);
+    }
+
+    pub fn finish_archive(self) -> Option<(RunTimeline, SessionRunSnapshot)> {
+        archive_tracks(self.builder)
     }
 
     pub fn finish(
@@ -684,6 +715,7 @@ impl RuntimeEventInspector {
             events_total: 0,
             after: 0,
             events_scanned: 0,
+            events_read: 0,
             has_more: false,
             next_after: 0,
         }
@@ -720,6 +752,7 @@ pub fn inspect_runtime_events(
             events_total: next_after,
             after: 0,
             events_scanned: scanned,
+            events_read: records.len() as u64,
             has_more: false,
             next_after,
         },
@@ -743,6 +776,7 @@ pub fn inspect_runtime_events_page(
         events_total: 0,
         after: 0,
         events_scanned: 0,
+        events_read: 0,
         has_more: false,
         next_after: 0,
     }

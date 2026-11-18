@@ -35,6 +35,7 @@ impl Runtime {
         }
         self.inner.approvals.notify_waiters();
         self.inner.changed.notify_waiters();
+        self.inner.submissions_changed.notify_waiters();
         closing?;
         cancelled
     }

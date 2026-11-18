@@ -53,6 +53,7 @@
   var nodeCenters = new Map();
   var moduleElements = new Map();
   var evidenceIndex = new Map();
+  var evidenceEpoch = 0;
   var openEvidence = new Set();
 
   var ui = {};
@@ -347,9 +348,11 @@
       var record = evidenceIndex.get(key);
       if (record) { body.replaceChildren(preText(jsonText(record), false)); return; }
       loading = true;
+      var epoch = evidenceEpoch;
       body.textContent = '正在读取原始记录…';
       try {
         var response = await api('/api/events/' + encodeURIComponent(project.session_id) + '/' + cursor, {}, 12000);
+        if (epoch !== evidenceEpoch) return;
         if (response.status !== 200) throw new Error('HTTP ' + response.status);
         if (response.payload.session_id !== project.session_id || response.payload.cursor !== cursor) throw new Error('事件身份不一致');
         evidenceIndex.set(key, response.payload);
@@ -547,6 +550,7 @@
       }
       connected = true;
       doc = null;
+      evidenceEpoch += 1;
       evidenceIndex.clear();
       editorKey = null;
       reportGlobal(null);
@@ -603,7 +607,8 @@
       pollBusy = true;
       var ok = false;
       try {
-        var after = doc && typeof doc.sequence === 'number' ? doc.sequence : 0;
+        var base = doc;
+        var after = base ? base.sequence : 0;
         var result = await api('/api/state?after=' + after, {}, 30000);
         if (!connected || generation !== pollGeneration) return;
         if (result.status === 401) {
@@ -612,10 +617,11 @@
         }
         if (result.status !== 200) throw new Error('HTTP ' + result.status);
         if (!checkDocument(result.payload)) throw new Error('服务端返回的数据格式不受支持。');
-        applyDocument(result.payload);
+        // A newer edit response can arrive while the poll is outstanding.
+        var applied = applyDocument(result.payload, { allowReset: doc === base });
         failures = 0;
         ok = true;
-        setConnection('ok', '已连接 · 文档序列 ' + (doc ? doc.sequence : 0));
+        if (applied) setConnection('ok', '已连接 · 文档序列 ' + doc.sequence);
       } catch (error) {
         if (!connected || generation !== pollGeneration) return;
         // A long-poll that hits our own timeout is not a disconnect. Retry
@@ -646,7 +652,12 @@
       return false;
     }
     if (doc && typeof next.sequence === 'number' && typeof doc.sequence === 'number' && next.sequence < doc.sequence) {
-      return false;
+      if (!next.reset || !options || !options.allowReset) return false;
+      evidenceEpoch += 1;
+      evidenceIndex.clear();
+      openEvidence.clear();
+      doc = null;
+      selectedProject = selectedEvaluation = selectedNode = compareVersion = undoTarget = editorKey = null;
     }
     if (!options || !options.force) {
       if (doc && next.sequence === doc.sequence) return true;
