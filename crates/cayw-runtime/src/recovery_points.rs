@@ -486,13 +486,15 @@ impl RecoveryPoints {
             let previous_tree =
                 self.run_text(git, &["rev-parse", &format!("{previous}^{{tree}}")])?;
             if previous_tree.trim() == tree {
+                let warning =
+                    self.refresh_coverage(previous, complete, out_of_scope, &out_of_scope_sample);
                 return Ok(SnapshotOutcome::Ready {
                     id: previous.clone(),
                     created: false,
                     complete,
                     out_of_scope,
                     out_of_scope_sample,
-                    warning: incomplete_warning(complete, out_of_scope),
+                    warning,
                 });
             }
         }
@@ -524,13 +526,19 @@ impl RecoveryPoints {
                 let current_tree =
                     self.run_text(git, &["rev-parse", &format!("{current}^{{tree}}")])?;
                 if current_tree.trim() == tree {
+                    let warning = self.refresh_coverage(
+                        &current,
+                        complete,
+                        out_of_scope,
+                        &out_of_scope_sample,
+                    );
                     return Ok(SnapshotOutcome::Ready {
                         id: current,
                         created: false,
                         complete,
                         out_of_scope,
                         out_of_scope_sample,
-                        warning: incomplete_warning(complete, out_of_scope),
+                        warning,
                     });
                 }
             }
@@ -562,6 +570,38 @@ impl RecoveryPoints {
             out_of_scope_sample,
             warning,
         })
+    }
+
+    fn refresh_coverage(
+        &self,
+        snapshot: &str,
+        complete: bool,
+        out_of_scope: usize,
+        sample: &[String],
+    ) -> Option<String> {
+        let previous = self.read_state().ok().flatten();
+        let state = RecoveryState {
+            schema: RECOVERY_SCHEMA.into(),
+            last_snapshot: Some(snapshot.to_owned()),
+            complete,
+            out_of_scope,
+            out_of_scope_sample: sample.to_vec(),
+            created_unix_ms: previous
+                .as_ref()
+                .filter(|state| state.last_snapshot.as_deref() == Some(snapshot))
+                .map_or_else(unix_ms, |state| state.created_unix_ms),
+        };
+        let write_warning = if previous.as_ref() == Some(&state) {
+            None
+        } else {
+            self.write_state(&state)
+                .err()
+                .map(|error| format!("恢复点可用，但状态记录写入失败：{error}"))
+        };
+        match (write_warning, incomplete_warning(complete, out_of_scope)) {
+            (Some(write), Some(incomplete)) => Some(format!("{write}；{incomplete}")),
+            (write, incomplete) => write.or(incomplete),
+        }
     }
 
     /// Establish a recovery point now. Content identical to the previous point
@@ -978,8 +1018,7 @@ impl RecoveryPoints {
                 )));
             }
         }
-        intent.status = "completed".into();
-        self.write_restore_intent(&intent)?;
+        self.complete_restore_intent(&mut intent)?;
         Ok(RestoreReport {
             snapshot: request.snapshot,
             restored: desired
@@ -992,6 +1031,22 @@ impl RecoveryPoints {
             not_in_snapshot,
             undo_snapshot: undo,
             complete: true,
+        })
+    }
+
+    fn complete_restore_intent(&self, intent: &mut RestoreIntent) -> Result<(), RecoveryError> {
+        intent.status = "completed".into();
+        self.write_restore_intent(intent).map_err(|error| {
+            if intent.installed.is_empty() {
+                RecoveryError::known(format!(
+                    "restore changed no files; completion record could not be confirmed: {error}"
+                ))
+            } else {
+                RecoveryError::unknown(format!(
+                    "restore installed {:?}, but completion record was not confirmed: {error}",
+                    intent.installed
+                ))
+            }
         })
     }
 
@@ -1976,7 +2031,7 @@ fn file_name(path: &Path) -> &Path {
         .unwrap_or(Path::new("entry"))
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RecoveryState {
     schema: String,
@@ -2106,6 +2161,39 @@ pub fn doctor_check(workspace: &Path, state_dir: &Path) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn completed_restore_record_failure_preserves_effect_scope() {
+        let temp = tempfile::tempdir().unwrap();
+        let workspace = temp.path().join("workspace");
+        fs::create_dir(&workspace).unwrap();
+        let state = temp.path().join("state");
+        let points = RecoveryPoints::open(&workspace, &state, RecoveryConfig::default());
+        // Make the final record's parent unavailable, rather than modifying files again.
+        fs::write(&state, "not a directory").unwrap();
+        let mut intent = RestoreIntent {
+            schema: RECOVERY_SCHEMA.into(),
+            snapshot: "test".into(),
+            status: "intent".into(),
+            paths: vec!["file".into()],
+            installed: vec!["file".into()],
+            failed: None,
+            outcome_unknown: false,
+            created_unix_ms: 0,
+        };
+        fs::write(workspace.join("file"), "restored").unwrap();
+        let error = points.complete_restore_intent(&mut intent).unwrap_err();
+        assert!(error.outcome_unknown);
+        assert!(error.to_string().contains("file"));
+        assert_eq!(
+            fs::read_to_string(workspace.join("file")).unwrap(),
+            "restored"
+        );
+        intent.installed.clear();
+        let error = points.complete_restore_intent(&mut intent).unwrap_err();
+        assert!(!error.outcome_unknown);
+        assert!(error.to_string().contains("changed no files"));
+    }
 
     #[test]
     fn protected_names_and_paths_are_rejected() {

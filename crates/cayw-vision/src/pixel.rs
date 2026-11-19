@@ -89,11 +89,20 @@ pub fn pixel_diff(
     let total = (w as u64) * (h as u64);
     let mut differing = 0u64;
     let mut grid = [[0u64; 8]; 8];
-    let cell_w = ((w as f64) / 8.0).max(1.0);
-    let cell_h = ((h as f64) / 8.0).max(1.0);
+    let mut totals = [[0u64; 8]; 8];
+    let bucket = |coordinate: u32, size: u32| {
+        if size < 8 {
+            coordinate as usize
+        } else {
+            (u64::from(coordinate) * 8 / u64::from(size)) as usize
+        }
+    };
 
     for y in 0..h {
         for x in 0..w {
+            let gx = bucket(x, w);
+            let gy = bucket(y, h);
+            totals[gy][gx] += 1;
             let a = original.pixel(x, y);
             let b = rebuilt.pixel(x, y);
             let mut diff = false;
@@ -106,10 +115,6 @@ pub fn pixel_diff(
             }
             if diff {
                 differing += 1;
-                let gx = ((x as f64) / cell_w).floor() as usize;
-                let gy = ((y as f64) / cell_h).floor() as usize;
-                let gx = gx.min(7);
-                let gy = gy.min(7);
                 grid[gy][gx] += 1;
             }
         }
@@ -122,11 +127,7 @@ pub fn pixel_diff(
             if count == 0 {
                 continue;
             }
-            let x0 = ((gx as f64) * cell_w).floor() as u32;
-            let y0 = ((gy as f64) * cell_h).floor() as u32;
-            let x1 = (((gx as f64 + 1.0) * cell_w).floor() as u32).min(w);
-            let y1 = (((gy as f64 + 1.0) * cell_h).floor() as u32).min(h);
-            let cell_pixels = ((x1 - x0) as u64) * ((y1 - y0) as u64);
+            let cell_pixels = totals[gy as usize][gx as usize];
             worst.push(WorstRegion {
                 grid_x: gx,
                 grid_y: gy,

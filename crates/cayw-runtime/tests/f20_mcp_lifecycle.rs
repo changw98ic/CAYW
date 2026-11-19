@@ -291,5 +291,6 @@ async fn managed_mcp_lifecycle_and_result_reopen() {
     registry.disconnect("local").unwrap();
     tokio::time::timeout(Duration::from_secs(5), control.wait_closed())
         .await
+        .unwrap()
         .unwrap();
 }

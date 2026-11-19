@@ -1016,7 +1016,7 @@ pub(crate) fn units_from_ranges(
                         } else {
                             UnitKind::Active
                         },
-                        joined(&messages[index..next]),
+                        maintenance_exchange(&messages[index..next]),
                         unknown,
                         unknown || !complete,
                     )
@@ -1152,6 +1152,48 @@ fn joined(messages: &[Message]) -> String {
         .map(Message::text)
         .collect::<Vec<_>>()
         .join("\n")
+}
+
+/// Maintenance needs the meaning of a tool exchange, not its UI text preview.
+/// JSON keeps scripts/results delimited as history data and preserves ordering.
+fn maintenance_exchange(messages: &[Message]) -> String {
+    use serde_json::json;
+    use sha2::{Digest, Sha256};
+
+    let content = |parts: &[Content]| {
+        parts
+            .iter()
+            .map(|part| match part {
+                Content::Text { text } => json!({"type":"text", "text":text}),
+                Content::ToolCall(call) => json!({"type":"tool_call", "call":call}),
+                Content::Thinking { thinking, .. } => {
+                    json!({"type":"thinking", "thinking":thinking})
+                }
+                Content::Image { data, mime_type } => json!({
+                    "type":"image", "mime_type":mime_type,
+                    "encoded_sha256":format!("{:x}", Sha256::digest(data.as_bytes())),
+                    "note":"Image pixels are not represented in this text; do not infer visual details."
+                }),
+            })
+            .collect::<Vec<_>>()
+    };
+    let records = messages
+        .iter()
+        .map(|message| match message {
+            Message::Assistant(assistant) => json!({
+                "role":"assistant", "content":content(&assistant.content),
+                "stop_reason":assistant.stop_reason,
+            }),
+            Message::ToolResult(result) => json!({
+                "role":"tool_result", "tool_call_id":result.tool_call_id,
+                "tool_name":result.tool_name, "content":content(&result.content),
+                "structured_content":result.structured_content, "details":result.details,
+                "is_error":result.is_error, "outcome_unknown":result.outcome_unknown,
+            }),
+            _ => json!({"text":message.text()}),
+        })
+        .collect::<Vec<_>>();
+    serde_json::to_string(&records).expect("maintenance JSON values")
 }
 
 fn apply_assembly(assembly: &Assembly, window_was_default: bool) -> bool {
@@ -1599,6 +1641,54 @@ mod tests {
             Message::ToolResult(result),
             Message::user("now"),
         ]
+    }
+
+    #[test]
+    fn maintenance_tool_exchange_preserves_call_and_result_semantics() {
+        let mut messages = saved_tool_body();
+        if let Message::Assistant(assistant) = &mut messages[0] {
+            assistant.content = vec![
+                Content::text("writing the selected file"),
+                Content::ToolCall(ToolCall::new(
+                    "call-1",
+                    "execute_code",
+                    serde_json::json!({"script":"write('/tmp/你好', 42)"}),
+                )),
+            ];
+        }
+        if let Message::ToolResult(result) = &mut messages[1] {
+            result.tool_name = "execute_code".into();
+            result.content = vec![Content::text("ok")];
+            result.structured_content = Some(serde_json::json!({"path":"/tmp/你好", "value":42}));
+            result.is_error = true;
+        }
+        let spans = units_from_ranges(&messages, &[]);
+        let exchange = spans
+            .iter()
+            .find(|span| span.unit.kind == UnitKind::ToolExchange)
+            .unwrap();
+        let value: serde_json::Value = serde_json::from_str(&exchange.unit.text).unwrap();
+        assert_eq!(value[0]["content"][0]["text"], "writing the selected file");
+        assert_eq!(value[0]["content"][1]["call"]["name"], "execute_code");
+        assert_eq!(
+            value[0]["content"][1]["call"]["arguments"]["script"],
+            "write('/tmp/你好', 42)"
+        );
+        assert_eq!(value[1]["tool_call_id"], "call-1");
+        assert_eq!(value[1]["structured_content"]["value"], 42);
+        assert_eq!(value[1]["is_error"], true);
+        assert_eq!(value[1]["outcome_unknown"], false);
+        if let Message::ToolResult(result) = &mut messages[1] {
+            result.content.clear();
+            result.outcome_unknown = true;
+        }
+        let spans = units_from_ranges(&messages, &[]);
+        let exchange = spans
+            .iter()
+            .find(|span| span.unit.kind == UnitKind::ToolExchange)
+            .unwrap();
+        assert!(exchange.unit.pin_original && exchange.unit.outcome_unknown);
+        assert!(exchange.unit.text.contains("/tmp/你好"));
     }
 
     #[test]

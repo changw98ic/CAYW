@@ -100,6 +100,10 @@ impl fmt::Debug for FrameworkProject {
     }
 }
 
+fn operation_unknown(state: &State, audit: &DurableAudit) -> bool {
+    state.unknown || audit.unknown()
+}
+
 impl FrameworkProject {
     /// Opens a React or Vue project. The companion proposes the file manifest;
     /// the Host revalidates every path and supplies the actual bytes.
@@ -209,7 +213,7 @@ impl FrameworkProject {
     /// the new draft.
     pub async fn apply(&self, operation: Value) -> Result<Snapshot, ProjectError> {
         let mut state = self.state.lock().await;
-        if state.unknown {
+        if operation_unknown(&state, &self._audit) {
             return Err(reconciliation("a previous edit has an unknown outcome"));
         }
         if state.conflicted {
@@ -338,7 +342,7 @@ impl FrameworkProject {
             ));
         }
         let mut state = self.state.lock().await;
-        if state.unknown {
+        if operation_unknown(&state, &self._audit) {
             return Err(reconciliation("a previous save has an unknown outcome"));
         }
         if state.conflicted {
@@ -466,7 +470,7 @@ impl FrameworkProject {
     /// until all steps succeed, so a failed reload changes no source state.
     pub async fn reload(&self) -> Result<Snapshot, ProjectError> {
         let mut state = self.state.lock().await;
-        if state.unknown {
+        if operation_unknown(&state, &self._audit) {
             return Err(reconciliation("a previous write has an unknown outcome"));
         }
         if self.host.outcome_unknown() {
@@ -899,6 +903,8 @@ struct MappedNode {
     editable: bool,
     #[serde(default)]
     reason: Option<String>,
+    #[serde(default)]
+    text_source: Option<String>,
 }
 
 fn parse_nodes(
@@ -944,6 +950,7 @@ fn parse_nodes(
             line: node.line,
             editable: node.editable,
             reason: node.reason,
+            text_source: node.text_source,
         })
         .collect())
 }
@@ -1638,6 +1645,7 @@ mod tests {
                 line: 1,
                 editable: true,
                 reason: None,
+                text_source: None,
             }],
             undo: Vec::new(),
             redo: Vec::new(),
@@ -1654,6 +1662,17 @@ mod tests {
                 },
             );
         }
+        let audit_directory = tempfile::tempdir().unwrap();
+        let audit = DurableAudit::open(audit_directory.path()).unwrap();
+        assert!(!operation_unknown(&state, &audit));
+        audit
+            .record_unknown("cancelled admitted operation")
+            .unwrap();
+        assert!(operation_unknown(&state, &audit));
+        assert!(
+            !state.unknown,
+            "shared audit is consulted before local state changes"
+        );
         assert_eq!(snapshot_path("index.html", &state), "src/App.tsx");
     }
 

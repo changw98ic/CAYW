@@ -85,7 +85,7 @@ def main() -> int:
             ("minimal-tests", [*cargo, "test", "--workspace", "--no-default-features", "--locked"]),
             ("clippy", [*cargo, "clippy", "--workspace", "--all-targets", "--all-features", "--locked", "--", "-D", "warnings"]),
             ("offline-example", [*cargo, "run", "-p", "cayw-agent", "--example", "offline", "--locked"]),
-            ("headless-example", [*cargo, "run", "-p", "cayw-runtime", "--example", "offline", "--locked", "--", str(output / "headless-demo")]),
+            ("headless-example", [*cargo, "run", "-p", "cayw-runtime", "--example", "runtime_offline", "--locked", "--", str(output / "headless-demo")]),
             ("build-headless", [*cargo, "build", "-p", "cayw-runtime", "--bin", "cayw", "--locked"]),
             ("independent-client", [sys.executable, "-I", str(root / "scripts/validate-headless.py"),
                                     "--binary", str(root / "target/debug" / ("cayw.exe" if sys.platform == "win32" else "cayw")),

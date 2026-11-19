@@ -3,8 +3,6 @@
   'use strict';
 
   const NODE_ATTR = 'data-cayw-node';
-  const MAX_TEXT = 20000;
-  const MAX_ATTRIBUTE = 4000;
   const MAX_ID = 128;
   const RELOAD_CONFIRM_MS = 4500;
 
@@ -1389,6 +1387,16 @@
     }
   }
 
+  // Decode only character references, never parse source markup into live DOM.
+  // Working on individual references also preserves source newlines verbatim.
+  function decodeSourceText(source) {
+    const decoder = document.createElement('textarea');
+    return source.replace(/&(?:#(?:x[0-9a-f]+|[0-9]+)|[a-z][a-z0-9]*);?/gi, (entity) => {
+      decoder.innerHTML = entity;
+      return decoder.value;
+    });
+  }
+
   function normalizeSelection(data) {
     const rect = data.rect;
     if (!rect || typeof rect !== 'object') return null;
@@ -1397,6 +1405,8 @@
     const computed = data.computed && typeof data.computed === 'object' ? data.computed : {};
     const attributes = data.attributes && typeof data.attributes === 'object' ? data.attributes : {};
     const pick = (value) => (typeof value === 'string' ? value : '');
+    const node = state.nodes.find((node) => node.id === data.id);
+    const textEditable = Boolean(node && node.editable !== false && typeof node.text_source === 'string');
     return {
       id: pick(data.id),
       tag: pick(data.tag) || '元素',
@@ -1424,7 +1434,8 @@
         alignItems: pick(computed.alignItems),
         justifyContent: pick(computed.justifyContent)
       },
-      text: pick(data.text).slice(0, MAX_TEXT),
+      text: textEditable ? decodeSourceText(node.text_source) : pick(data.text),
+      textEditable,
       attributes: { src: pick(attributes.src), href: pick(attributes.href) },
       dynamic: data.dynamic === true,
       partial: data.partial === true,
@@ -1678,6 +1689,7 @@
   function contentGroup(sel, p, enabled) {
     const d = dis(enabled);
     const text = sel.text || '';
+    const textDisabled = dis(enabled && sel.textEditable);
     const showSrc = sel.tag === 'img' || Boolean(sel.attributes.src);
     const showHref = sel.tag === 'a' || Boolean(sel.attributes.href);
     return `
@@ -1685,10 +1697,10 @@
         <h3>内容</h3>
         <div class="field-row">
           <span class="field-caption"><span>文字</span><span class="field-value-hint">${text.length} 字符</span></span>
-          <textarea class="text-input" data-commit="text" data-testid="editor-${p}-text"${d} placeholder="元素文字" aria-label="元素文字">${esc(text)}</textarea>
+          <textarea class="text-input" data-commit="text" data-testid="editor-${p}-text"${textDisabled} placeholder="元素文字" aria-label="元素文字">${esc(text)}</textarea>
           <div class="input-row">
-            <button type="button" class="btn small subtle" data-action="commit" data-testid="editor-${p}-text-apply"${d}>应用文字</button>
-            <span class="field-value-hint">有嵌套子元素时不能直接替换</span>
+            <button type="button" class="btn small subtle" data-action="commit" data-testid="editor-${p}-text-apply"${textDisabled}>应用文字</button>
+            <span class="field-value-hint">${sel.textEditable ? '使用当前源码完整文字' : '该节点没有可直接替换的静态源码文字'}</span>
           </div>
         </div>
         ${showSrc ? `
@@ -2097,15 +2109,11 @@
     if (!state.editing || state.blocked) return;
     const kind = input.dataset.commit;
     if (kind === 'text') {
-      if (state.selection && state.selection.partial) {
+      if (!state.selection?.textEditable || state.selection.partial) {
         toast('该选区包含未映射内容，不能修改文字。', 'warn');
         return;
       }
       const text = input.value;
-      if (text.length > MAX_TEXT) {
-        toast(`文字超过 ${MAX_TEXT} 个字符，操作已拒绝。`, 'error');
-        return;
-      }
       if (!state.selectedId) return;
       applyOperation({ kind: 'text', id: state.selectedId, text });
       return;
@@ -2115,10 +2123,6 @@
       const value = input.value.trim();
       if (!ATTRIBUTE_NAMES.has(name)) {
         toast('不支持的属性。', 'error');
-        return;
-      }
-      if (value.length > MAX_ATTRIBUTE) {
-        toast('属性值过长，操作已拒绝。', 'error');
         return;
       }
       if (!state.selectedId) return;
@@ -2236,7 +2240,6 @@
       case 'text': {
         if (!validId(id)) throw new Error('文字操作缺少目标元素。');
         if (typeof raw.text !== 'string') throw new Error('文字内容无效。');
-        if (raw.text.length > MAX_TEXT) throw new Error('文字内容过长。');
         return { kind, id, text: raw.text };
       }
       case 'attribute': {
@@ -2244,7 +2247,7 @@
         if (typeof raw.name !== 'string' || !ATTRIBUTE_NAMES.has(raw.name)) {
           throw new Error('不支持的属性名。');
         }
-        if (typeof raw.value !== 'string' || raw.value.length > MAX_ATTRIBUTE) {
+        if (typeof raw.value !== 'string') {
           throw new Error('属性值无效。');
         }
         return { kind, id, name: raw.name, value: raw.value };

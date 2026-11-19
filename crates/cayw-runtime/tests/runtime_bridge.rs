@@ -838,7 +838,7 @@ async fn requests_bind_bridge_incarnation_and_revalidate_the_original_host_catal
 
 struct InterleavedProvider {
     step: AtomicUsize,
-    cells: Mutex<Vec<(String, u64)>>,
+    cells: Mutex<Vec<(String, u64, bool)>>,
 }
 impl Provider for InterleavedProvider {
     fn stream(&self, request: ModelRequest, _: CancellationToken) -> AssistantStream {
@@ -848,10 +848,12 @@ impl Provider for InterleavedProvider {
             && let Ok(page) = serde_json::from_value::<cayw_cells::CellPage>(value.clone())
         {
             let mut cells = self.cells.lock().unwrap();
-            if let Some(entry) = cells.iter_mut().find(|(id, _)| id == &page.cell_id) {
+            let complete = page.status.is_terminal() && !page.vm_alive && !page.has_more;
+            if let Some(entry) = cells.iter_mut().find(|(id, _, _)| id == &page.cell_id) {
                 entry.1 = page.next_cursor;
+                entry.2 = complete;
             } else {
-                cells.push((page.cell_id, page.next_cursor));
+                cells.push((page.cell_id, page.next_cursor, complete));
             }
         }
         let args = match step {
@@ -861,14 +863,14 @@ impl Provider for InterleavedProvider {
             1 => Some(
                 json!({"action":"exec","script":"cayw.call('mcp.call',{server='local',tool='echo',arguments={value=2}})\nyield_control()\nreturn cayw.call('mcp.call',{server='local',tool='echo',arguments={value=4}})","yield_time_ms":30000,"max_output_tokens":131072}),
             ),
-            2 | 3 => {
+            _ => {
+                // New output can satisfy wait before VM teardown. Keep draining
+                // the first unfinished cell instead of assuming one wait is terminal.
                 let cells = self.cells.lock().unwrap();
-                let (cell_id, cursor) = &cells[step - 2];
-                Some(
-                    json!({"action":"wait","cell_id":cell_id,"cursor":cursor,"yield_time_ms":30000,"max_output_tokens":131072}),
-                )
+                cells.iter().find(|(_, _, complete)| !complete).map(|(cell_id, cursor, _)| {
+                    json!({"action":"wait","cell_id":cell_id,"cursor":cursor,"yield_time_ms":30000,"max_output_tokens":131072})
+                })
             }
-            _ => None,
         };
         let mut message = AssistantMessage::new(&request.model);
         // Fixed synthetic counters exercise accounting, not tokenization or billing.
@@ -926,7 +928,7 @@ async fn two_interleaved_cells_retain_distinct_origins_on_one_physical_handle() 
         .lock()
         .unwrap()
         .iter()
-        .map(|(id, _)| id.clone())
+        .map(|(id, _, _)| id.clone())
         .collect::<Vec<_>>();
     assert_eq!(cells.len(), 2);
     assert_eq!(events[0].origin.key.execution_id, cells[0]);

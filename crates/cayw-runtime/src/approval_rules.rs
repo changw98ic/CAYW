@@ -380,6 +380,9 @@ impl ApprovalRuleSource for FileRules {
         rules.validate()?;
         let bytes =
             serde_json::to_vec_pretty(rules).map_err(|_| "approval rules cannot be encoded")?;
+        if bytes.len() as u64 > MAX_RULES_BYTES {
+            return Err("approval rules exceed the supported file size".into());
+        }
         let parent = self
             .path
             .parent()
@@ -760,6 +763,28 @@ mod tests {
             capability: capability.into(),
             arguments,
         }
+    }
+
+    #[test]
+    fn oversized_commit_preserves_readable_rules() {
+        let directory = tempfile::tempdir().unwrap();
+        let source = FileRules::new(directory.path().join(APPROVAL_RULES_FILE));
+        let original = ApprovalRulesFile {
+            version: 1,
+            rules: vec![],
+        };
+        source.commit(&original).unwrap();
+        let bytes = std::fs::read(source.path()).unwrap();
+        let oversized = ApprovalRulesFile {
+            version: 2,
+            rules: vec![rule(
+                "fs.write",
+                json!({"content": "x".repeat(MAX_RULES_BYTES as usize)}),
+            )],
+        };
+        assert!(source.commit(&oversized).is_err());
+        assert_eq!(std::fs::read(source.path()).unwrap(), bytes);
+        assert_eq!(source.snapshot().unwrap().version(), Some(1));
     }
 
     #[test]

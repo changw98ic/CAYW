@@ -217,6 +217,8 @@ pub struct SourceNode {
     pub line: usize,
     pub editable: bool,
     pub reason: Option<String>,
+    #[serde(default)]
+    pub text_source: Option<String>,
 }
 
 /// A source file's saved digest and current uninstrumented draft.
@@ -766,6 +768,18 @@ fn build_snapshot(
             line: node.line,
             editable: node.editable,
             reason: node.reason.clone(),
+            text_source: if node.editable
+                && !node.dynamic
+                && !node.void
+                && !node.has_child_element
+                && !node.has_comment
+            {
+                node.end_tag_start
+                    .and_then(|end| draft.get(node.start_tag_end..end))
+                    .map(str::to_owned)
+            } else {
+                None
+            },
         })
         .collect();
     Ok(Snapshot {
@@ -1226,10 +1240,20 @@ fn close_implied(stack: &mut Vec<usize>, nodes: &mut [Element], name: &str, at: 
         close_through(stack, nodes, position, at);
     }
     let position = match name {
-        "li" => stack.iter().rposition(|index| nodes[*index].tag == "li"),
+        "li" => stack
+            .iter()
+            .enumerate()
+            .rev()
+            .take_while(|(_, index)| !matches!(nodes[**index].tag.as_str(), "ul" | "ol" | "menu"))
+            .find(|(_, index)| nodes[**index].tag == "li")
+            .map(|(position, _)| position),
         "dt" | "dd" => stack
             .iter()
-            .rposition(|index| matches!(nodes[*index].tag.as_str(), "dt" | "dd")),
+            .enumerate()
+            .rev()
+            .take_while(|(_, index)| nodes[**index].tag != "dl")
+            .find(|(_, index)| matches!(nodes[**index].tag.as_str(), "dt" | "dd"))
+            .map(|(position, _)| position),
         "p" => stack.iter().rposition(|index| nodes[*index].tag == "p"),
         "option" => stack
             .iter()

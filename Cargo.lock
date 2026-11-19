@@ -1012,6 +1012,7 @@ dependencies = [
  "cayw-codemode",
  "globset",
  "ignore",
+ "libc",
  "proc-macro2",
  "regex",
  "serde",

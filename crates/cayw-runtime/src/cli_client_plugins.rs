@@ -99,7 +99,10 @@ struct WebUi {
 
 struct FailedWeb {
     child: Child,
-    cleanup: CleanupProcess,
+    launch_id: String,
+    workspace_id: String,
+    pid: u32,
+    cleanup: Option<CleanupProcess>,
     error: String,
 }
 
@@ -244,16 +247,15 @@ impl ClientPlugins {
 
     pub async fn shutdown(&self) -> Result<()> {
         let mut state = self.inner.state.lock().await;
-        reap(&mut state)?;
+        let mut failures = Vec::new();
+        if let Err(error) = reap(&mut state) {
+            failures.push(format!("process observation: {error}"));
+        }
         state.pending_tui.clear();
         let intended = cleanup_snapshot(&state);
-        if intended.is_empty() {
-            self.persist_cleanup(&[])?;
-            return Ok(());
+        if let Err(error) = self.persist_cleanup(&intended) {
+            failures.push(format!("ownership record: {error}"));
         }
-        self.persist_cleanup(&intended)?;
-
-        let mut failures = Vec::new();
         if let Some(webui) = state.webui.as_mut() {
             match stop_child(&mut webui.child).await {
                 Ok(()) => {
@@ -291,8 +293,8 @@ impl ClientPlugins {
                         &mut state,
                         "webui",
                         &launch_id,
-                        &failed.cleanup.workspace_id,
-                        failed.cleanup.process.pid,
+                        &failed.workspace_id,
+                        failed.pid,
                         "cleanup_completed",
                         Some(failed.error),
                     );
@@ -416,45 +418,52 @@ impl ClientPlugins {
     async fn abort_web_start(
         &self,
         state: &mut State,
-        mut child: Child,
-        cleanup: CleanupProcess,
+        launch_id: &str,
         reason: impl Into<String>,
     ) -> Result<Value> {
         let reason = reason.into();
-        let mut intended = cleanup_snapshot(state);
-        intended.push(cleanup.clone());
-        self.persist_cleanup(&intended)?;
-        match stop_child(&mut child).await {
+        state
+            .failed_web
+            .get_mut(launch_id)
+            .expect("owned WebUI start")
+            .error = reason.clone();
+        let persist_error = self.persist_cleanup(&cleanup_snapshot(state)).err();
+        let stopped = stop_child(
+            &mut state
+                .failed_web
+                .get_mut(launch_id)
+                .expect("owned WebUI start")
+                .child,
+        )
+        .await;
+        let mut errors = vec![reason.clone()];
+        if let Some(error) = persist_error {
+            errors.push(format!("ownership record: {error}"));
+        }
+        match stopped {
             Ok(()) => {
-                self.persist_cleanup(&cleanup_snapshot(state))?;
+                let failed = state
+                    .failed_web
+                    .remove(launch_id)
+                    .expect("stopped WebUI start");
                 record_terminal(
                     state,
                     "webui",
-                    &cleanup.launch_id,
-                    &cleanup.workspace_id,
-                    cleanup.process.pid,
-                    "start_failed",
-                    Some(reason.clone()),
-                );
-                Err(reason.into())
-            }
-            Err(stop) => {
-                let launch_id = cleanup.launch_id.clone();
-                state.failed_web.insert(
                     launch_id,
-                    FailedWeb {
-                        child,
-                        cleanup,
-                        error: reason.clone(),
-                    },
+                    &failed.workspace_id,
+                    failed.pid,
+                    "start_failed",
+                    Some(reason),
                 );
-                self.persist_cleanup(&cleanup_snapshot(state))?;
-                Err(format!(
-                    "{reason}; WebUI cleanup is unconfirmed and the Client retained ownership: {stop}"
-                )
-                .into())
+                if let Err(error) = self.persist_cleanup(&cleanup_snapshot(state)) {
+                    errors.push(format!("cleanup record: {error}"));
+                }
             }
+            Err(error) => errors.push(format!(
+                "WebUI cleanup is unconfirmed; Client retained ownership: {error}"
+            )),
         }
+        Err(errors.join("; ").into())
     }
 
     async fn start_webui(&self, request: Start, cancel: CancellationToken) -> Result<Value> {
@@ -530,13 +539,38 @@ impl ClientPlugins {
             command.arg("--lan").arg(lan);
         }
         command.as_std_mut().process_group(0);
-        let mut child = command.spawn()?;
-        let pid = child.id().ok_or("WebUI process identity unavailable")?;
-        let identity = match process_identity(pid).await? {
-            Some(identity) => identity,
-            None => {
-                let _ = child.wait().await;
-                return Err("WebUI exited before process identity was recorded".into());
+        let child = command.spawn()?;
+        let pid = child.id().unwrap_or(0);
+        state.failed_web.insert(
+            launch_id.clone(),
+            FailedWeb {
+                child,
+                launch_id: launch_id.clone(),
+                workspace_id: request.workspace_id.clone(),
+                pid,
+                cleanup: None,
+                error: "WebUI startup has not completed".into(),
+            },
+        );
+        let identity = match process_identity(pid).await {
+            Ok(Some(identity)) => identity,
+            Ok(None) => {
+                return self
+                    .abort_web_start(
+                        &mut state,
+                        &launch_id,
+                        "WebUI exited before process identity was recorded",
+                    )
+                    .await;
+            }
+            Err(error) => {
+                return self
+                    .abort_web_start(
+                        &mut state,
+                        &launch_id,
+                        format!("WebUI process identity could not be read: {error}"),
+                    )
+                    .await;
             }
         };
         let cleanup = CleanupProcess {
@@ -545,32 +579,33 @@ impl ClientPlugins {
             workspace_id: request.workspace_id.clone(),
             process: identity.clone(),
         };
-        let mut intended = cleanup_snapshot(&state);
-        intended.push(cleanup.clone());
-        if let Err(persist) = self.persist_cleanup(&intended) {
-            return match stop_child(&mut child).await {
-                Ok(()) => Err(format!(
-                    "WebUI ownership record could not be saved; the process was stopped: {persist}"
+        state
+            .failed_web
+            .get_mut(&launch_id)
+            .expect("owned WebUI start")
+            .cleanup = Some(cleanup);
+        if let Err(error) = self.persist_cleanup(&cleanup_snapshot(&state)) {
+            return self
+                .abort_web_start(
+                    &mut state,
+                    &launch_id,
+                    format!("WebUI ownership record could not be saved: {error}"),
                 )
-                .into()),
-                Err(stop) => {
-                    state.failed_web.insert(
-                        launch_id.clone(),
-                        FailedWeb {
-                            child,
-                            cleanup,
-                            error: format!("ownership record failed: {persist}"),
-                        },
-                    );
-                    Err(format!(
-                        "WebUI ownership record and process cleanup both failed; the Client retained PID {pid}: {persist}; {stop}"
-                    )
-                    .into())
-                }
-            };
+                .await;
         }
-        let mut lines =
-            BufReader::new(child.stdout.take().ok_or("WebUI stdout unavailable")?).lines();
+        let stdout = state
+            .failed_web
+            .get_mut(&launch_id)
+            .expect("owned WebUI start")
+            .child
+            .stdout
+            .take();
+        let Some(stdout) = stdout else {
+            return self
+                .abort_web_start(&mut state, &launch_id, "WebUI stdout unavailable")
+                .await;
+        };
+        let mut lines = BufReader::new(stdout).lines();
         let line = tokio::select! {
             _ = cancel.cancelled() => Err("Client plugin start was cancelled".to_owned()),
             line = tokio::time::timeout(START_TIMEOUT, lines.next_line()) => {
@@ -585,9 +620,7 @@ impl ClientPlugins {
         let line = match line {
             Ok(line) => line,
             Err(reason) => {
-                return self
-                    .abort_web_start(&mut state, child, cleanup, reason)
-                    .await;
+                return self.abort_web_start(&mut state, &launch_id, reason).await;
             }
         };
         let ready: Value = match serde_json::from_str(&line) {
@@ -596,8 +629,7 @@ impl ClientPlugins {
                 return self
                     .abort_web_start(
                         &mut state,
-                        child,
-                        cleanup,
+                        &launch_id,
                         format!("invalid WebUI readiness: {error}"),
                     )
                     .await;
@@ -608,15 +640,18 @@ impl ClientPlugins {
                 return self
                     .abort_web_start(
                         &mut state,
-                        child,
-                        cleanup,
+                        &launch_id,
                         format!("WebUI readiness is missing {field}"),
                     )
                     .await;
             }
         }
+        let owned = state
+            .failed_web
+            .remove(&launch_id)
+            .expect("ready WebUI start");
         state.webui = Some(WebUi {
-            child,
+            child: owned.child,
             identity,
             launch_id: launch_id.clone(),
             workspace_id: request.workspace_id.clone(),
@@ -764,8 +799,8 @@ impl ClientPlugins {
                 &mut state,
                 "webui",
                 &request.launch_id,
-                &failed.cleanup.workspace_id,
-                failed.cleanup.process.pid,
+                &failed.workspace_id,
+                failed.pid,
                 "stopped",
                 Some(failed.error),
             );
@@ -846,9 +881,9 @@ fn state_summary(state: &State) -> Value {
             "plugin":"webui",
             "role":"client",
             "kind":"background",
-            "launch_id":failed.cleanup.launch_id,
-            "workspace_id":failed.cleanup.workspace_id,
-            "pid":failed.cleanup.process.pid,
+            "launch_id":failed.launch_id,
+            "workspace_id":failed.workspace_id,
+            "pid":failed.pid,
             "status":"cleanup_unknown",
             "last_error":failed.error,
         })
@@ -951,7 +986,7 @@ fn cleanup_snapshot(state: &State) -> Vec<CleanupProcess> {
         state
             .failed_web
             .values()
-            .map(|failed| failed.cleanup.clone()),
+            .filter_map(|failed| failed.cleanup.clone()),
     );
     processes.extend(state.tui.iter().map(|(launch_id, tui)| CleanupProcess {
         launch_id: launch_id.clone(),
@@ -1154,20 +1189,21 @@ fn reap(state: &mut State) -> Result<()> {
             Ok((
                 launch_id.clone(),
                 failed.child.try_wait()?,
-                failed.cleanup.clone(),
+                failed.workspace_id.clone(),
+                failed.pid,
                 failed.error.clone(),
             ))
         })
         .collect::<Result<Vec<_>>>()?;
-    for (launch_id, status, cleanup, error) in failed_exits {
+    for (launch_id, status, workspace_id, pid, error) in failed_exits {
         if status.is_some() {
             state.failed_web.remove(&launch_id);
             record_terminal(
                 state,
                 "webui",
                 &launch_id,
-                &cleanup.workspace_id,
-                cleanup.process.pid,
+                &workspace_id,
+                pid,
                 "cleanup_completed",
                 Some(error),
             );
@@ -1210,13 +1246,8 @@ fn process_field_sync(pid: u32, field: &str) -> Result<Option<String>> {
         .arg(pid.to_string())
         .args(["-o", field])
         .stdin(Stdio::null())
-        .stderr(Stdio::null())
         .output()?;
-    if !output.status.success() {
-        return Ok(None);
-    }
-    let value = String::from_utf8(output.stdout)?.trim().to_owned();
-    Ok((!value.is_empty()).then_some(value))
+    classify_process_field(output)
 }
 
 async fn process_field(pid: u32, field: &str) -> Result<Option<String>> {
@@ -1228,14 +1259,28 @@ async fn process_field(pid: u32, field: &str) -> Result<Option<String>> {
         .arg(pid.to_string())
         .args(["-o", field])
         .stdin(Stdio::null())
-        .stderr(Stdio::null())
         .output()
         .await?;
-    if !output.status.success() {
+    classify_process_field(output)
+}
+
+fn classify_process_field(output: std::process::Output) -> Result<Option<String>> {
+    if output.status.success() {
+        let value = String::from_utf8(output.stdout)?.trim().to_owned();
+        if value.is_empty() {
+            return Err("process observation returned empty output".into());
+        }
+        return Ok(Some(value));
+    }
+    if output.status.code() == Some(1) && output.stdout.is_empty() && output.stderr.is_empty() {
         return Ok(None);
     }
-    let value = String::from_utf8(output.stdout)?.trim().to_owned();
-    Ok((!value.is_empty()).then_some(value))
+    Err(format!(
+        "process observation failed ({}): {}",
+        output.status,
+        String::from_utf8_lossy(&output.stderr).trim()
+    )
+    .into())
 }
 
 fn process_identity_sync(pid: u32) -> Result<Option<ProcessIdentity>> {
@@ -1384,6 +1429,29 @@ async fn stop_child(child: &mut Child) -> Result<()> {
 mod tests {
     use super::*;
     use std::os::unix::fs::PermissionsExt;
+    use std::os::unix::process::ExitStatusExt;
+
+    #[test]
+    fn process_observation_distinguishes_absence_from_errors() {
+        let output = |status, stdout: &[u8], stderr: &[u8]| std::process::Output {
+            status: std::process::ExitStatus::from_raw(status),
+            stdout: stdout.to_vec(),
+            stderr: stderr.to_vec(),
+        };
+        assert_eq!(
+            classify_process_field(output(0, b"  alive\n", b"")).unwrap(),
+            Some("alive".into())
+        );
+        assert_eq!(
+            classify_process_field(output(1 << 8, b"", b"")).unwrap(),
+            None
+        );
+        assert!(classify_process_field(output(1 << 8, b"", b"ps error")).is_err());
+        assert!(classify_process_field(output(2 << 8, b"", b"")).is_err());
+        assert!(classify_process_field(output(9, b"", b"")).is_err());
+        assert!(classify_process_field(output(0, b" ", b"")).is_err());
+        assert!(classify_process_field(output(0, &[0xff], b"")).is_err());
+    }
 
     fn fixture_plugins(data_dir: &Path, webui: PathBuf, tui: PathBuf) -> ClientPlugins {
         ClientPlugins::with_binaries(
@@ -1403,6 +1471,83 @@ mod tests {
         )
         .unwrap();
         std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700)).unwrap();
+    }
+
+    #[tokio::test]
+    async fn shutdown_stops_pending_child_when_ledger_is_unwritable() {
+        let temp = tempfile::tempdir().unwrap();
+        let plugins = fixture_plugins(
+            temp.path(),
+            temp.path().join("unused-webui"),
+            temp.path().join("unused-tui"),
+        );
+        std::fs::create_dir(&plugins.inner.cleanup_path).unwrap();
+        let mut command = Command::new("/bin/sleep");
+        command.arg("60").kill_on_drop(true);
+        command.as_std_mut().process_group(0);
+        let child = command.spawn().unwrap();
+        let pid = child.id().unwrap();
+        plugins.inner.state.lock().await.failed_web.insert(
+            "pending".into(),
+            FailedWeb {
+                child,
+                launch_id: "pending".into(),
+                workspace_id: "local".into(),
+                pid,
+                cleanup: None,
+                error: "startup interrupted".into(),
+            },
+        );
+        let error = tokio::time::timeout(Duration::from_secs(10), plugins.shutdown())
+            .await
+            .unwrap()
+            .unwrap_err();
+        assert!(error.to_string().contains("ownership record"));
+        let state = plugins.inner.state.lock().await;
+        assert!(state.failed_web.is_empty());
+        assert_eq!(state.recent.back().unwrap()["pid"], pid);
+    }
+
+    #[tokio::test]
+    async fn abort_retains_child_until_cleanup_even_when_ledger_write_fails() {
+        let temp = tempfile::tempdir().unwrap();
+        let plugins = fixture_plugins(
+            temp.path(),
+            temp.path().join("unused-webui"),
+            temp.path().join("unused-tui"),
+        );
+        // A directory at the private ledger path causes a real persistence failure.
+        std::fs::create_dir(&plugins.inner.cleanup_path).unwrap();
+        let mut command = Command::new("/bin/sleep");
+        command.arg("60").kill_on_drop(true);
+        command.as_std_mut().process_group(0);
+        let child = command.spawn().unwrap();
+        let pid = child.id().unwrap();
+        let mut state = plugins.inner.state.lock().await;
+        state.failed_web.insert(
+            "unidentified".into(),
+            FailedWeb {
+                child,
+                launch_id: "unidentified".into(),
+                workspace_id: "local".into(),
+                pid,
+                cleanup: None,
+                error: "identity lookup failed".into(),
+            },
+        );
+        let error = tokio::time::timeout(
+            Duration::from_secs(10),
+            plugins.abort_web_start(&mut state, "unidentified", "identity lookup failed"),
+        )
+        .await
+        .unwrap()
+        .unwrap_err();
+        assert!(error.to_string().contains("ownership record"));
+        assert!(
+            state.failed_web.is_empty(),
+            "the owned Child was waited before removal"
+        );
+        assert_eq!(state.recent.back().unwrap()["pid"], pid);
     }
 
     #[tokio::test]

@@ -500,7 +500,7 @@ pub(crate) fn mutate(
                 return Err(failure("mkdir requires expected_absent=true"));
             }
             let parts = components(&args.path, false)?;
-            let (dir, name) = parent(&workspace.root, &parts)?;
+            let (dir, name) = workspace.write_policy.parent(&workspace.root, &parts)?;
             context.check()?;
             dir.create_dir(name).map_err(io_error)?;
             sync(&dir).map_err(unknown)?;
@@ -514,8 +514,10 @@ pub(crate) fn mutate(
             }
             let source = components(&args.source, false)?;
             let destination = components(&args.destination, false)?;
-            let (from, filename) = parent(&workspace.root, &source)?;
-            let (to, target) = parent(&workspace.root, &destination)?;
+            let (from, filename) = workspace.write_policy.parent(&workspace.root, &source)?;
+            let (to, target) = workspace
+                .write_policy
+                .parent(&workspace.root, &destination)?;
             let bytes = read(&from, filename, workspace.limits.max_file_bytes, context)?;
             if !hash(&bytes).eq_ignore_ascii_case(&args.expected_sha256) {
                 return Err(failure("move source compare-and-swap conflict"));
@@ -548,7 +550,7 @@ pub(crate) fn mutate(
         "fs.remove" => {
             let args: RemoveArgs = parse(args)?;
             let parts = components(&args.path, false)?;
-            let (dir, filename) = parent(&workspace.root, &parts)?;
+            let (dir, filename) = workspace.write_policy.parent(&workspace.root, &parts)?;
             let meta = dir.symlink_metadata(filename).map_err(io_error)?;
             if meta.is_file() {
                 if args.recursive
@@ -601,7 +603,7 @@ pub(crate) fn mutate(
                         context.check()?;
                         workspace.fault("before_remove", index, context)?;
                         let parts = components(&node.path, false)?;
-                        let (dir, name) = parent(&workspace.root, &parts)?;
+                        let (dir, name) = workspace.write_policy.parent(&workspace.root, &parts)?;
                         if node.kind == "file" {
                             let bytes = read(&dir, name, workspace.limits.max_file_bytes, context)?;
                             if Some(hash(&bytes)) != node.sha256 {

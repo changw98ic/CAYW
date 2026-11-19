@@ -133,5 +133,6 @@ async fn import_prepare_registry_lands_in_runtime_bridge() {
     registry.disconnect("local").unwrap();
     tokio::time::timeout(Duration::from_secs(10), control.wait_closed())
         .await
+        .unwrap()
         .unwrap();
 }

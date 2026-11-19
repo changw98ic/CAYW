@@ -1155,3 +1155,21 @@ for (const framework of ['react','vue']) {
     assert(files[0].source.includes('--property-39'));
   });
 }
+
+for (const framework of ['react', 'vue']) {
+  test(`${framework} maps complete static text without normalizing whitespace`, () => {
+    const raw = '  \n' + '字'.repeat(24004) + ' &amp; TAIL\n  ';
+    const path = framework === 'react' ? 'App.jsx' : 'App.vue';
+    const source = framework === 'react'
+      ? `export const App=()=> <pre>${raw}</pre>;`
+      : `<template><pre>${raw}</pre></template>`;
+    const files = [{path, source}];
+    const mapped = mapDocuments({framework, files, revision:REVISION});
+    assert.equal(nodeByTag(mapped.nodes, 'pre').text_source, raw);
+    const text = 'changed ' + raw.replace('&amp;', '&');
+    const result = editDocuments({framework, files, revision:REVISION,
+      operation:{kind:'text', id:nodeByTag(mapped.nodes, 'pre').id, text}});
+    const next = applyPatches(files, result.patches).get(path);
+    assert(next.includes('changed ' + raw));
+  });
+}

@@ -149,7 +149,7 @@ impl ActionProtocol {
         }
 
         // Mark Accepted before the bridge so cancel can target in-flight work.
-        let accepted = ActionRecord {
+        let mut accepted = ActionRecord {
             action_id: req.action_id.clone(),
             artifact_id: req.artifact_id.clone(),
             session_id: req.session_id.clone(),
@@ -161,6 +161,25 @@ impl ActionProtocol {
             rejection_reason: None,
             outcome_json: None,
         };
+        if let ActionIntent::UpdateState { key, value_json } = &req.intent {
+            let outcome_json = json!({
+                "kind": "state_updated",
+                "artifact_id": req.artifact_id,
+                "key": key,
+            })
+            .to_string();
+            guard
+                .state
+                .entry(req.artifact_id.clone())
+                .or_default()
+                .insert(key.clone(), value_json.clone());
+            accepted.status = ActionStatus::Applied;
+            accepted.outcome_json = Some(outcome_json);
+            guard
+                .actions
+                .insert(accepted.action_id.clone(), accepted.clone());
+            return Ok(ActionOutcome { record: accepted });
+        }
         guard.actions.insert(accepted.action_id.clone(), accepted);
         *guard.in_flight.entry(req.action_id.clone()).or_default() += 1;
         drop(guard);
@@ -169,7 +188,7 @@ impl ActionProtocol {
             action_id: req.action_id.clone(),
         };
 
-        let applied = apply_intent(&req, self.dispatch.as_ref(), &self.inner)?;
+        let applied = apply_intent(&req, self.dispatch.as_ref())?;
         if let IntentApply::OutcomeUnknown { reason } = &applied {
             let record = outcome_unknown_record(&req, recorded_at_ms, reason.clone());
             self.inner
@@ -659,7 +678,6 @@ enum IntentApply {
 fn apply_intent(
     req: &ActionRequest,
     dispatch: &dyn HostActionDispatch,
-    inner: &Mutex<ActionInner>,
 ) -> Result<IntentApply, ArtifactError> {
     match &req.intent {
         ActionIntent::FollowUpTask { prompt } => {
@@ -689,19 +707,9 @@ fn apply_intent(
                 Err(reason) => Ok(classify_bridge_err("host_dispatch_invoke_tool", reason)),
             }
         }
-        ActionIntent::UpdateState { key, value_json } => {
-            let mut guard = inner.lock().expect("action lock");
-            let entry = guard.state.entry(req.artifact_id.clone()).or_default();
-            entry.insert(key.clone(), value_json.clone());
-            let payload = json!({
-                "kind": "state_updated",
-                "artifact_id": req.artifact_id,
-                "key": key,
-            });
-            Ok(IntentApply::Applied {
-                outcome_json: payload.to_string(),
-            })
-        }
+        ActionIntent::UpdateState { .. } => Err(ArtifactError::Invalid(
+            "local state updates must commit with their action record".into(),
+        )),
         ActionIntent::ReadOnly { note } => {
             let payload = json!({
                 "kind": "read_only",

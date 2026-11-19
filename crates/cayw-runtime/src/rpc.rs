@@ -728,15 +728,19 @@ impl Runtime {
             }
             "notify.send" | "work.notify.send" => {
                 let p: NotifySend = parse(params)?;
-                encode(self.send_notification(
-                    p.notification_id.as_deref(),
-                    p.work_id.as_deref(),
-                    p.work_version,
-                    p.target.as_deref(),
-                    p.text.as_deref(),
-                    p.content_ref.as_deref(),
-                    &p.artifact_refs,
-                )?)
+                encode(
+                    self.send_notification_async(
+                        p.notification_id.as_deref(),
+                        p.work_id.as_deref(),
+                        p.work_version,
+                        p.target.as_deref(),
+                        p.text.as_deref(),
+                        p.content_ref.as_deref(),
+                        &p.artifact_refs,
+                        cancel,
+                    )
+                    .await?,
+                )
             }
             "notify.prepare" => {
                 let p: NotifyPrepare = parse(params)?;

@@ -310,5 +310,6 @@ async fn unified_bridge_combines_real_mcp_and_pi_compat_extension() {
     registry.disconnect("local").unwrap();
     tokio::time::timeout(Duration::from_secs(5), mcp_control.wait_closed())
         .await
+        .unwrap()
         .unwrap();
 }

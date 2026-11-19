@@ -1023,3 +1023,23 @@ async fn independent_plugins_run_without_global_await_lock() {
     registry.unload("hanging").unwrap();
     assert_eq!(task.await.unwrap(), Err(PluginError::Unloaded));
 }
+
+#[tokio::test]
+async fn synchronous_retirement_closes_admission_and_keeps_cleanup_owned() {
+    let registry = PluginRegistry::new();
+    let description = registry
+        .load_native(
+            Arc::new(Native::new("retire-test", "fixture.echo", false)),
+            context("fixture.echo"),
+        )
+        .unwrap();
+    registry.request_unload_exact(&description).unwrap();
+    registry.request_unload_exact(&description).unwrap();
+    assert!(registry.describe("retire-test").is_err());
+    assert_eq!(registry.pending_cleanup(), vec![description.clone()]);
+    registry
+        .retry_cleanup_exact_and_wait(&description)
+        .await
+        .unwrap();
+    assert!(registry.pending_cleanup().is_empty());
+}

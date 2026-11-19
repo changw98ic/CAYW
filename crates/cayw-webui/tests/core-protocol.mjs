@@ -55,13 +55,19 @@ test('completed file output shows returned content without changing the raw reco
   assert.equal(presentation.raw, '{"status":"completed"}');
 });
 
-test('an interrupted effect is presented as interrupted and hides unconfirmed output', () => {
+test('an unknown effect is not presented as interrupted and hides unconfirmed output', () => {
   const presentation = messagePresentation({ role: 'toolResult', tool_name: 'execute_code', outcome_unknown: true, structured_content: { status: 'completed', outputs: [{ output: { type: 'json', value: { content: 'not a confirmed effect' } } }] } });
-  assert.equal(presentation.status, 'interrupted');
-  assert.equal(presentation.title, '已中断');
-  assert.equal(presentation.text, '本次工具执行已中断。');
+  assert.equal(presentation.status, 'outcome_unknown');
+  assert.equal(presentation.title, '结果待核对');
+  assert.match(presentation.text, /核对后再决定是否重试/);
   assert.deepEqual(presentation.values, []);
   assert.doesNotMatch(presentation.raw, /宿主|核对/);
+});
+
+test('a confirmed interrupted execution is presented as interrupted', () => {
+  const presentation = messagePresentation({ role: 'toolResult', tool_name: 'execute_code', structured_content: { status: 'interrupted', outputs: [] } });
+  assert.equal(presentation.status, 'interrupted');
+  assert.equal(presentation.title, '已中断');
 });
 
 test('a stopped page is displayed as stopped even when its tool receipt has is_error', () => {

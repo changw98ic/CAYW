@@ -788,3 +788,69 @@ fn default_vision_accepts_4k_handles_and_long_images_while_explicit_budgets_rema
         .is_err()
     );
 }
+
+#[test]
+fn crop_rejects_unrepresentable_and_missing_coordinates_before_storage() {
+    let sink = Arc::new(MockImageSink(std::sync::Mutex::new(
+        std::collections::HashMap::new(),
+    )));
+    let service = VisionService::with_router(
+        VisionRouter::new(
+            Arc::new(FixtureOcrEngine::new()),
+            Arc::new(CountingDescribeBackend::new()),
+        ),
+        Limits::default(),
+    )
+    .unwrap()
+    .with_sink(sink.clone());
+    let definition = definitions()
+        .into_iter()
+        .find(|d| d.name == "vision.crop")
+        .unwrap();
+    let validator = cayw_ai::ArgumentValidator::new(&definition.parameters).unwrap();
+    let valid = json!({"image":image_arg(&ImageBuffer::solid(1, 1, [0,0,0,255]).unwrap()),
+        "x":0,"y":0,"width":1,"height":1});
+    for field in ["x", "y", "width", "height"] {
+        for invalid in [
+            json!(u64::from(u32::MAX) + 1),
+            json!(u64::MAX),
+            json!(-1),
+            json!(0.5),
+            json!(null),
+            json!("1"),
+        ] {
+            let mut args = valid.clone();
+            args[field] = invalid;
+            assert!(validator.validate(&args).is_err(), "{field}: {args}");
+            assert!(
+                service
+                    .execute_value("vision.crop", &args, &CancellationToken::new())
+                    .is_err()
+            );
+        }
+        let mut args = valid.clone();
+        args.as_object_mut().unwrap().remove(field);
+        assert!(validator.validate(&args).is_err());
+        assert!(
+            service
+                .execute_value("vision.crop", &args, &CancellationToken::new())
+                .is_err()
+        );
+    }
+    for field in ["width", "height"] {
+        let mut args = valid.clone();
+        args[field] = json!(0);
+        assert!(validator.validate(&args).is_err());
+        assert!(
+            service
+                .execute_value("vision.crop", &args, &CancellationToken::new())
+                .is_err()
+        );
+    }
+    assert!(sink.0.lock().unwrap().is_empty());
+    assert!(
+        service
+            .execute_value("vision.crop", &valid, &CancellationToken::new())
+            .is_ok()
+    );
+}

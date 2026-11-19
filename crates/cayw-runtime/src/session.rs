@@ -26,6 +26,11 @@ pub struct SessionView {
     pub unresolved_capabilities: Vec<cayw_core::CapabilityCallRecord>,
     pub frozen: bool,
     pub binding: Option<SessionBindingView>,
+    /// Diagnostic from this explicit recovery's detached-child audit repair.
+    /// It does not change the recovered session state or task admission.
+    /// Ordinary responses omit this field when there is no recovery diagnostic.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub child_audit_error: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -181,6 +186,7 @@ impl SessionView {
             unresolved_capabilities: snapshot.unresolved_capabilities,
             frozen: binding.as_ref().is_some_and(|binding| binding.frozen),
             binding,
+            child_audit_error: None,
         }
     }
 }

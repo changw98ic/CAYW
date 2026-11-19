@@ -38,16 +38,16 @@ pub async fn install_imported(
     let mut installed = Vec::with_capacity(imported.len());
     for entry in imported {
         if cancel.is_cancelled() {
-            rollback(registry, &installed).await;
-            return Err(failure("MCP install cancelled"));
+            let cleanup = rollback(registry, &installed).await;
+            return Err(with_cleanup(failure("MCP install cancelled"), cleanup));
         }
         let id = entry.spec.id.clone();
         let origin = entry.spec.origin.clone();
         let prepared = match ManagedStdio::prepare(entry.spec, cancel.child_token()).await {
             Ok(prepared) => prepared,
             Err(error) => {
-                rollback(registry, &installed).await;
-                return Err(error);
+                let cleanup = rollback(registry, &installed).await;
+                return Err(with_cleanup(error, cleanup));
             }
         };
         let server_info = prepared.server_info().clone();
@@ -62,11 +62,12 @@ pub async fn install_imported(
             manifest,
             handle,
         ) {
-            control.close();
-            let _ = tokio::time::timeout(std::time::Duration::from_secs(5), control.wait_closed())
-                .await;
-            rollback(registry, &installed).await;
-            return Err(error);
+            let mut cleanup = Vec::new();
+            if let Some(error) = close_control(&id, &control).await {
+                cleanup.push(error);
+            }
+            cleanup.extend(rollback(registry, &installed).await);
+            return Err(with_cleanup(error, cleanup));
         }
         installed.push(InstalledServer {
             id,
@@ -101,18 +102,66 @@ pub async fn install_mcp_servers_file(
     Ok(InstallReport { installed, skipped })
 }
 
-async fn rollback(registry: &Registry, installed: &[InstalledServer]) {
-    for entry in installed.iter().rev() {
-        let _ = registry.disconnect(&entry.id);
-        entry.control.close();
-        let _ = tokio::time::timeout(
-            std::time::Duration::from_secs(5),
-            entry.control.wait_closed(),
-        )
-        .await;
+async fn close_control(id: &str, control: &ManagedControl) -> Option<String> {
+    control.close();
+    match tokio::time::timeout(std::time::Duration::from_secs(5), control.wait_closed()).await {
+        Ok(Ok(())) => None,
+        Ok(Err(error)) => Some(format!("MCP source {id} cleanup: {error}")),
+        Err(_) => Some(format!("MCP source {id} cleanup timed out")),
     }
+}
+
+async fn rollback(registry: &Registry, installed: &[InstalledServer]) -> Vec<String> {
+    let mut failures = Vec::new();
+    for entry in installed.iter().rev() {
+        if let Err(error) = registry.disconnect(&entry.id) {
+            failures.push(format!("MCP source {} disconnect: {error}", entry.id));
+        }
+        if let Some(error) = close_control(&entry.id, &entry.control).await {
+            failures.push(error);
+        }
+    }
+    failures
+}
+
+fn with_cleanup(mut primary: CapabilityError, failures: Vec<String>) -> CapabilityError {
+    if !failures.is_empty() {
+        primary.message.push_str("; cleanup unconfirmed: ");
+        primary.message.push_str(&failures.join("; "));
+        primary.outcome_unknown = true;
+    }
+    primary
 }
 
 fn failure(message: &str) -> CapabilityError {
     CapabilityError::new(message)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn first_prepare_unknown_survives_empty_rollback() {
+        let error = with_cleanup(
+            CapabilityError::unknown("managed MCP probe cleanup unconfirmed"),
+            Vec::new(),
+        );
+        assert!(error.outcome_unknown);
+        assert_eq!(error.message, "managed MCP probe cleanup unconfirmed");
+    }
+
+    #[test]
+    fn cleanup_failure_preserves_primary_and_reports_unknown() {
+        let error = with_cleanup(
+            failure("registration failed"),
+            vec!["source one timed out".into()],
+        );
+        assert!(error.outcome_unknown);
+        assert!(error.message.contains("registration failed"));
+        assert!(error.message.contains("source one timed out"));
+        let known = with_cleanup(failure("registration failed"), Vec::new());
+        assert!(!known.outcome_unknown);
+        assert_eq!(known.message, "registration failed");
+    }
 }

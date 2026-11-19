@@ -267,6 +267,35 @@ impl PluginRegistry {
         })
     }
 
+    /// Stop admitting calls and retain this exact instance until cleanup is awaited.
+    pub fn request_unload_exact(&self, expected: &PluginDescription) -> Result<(), PluginError> {
+        let entry = {
+            let mut state = self.state.lock().expect("plugin registry poisoned");
+            let entry = state
+                .entries
+                .get(&expected.manifest.name)
+                .or_else(|| state.retiring.get(&expected.manifest.name))
+                .ok_or_else(|| PluginError::NotFound(expected.manifest.name.clone()))?;
+            if self.registry_id != expected.registry_id
+                || entry.generation != expected.generation
+                || entry.manifest != expected.manifest
+            {
+                return Err(PluginError::Unavailable(
+                    "loaded plugin identity changed".into(),
+                ));
+            }
+            let entry = entry.clone();
+            state.entries.remove(&expected.manifest.name);
+            state
+                .retiring
+                .insert(expected.manifest.name.clone(), entry.clone());
+            entry.cancel.cancel();
+            entry
+        };
+        entry.plugin.request_shutdown();
+        Ok(())
+    }
+
     /// Removing the active entry closes admission. The retiring entry remains
     /// owned until its supervisor confirms shutdown, blocking same-name restart.
     pub async fn unload_and_wait(&self, name: &str) -> Result<PluginDescription, PluginError> {

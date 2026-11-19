@@ -381,6 +381,7 @@ pub(crate) struct Inner {
     background: Option<Arc<background::BackgroundRegistry>>,
     root: PathBuf,
     host_root: cayw_host::Host,
+    acceptance_root: cayw_host::ReadOnlyWorkspace,
     disabled_services: Vec<DisabledService>,
     /// Operation IDs from a configured request policy whose owning service is
     /// disabled. Opening succeeds; using one reports the reason.
@@ -400,7 +401,7 @@ pub(crate) struct Inner {
     pending_status_reports: Mutex<Vec<work_router::PendingStatusReport>>,
     /// Wakes the due-check loop when a check time is written or a session
     /// becomes free. The wait itself is the WorkItem's `next_check_at`.
-    due_checks: Notify,
+    due_checks: Arc<Notify>,
     due_loop_started: AtomicBool,
     /// The last due-check scan that failed. Cleared by the next successful scan.
     due_report_error: Mutex<Option<String>>,
@@ -726,6 +727,9 @@ impl Runtime {
             }
             None => None,
         };
+        let acceptance_root = host_root
+            .read_only_workspace()
+            .map_err(|error| RuntimeError::Workspace(error.to_string()))?;
         let memory = main_memory::MainMemory::open(&root);
         let work_items = work_items::WorkItems::open(store_path.as_ref())?;
         let rt = Self {
@@ -743,6 +747,7 @@ impl Runtime {
                 background,
                 root,
                 host_root,
+                acceptance_root,
                 disabled_services,
                 disabled_operations,
                 selection: Mutex::new(ConfiguredProvider { provider, model }),
@@ -754,7 +759,7 @@ impl Runtime {
                 work_router: Mutex::new(None),
                 work_owner: Mutex::new(None),
                 pending_status_reports: Mutex::new(Vec::new()),
-                due_checks: Notify::new(),
+                due_checks: Arc::new(Notify::new()),
                 due_loop_started: AtomicBool::new(false),
                 due_report_error: Mutex::new(None),
                 recovery,
@@ -842,6 +847,14 @@ impl Runtime {
     }
     pub fn workspace(&self) -> &Path {
         &self.inner.root
+    }
+    /// Observe an acceptance check through this Runtime's original Host root.
+    /// The check produces no WorkItem acceptance record by itself.
+    pub fn evaluate_acceptance(
+        &self,
+        check: &work_items::AcceptanceCheck,
+    ) -> Result<bool, RuntimeError> {
+        check.evaluate_root(&self.inner.acceptance_root)
     }
     /// Durable base memory and preferences. The authoritative directory exists
     /// only in the main-session workspace.
@@ -1001,9 +1014,11 @@ impl Runtime {
             self.inner.due_loop_started.store(false, Ordering::Release);
             return;
         };
-        let inner = self.inner.clone();
+        let inner = Arc::downgrade(&self.inner);
+        let notified = self.inner.due_checks.clone();
+        let cancel = self.inner.maintenance_cancel.clone();
         handle.spawn(async move {
-            due_report_loop(inner).await;
+            due_report_loop(inner, notified, cancel).await;
         });
     }
     pub fn work_item(&self, work_id: &str) -> Result<Option<work_items::WorkItem>, RuntimeError> {
@@ -1289,9 +1304,13 @@ impl Runtime {
         criterion_id: &str,
     ) -> Result<work_items::WorkItem, RuntimeError> {
         self.require_main_session()?;
-        self.inner
-            .work_items
-            .evaluate_acceptance(work_id, criterion_id, &self.inner.root)
+        self.inner.work_items.evaluate_acceptance_root_at(
+            work_id,
+            criterion_id,
+            &self.inner.acceptance_root,
+            "program",
+            cayw_ai::timestamp_ms(),
+        )
     }
     /// Write the user's own answer to a condition that cannot be checked by a
     /// program. The reference identifies the main-session answer.
@@ -1733,6 +1752,7 @@ impl Runtime {
             content_ref,
             artifact_refs,
             &self.inner.config.notification_targets,
+            None,
         )
     }
     pub fn record_notification_receipt(
@@ -1762,7 +1782,7 @@ impl Runtime {
     }
     /// Enqueue a notification for a user-configured target into the local outbox
     /// (`status: queued`). Only a real external delivery service or host may
-    /// record a delivery receipt.
+    /// record a delivery receipt. This synchronous API waits for the outbox writer lock.
     #[allow(clippy::too_many_arguments)]
     pub fn send_notification(
         &self,
@@ -1774,12 +1794,112 @@ impl Runtime {
         content_ref: Option<&str>,
         artifact_refs: &[String],
     ) -> Result<work_items::Notification, RuntimeError> {
+        let prepared = self.prepare_notification_send(
+            notification_id,
+            work_id,
+            work_version,
+            target,
+            text,
+            content_ref,
+            artifact_refs,
+        )?;
+        let notification = match prepared {
+            work_items::NotificationEnqueue::Existing(notification) => return Ok(notification),
+            work_items::NotificationEnqueue::Ready { notification, .. } => notification,
+        };
+        let file = self.open_notification_outbox(&notification.notification_id)?;
+        file.lock().map_err(|error| RuntimeError::Workspace(format!(
+            "lock notification outbox for {}: {error}; no bytes were written, retry this notification ID",
+            notification.notification_id,
+        )))?;
+        self.write_notification_enqueue(&notification.notification_id, text, file)
+    }
+
+    /// Async callers wait for the same file lock without blocking the executor.
+    /// Cancellation while waiting leaves a fixed Pending intent, not an Unknown write.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) async fn send_notification_async(
+        &self,
+        notification_id: Option<&str>,
+        work_id: Option<&str>,
+        work_version: Option<u64>,
+        target: Option<&str>,
+        text: Option<&str>,
+        content_ref: Option<&str>,
+        artifact_refs: &[String],
+        cancel: CancellationToken,
+    ) -> Result<work_items::Notification, RuntimeError> {
+        if cancel.is_cancelled() {
+            return Err(RuntimeError::Cancelled);
+        }
+        let prepared = self.prepare_notification_send(
+            notification_id,
+            work_id,
+            work_version,
+            target,
+            text,
+            content_ref,
+            artifact_refs,
+        )?;
+        let notification = match prepared {
+            work_items::NotificationEnqueue::Existing(notification) => return Ok(notification),
+            work_items::NotificationEnqueue::Ready { notification, .. } => notification,
+        };
+        let file = self.open_notification_outbox(&notification.notification_id)?;
+        loop {
+            if cancel.is_cancelled() {
+                return Err(RuntimeError::Cancelled);
+            }
+            match file.try_lock() {
+                Ok(()) => break,
+                Err(std::fs::TryLockError::WouldBlock) => {
+                    tokio::select! {
+                        biased;
+                        _ = cancel.cancelled() => {},
+                        _ = tokio::time::sleep(Duration::from_millis(5)) => {},
+                    }
+                }
+                Err(std::fs::TryLockError::Error(error)) => {
+                    return Err(RuntimeError::Workspace(format!(
+                        "lock notification outbox for {}: {error}; no bytes were written, retry this notification ID",
+                        notification.notification_id,
+                    )));
+                }
+            }
+        }
+        self.write_notification_enqueue(&notification.notification_id, text, file)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn prepare_notification_send(
+        &self,
+        notification_id: Option<&str>,
+        work_id: Option<&str>,
+        work_version: Option<u64>,
+        target: Option<&str>,
+        text: Option<&str>,
+        content_ref: Option<&str>,
+        artifact_refs: &[String],
+    ) -> Result<work_items::NotificationEnqueue, RuntimeError> {
         self.require_main_session()?;
         let pending = if let Some(notification_id) = notification_id {
-            self.inner
+            let notification = self
+                .inner
                 .work_items
                 .notification(notification_id)?
-                .ok_or_else(|| RuntimeError::InvalidInput("notification not found".into()))?
+                .ok_or_else(|| RuntimeError::InvalidInput("notification not found".into()))?;
+            if work_id.is_some_and(|id| id != notification.work_id)
+                || work_version.is_some_and(|version| version != notification.work_version)
+                || target.is_some_and(|target| target != notification.target)
+                || content_ref
+                    .is_some_and(|reference| notification.content_ref.as_deref() != Some(reference))
+                || (!artifact_refs.is_empty() && artifact_refs != notification.artifact_refs)
+            {
+                return Err(RuntimeError::InvalidInput(
+                    "notification fields conflict with the stored intent".into(),
+                ));
+            }
+            notification
         } else {
             let target = target.ok_or_else(|| {
                 RuntimeError::InvalidInput("notification target is required".into())
@@ -1802,55 +1922,65 @@ impl Runtime {
                 artifact_refs,
             )?
         };
-        match self
-            .inner
+        self.inner
             .work_items
-            .notification_decision(&pending.notification_id)?
+            .prepare_notification_enqueue(&pending.notification_id, text)
+    }
+
+    fn open_notification_outbox(&self, id: &str) -> Result<std::fs::File, RuntimeError> {
+        let mut options = std::fs::OpenOptions::new();
+        options.create(true).append(true);
+        #[cfg(unix)]
         {
-            work_items::NotificationDecision::Complete
-            | work_items::NotificationDecision::AwaitDelivery => Ok(pending),
-            work_items::NotificationDecision::QueryReceipt => Err(RuntimeError::InvalidInput(
-                "notification delivery outcome is unknown; query receipt before resending".into(),
-            )),
-            work_items::NotificationDecision::Send => {
-                let outbox_path = self.inner.root.join(".cayw-notifications.jsonl");
-                let envelope = serde_json::json!({
-                    "notification_id": pending.notification_id,
-                    "work_id": pending.work_id,
-                    "work_version": pending.work_version,
-                    "target": pending.target,
-                    "text": text.or(pending.content_ref.as_deref()).unwrap_or(""),
-                    "content_ref": pending.content_ref,
-                    "artifact_refs": pending.artifact_refs,
-                    "status": "queued",
-                });
-                let mut line = serde_json::to_vec(&envelope)?;
-                line.push(b'\n');
-                let mut options = std::fs::OpenOptions::new();
-                options.create(true).append(true);
-                #[cfg(unix)]
-                {
-                    use std::os::unix::fs::OpenOptionsExt;
-                    options.mode(0o600);
-                }
-                let mut file = options.open(&outbox_path).map_err(|error| {
-                    RuntimeError::Workspace(format!("open notification outbox: {error}"))
-                })?;
-                use std::io::Write;
-                if let Err(error) = file.write_all(&line).and_then(|_| file.sync_all()) {
-                    let _ = self
-                        .inner
-                        .work_items
-                        .mark_notification_unknown(&pending.notification_id);
-                    return Err(RuntimeError::Workspace(format!(
-                        "write notification outbox: {error}"
-                    )));
-                }
-                self.inner
-                    .work_items
-                    .mark_notification_queued(&pending.notification_id)
-            }
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
         }
+        let file = options.open(self.inner.root.join(".cayw-notifications.jsonl"))
+            .map_err(|error| RuntimeError::Workspace(format!("open notification outbox for {id}: {error}; no bytes were written, retry this notification ID")))?;
+        Ok(file)
+    }
+
+    fn write_notification_enqueue(
+        &self,
+        id: &str,
+        text: Option<&str>,
+        mut file: std::fs::File,
+    ) -> Result<work_items::Notification, RuntimeError> {
+        // Claim only after acquiring the cross-process writer lock. Dropping an
+        // async waiter cannot strand an Unknown claim or leave a detached writer.
+        let (notification, envelope) =
+            match self.inner.work_items.claim_notification_enqueue(id, text)? {
+                work_items::NotificationEnqueue::Existing(notification) => return Ok(notification),
+                work_items::NotificationEnqueue::Ready {
+                    notification,
+                    envelope,
+                } => (notification, envelope),
+            };
+        let mut line = serde_json::to_vec(&envelope)?;
+        line.push(b'\n');
+        use std::io::Write;
+        file.write_all(&line)
+            .and_then(|_| file.sync_all())
+            .and_then(|_| std::fs::File::open(&self.inner.root)?.sync_all())
+            .map_err(|error| RuntimeError::RecoveryRequired {
+                cause: Box::new(RuntimeError::Workspace(format!(
+                    "notification {} outbox outcome is unknown; verify this ID before retrying: {error}",
+                    notification.notification_id
+                ))),
+                cleanup: None,
+                outcome_unknown: true,
+            })?;
+        self.inner
+            .work_items
+            .settle_notification_enqueue(&notification.notification_id, &envelope, true)
+            .map_err(|error| RuntimeError::RecoveryRequired {
+                cause: Box::new(RuntimeError::Workspace(format!(
+                    "notification {} was written but its enqueue acknowledgement is unknown: {error}",
+                    notification.notification_id,
+                ))),
+                cleanup: None,
+                outcome_unknown: true,
+            })
     }
     /// Push a pause version received from the Client to this workspace's live
     /// tasks. The WorkItem body stays in the main-session workspace.
@@ -2334,14 +2464,21 @@ impl Runtime {
 /// Wake at each open WorkItem's own check time and relay that status.
 /// A session that is busy keeps the check time. The next free session, or a
 /// newly stored check time, wakes this loop. There is no separate poll interval.
-async fn due_report_loop(inner: Arc<Inner>) {
-    let cancel = inner.maintenance_cancel.clone();
+async fn due_report_loop(
+    weak: std::sync::Weak<Inner>,
+    notifications: Arc<Notify>,
+    cancel: CancellationToken,
+) {
     loop {
         if cancel.is_cancelled() {
             break;
         }
-        let notified = inner.due_checks.notified();
+        let notified = notifications.notified();
         tokio::pin!(notified);
+        notified.as_mut().enable();
+        let Some(inner) = weak.upgrade() else {
+            break;
+        };
         let now = cayw_ai::timestamp_ms();
         let runtime = Runtime {
             inner: inner.clone(),
@@ -2376,6 +2513,8 @@ async fn due_report_loop(inner: Arc<Inner>) {
                 }
             }
         };
+        drop(runtime);
+        drop(inner);
         tokio::select! {
             _ = cancel.cancelled() => break,
             _ = notified => {}
@@ -2417,6 +2556,521 @@ async fn sleep_until_check(at: Option<u64>) {
 mod tests {
     use super::*;
     use cayw_ai::{AssistantStream, Model, ModelRequest, Provider};
+
+    fn notification_runtime(temp: &tempfile::TempDir) -> Runtime {
+        let directory = temp.path().join("workspace");
+        std::fs::create_dir(&directory).unwrap();
+        Runtime::open(
+            temp.path().join("session.db"),
+            directory,
+            Arc::new(Talk),
+            Model::new("fixture", "test"),
+            RuntimeConfig {
+                main_session: true,
+                notification_targets: vec!["desk".into()],
+                ..Default::default()
+            },
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn concurrent_notification_send_writes_one_immutable_jsonl_envelope() {
+        let temp = tempfile::tempdir().unwrap();
+        let runtime = notification_runtime(&temp);
+        let pending = runtime
+            .prepare_notification("main-session", 1, "desk", Some("initial"), &[])
+            .unwrap();
+        let barrier = Arc::new(std::sync::Barrier::new(2));
+        let threads = (0..2)
+            .map(|_| {
+                let runtime = runtime.clone();
+                let id = pending.notification_id.clone();
+                let barrier = barrier.clone();
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    runtime.send_notification(Some(&id), None, None, None, Some("final"), None, &[])
+                })
+            })
+            .collect::<Vec<_>>();
+        let successes = threads
+            .into_iter()
+            .map(|thread| thread.join().unwrap())
+            .filter(Result::is_ok)
+            .count();
+        assert!(successes >= 1);
+        let outbox = runtime.workspace().join(".cayw-notifications.jsonl");
+        let bytes = std::fs::read_to_string(&outbox).unwrap();
+        assert_eq!(bytes.lines().count(), 1);
+        let envelope: serde_json::Value = serde_json::from_str(bytes.trim()).unwrap();
+        assert_eq!(envelope["text"], "final");
+        assert_eq!(
+            runtime
+                .send_notification(
+                    Some(&pending.notification_id),
+                    None,
+                    None,
+                    None,
+                    Some("final"),
+                    None,
+                    &[]
+                )
+                .unwrap()
+                .status,
+            work_items::NotificationStatus::Queued
+        );
+        assert!(
+            runtime
+                .send_notification(
+                    Some(&pending.notification_id),
+                    None,
+                    None,
+                    None,
+                    Some("different"),
+                    None,
+                    &[]
+                )
+                .is_err()
+        );
+        assert_eq!(std::fs::read_to_string(outbox).unwrap(), bytes);
+        runtime.shutdown_background();
+    }
+
+    #[test]
+    fn notification_sync_sender_waits_for_outbox_lock() {
+        let temp = tempfile::tempdir().unwrap();
+        let runtime = notification_runtime(&temp);
+        let pending = runtime
+            .prepare_notification("main-session", 1, "desk", None, &[])
+            .unwrap();
+        let outbox = runtime.workspace().join(".cayw-notifications.jsonl");
+        let file = std::fs::File::create(&outbox).unwrap();
+        file.lock().unwrap();
+        let (started, wait_started) = std::sync::mpsc::channel();
+        let (done, wait_done) = std::sync::mpsc::channel();
+        let worker_runtime = runtime.clone();
+        let worker = std::thread::spawn(move || {
+            started.send(()).unwrap();
+            done.send(worker_runtime.send_notification(
+                Some(&pending.notification_id),
+                None,
+                None,
+                None,
+                Some("final"),
+                None,
+                &[],
+            ))
+            .unwrap();
+        });
+        wait_started.recv().unwrap();
+        let early = wait_done.recv_timeout(Duration::from_millis(50));
+        drop(file);
+        assert!(matches!(
+            early,
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout)
+        ));
+        assert_eq!(
+            wait_done
+                .recv_timeout(Duration::from_secs(5))
+                .unwrap()
+                .unwrap()
+                .status,
+            work_items::NotificationStatus::Queued
+        );
+        worker.join().unwrap();
+        assert_eq!(std::fs::read_to_string(outbox).unwrap().lines().count(), 1);
+        runtime.shutdown_background();
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn notification_lock_contention_serializes_async_senders() {
+        let temp = tempfile::tempdir().unwrap();
+        let runtime = notification_runtime(&temp);
+        let first = runtime
+            .prepare_notification("main-session", 1, "desk", None, &[])
+            .unwrap();
+        let second = runtime
+            .prepare_notification("main-session", 1, "desk", None, &[])
+            .unwrap();
+        let outbox = runtime.workspace().join(".cayw-notifications.jsonl");
+        let file = std::fs::File::create(&outbox).unwrap();
+        file.lock().unwrap();
+        // A fallback releases the real OS lock even if a regression blocks this executor.
+        let (release, receiver) = std::sync::mpsc::channel();
+        let holder = std::thread::spawn(move || {
+            let signalled = receiver.recv_timeout(Duration::from_secs(5)).is_ok();
+            drop(file);
+            signalled
+        });
+        let a = runtime.send_notification_async(
+            Some(&first.notification_id),
+            None,
+            None,
+            None,
+            Some("first"),
+            None,
+            &[],
+            CancellationToken::new(),
+        );
+        let b = runtime.send_notification_async(
+            Some(&second.notification_id),
+            None,
+            None,
+            None,
+            Some("second"),
+            None,
+            &[],
+            CancellationToken::new(),
+        );
+        tokio::pin!(a, b);
+        assert!(futures::poll!(&mut a).is_pending());
+        assert!(futures::poll!(&mut b).is_pending());
+        assert!(std::fs::read(&outbox).unwrap().is_empty());
+        release.send(()).unwrap();
+        assert!(
+            holder.join().unwrap(),
+            "executor blocked while waiting for outbox lock"
+        );
+        let (a, b) = tokio::join!(a, b);
+        assert_eq!(a.unwrap().status, work_items::NotificationStatus::Queued);
+        assert_eq!(b.unwrap().status, work_items::NotificationStatus::Queued);
+        let rows: Vec<serde_json::Value> = std::fs::read_to_string(outbox)
+            .unwrap()
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        assert_eq!(rows.len(), 2);
+        assert_ne!(rows[0]["notification_id"], rows[1]["notification_id"]);
+        runtime.shutdown_background();
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn notification_cancelled_waiter_can_retry_same_id() {
+        let temp = tempfile::tempdir().unwrap();
+        let runtime = notification_runtime(&temp);
+        let pending = runtime
+            .prepare_notification("main-session", 1, "desk", None, &[])
+            .unwrap();
+        let outbox = runtime.workspace().join(".cayw-notifications.jsonl");
+        let file = std::fs::File::create(&outbox).unwrap();
+        file.lock().unwrap();
+        let cancel = CancellationToken::new();
+        let send = runtime.send_notification_async(
+            Some(&pending.notification_id),
+            None,
+            None,
+            None,
+            Some("final"),
+            None,
+            &[],
+            cancel.clone(),
+        );
+        tokio::pin!(send);
+        assert!(futures::poll!(&mut send).is_pending());
+        cancel.cancel();
+        let error = send.await.unwrap_err();
+        assert!(!error.outcome_unknown());
+        assert!(matches!(error, RuntimeError::Cancelled));
+        assert_eq!(
+            runtime
+                .notification(&pending.notification_id)
+                .unwrap()
+                .unwrap()
+                .status,
+            work_items::NotificationStatus::Pending
+        );
+        assert!(std::fs::read(&outbox).unwrap().is_empty());
+        {
+            let dropped = runtime.send_notification_async(
+                Some(&pending.notification_id),
+                None,
+                None,
+                None,
+                Some("final"),
+                None,
+                &[],
+                CancellationToken::new(),
+            );
+            tokio::pin!(dropped);
+            assert!(futures::poll!(&mut dropped).is_pending());
+        }
+        assert_eq!(
+            runtime
+                .notification(&pending.notification_id)
+                .unwrap()
+                .unwrap()
+                .status,
+            work_items::NotificationStatus::Pending
+        );
+        drop(file);
+        runtime
+            .send_notification(
+                Some(&pending.notification_id),
+                None,
+                None,
+                None,
+                Some("final"),
+                None,
+                &[],
+            )
+            .unwrap();
+        assert_eq!(std::fs::read_to_string(outbox).unwrap().lines().count(), 1);
+        runtime.shutdown_background();
+    }
+
+    #[test]
+    fn notification_open_failure_preserves_identity_without_claim_rollback() {
+        let temp = tempfile::tempdir().unwrap();
+        let runtime = notification_runtime(&temp);
+        let outbox = runtime.workspace().join(".cayw-notifications.jsonl");
+        std::fs::create_dir(&outbox).unwrap();
+        let original = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&outbox)
+            .unwrap_err()
+            .to_string();
+        let error = runtime
+            .send_notification(None, None, None, Some("desk"), Some("final"), None, &[])
+            .unwrap_err();
+        let db = rusqlite::Connection::open(temp.path().join("session.db")).unwrap();
+        let id: String = db
+            .query_row(
+                "SELECT notification_id FROM runtime_notifications WHERE status='pending'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(!error.outcome_unknown());
+        assert!(error.to_string().contains(&id));
+        assert!(error.to_string().contains(&original));
+        assert!(error.to_string().contains("no bytes were written"));
+        runtime.shutdown_background();
+    }
+
+    #[test]
+    fn notification_final_record_failure_keeps_unknown_without_reappend() {
+        let temp = tempfile::tempdir().unwrap();
+        let runtime = notification_runtime(&temp);
+        let pending = runtime
+            .prepare_notification("main-session", 1, "desk", None, &[])
+            .unwrap();
+        let db = rusqlite::Connection::open(temp.path().join("session.db")).unwrap();
+        db.execute_batch("CREATE TRIGGER reject_notification_queued BEFORE UPDATE ON runtime_notifications
+            WHEN NEW.status='queued' BEGIN SELECT RAISE(ABORT,'fixture enqueue acknowledgement failed'); END;").unwrap();
+        let error = runtime
+            .send_notification(
+                Some(&pending.notification_id),
+                None,
+                None,
+                None,
+                Some("final"),
+                None,
+                &[],
+            )
+            .unwrap_err();
+        assert!(error.outcome_unknown());
+        assert!(
+            error
+                .to_string()
+                .contains("fixture enqueue acknowledgement failed")
+        );
+        let outbox = runtime.workspace().join(".cayw-notifications.jsonl");
+        let before = std::fs::read(&outbox).unwrap();
+        assert_eq!(
+            runtime
+                .notification(&pending.notification_id)
+                .unwrap()
+                .unwrap()
+                .status,
+            work_items::NotificationStatus::Unknown
+        );
+        db.execute_batch("DROP TRIGGER reject_notification_queued")
+            .unwrap();
+        assert!(
+            runtime
+                .send_notification(
+                    Some(&pending.notification_id),
+                    None,
+                    None,
+                    None,
+                    Some("final"),
+                    None,
+                    &[]
+                )
+                .is_err()
+        );
+        assert_eq!(std::fs::read(outbox).unwrap(), before);
+        runtime
+            .record_notification_receipt(
+                &pending.notification_id,
+                work_items::NotificationStatus::Delivered,
+                "fixture-real-receipt-path",
+            )
+            .unwrap();
+        assert_eq!(
+            runtime
+                .send_notification(
+                    Some(&pending.notification_id),
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    &[]
+                )
+                .unwrap()
+                .status,
+            work_items::NotificationStatus::Delivered
+        );
+        let session = runtime.create(None).unwrap().id;
+        assert!(runtime.enqueue(&session, "unrelated task").is_ok());
+    }
+
+    #[test]
+    fn no_id_notification_failure_reports_the_persisted_identity() {
+        let temp = tempfile::tempdir().unwrap();
+        let runtime = notification_runtime(&temp);
+        let db = rusqlite::Connection::open(temp.path().join("session.db")).unwrap();
+        db.execute_batch("CREATE TRIGGER reject_notification_queued BEFORE UPDATE ON runtime_notifications
+            WHEN NEW.status='queued' BEGIN SELECT RAISE(ABORT,'fixture no-ID acknowledgement failed'); END;").unwrap();
+        let error = runtime
+            .send_notification(None, None, None, Some("desk"), Some("final"), None, &[])
+            .unwrap_err();
+        let id: String = db
+            .query_row(
+                "SELECT notification_id FROM runtime_notifications WHERE status='unknown'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(error.outcome_unknown());
+        assert!(error.to_string().contains(&id));
+        assert!(
+            error
+                .to_string()
+                .contains("fixture no-ID acknowledgement failed")
+        );
+        let outbox = runtime.workspace().join(".cayw-notifications.jsonl");
+        let before = std::fs::read(&outbox).unwrap();
+        assert!(
+            runtime
+                .send_notification(Some(&id), None, None, None, Some("final"), None, &[])
+                .is_err()
+        );
+        assert_eq!(std::fs::read(outbox).unwrap(), before);
+    }
+
+    #[test]
+    fn notification_open_failure_keeps_retryable_intent_and_fixed_payload() {
+        let temp = tempfile::tempdir().unwrap();
+        let runtime = notification_runtime(&temp);
+        let pending = runtime
+            .prepare_notification("main-session", 1, "desk", Some("initial"), &[])
+            .unwrap();
+        let outbox = runtime.workspace().join(".cayw-notifications.jsonl");
+        std::fs::create_dir(&outbox).unwrap();
+        assert!(
+            runtime
+                .send_notification(
+                    Some(&pending.notification_id),
+                    None,
+                    None,
+                    None,
+                    Some("final"),
+                    None,
+                    &[]
+                )
+                .is_err()
+        );
+        assert_eq!(
+            runtime
+                .notification(&pending.notification_id)
+                .unwrap()
+                .unwrap()
+                .status,
+            work_items::NotificationStatus::Pending
+        );
+        std::fs::remove_dir(&outbox).unwrap();
+        runtime
+            .send_notification(
+                Some(&pending.notification_id),
+                None,
+                None,
+                None,
+                Some("final"),
+                None,
+                &[],
+            )
+            .unwrap();
+        assert_eq!(std::fs::read_to_string(outbox).unwrap().lines().count(), 1);
+        runtime.shutdown_background();
+    }
+
+    #[test]
+    fn work_acceptance_uses_host_root_after_directory_replacement() {
+        let temp = tempfile::tempdir().unwrap();
+        let directory = temp.path().join("workspace");
+        std::fs::create_dir(&directory).unwrap();
+        std::fs::write(directory.join("result.txt"), "original").unwrap();
+        let runtime = Runtime::open(
+            temp.path().join("session.db"),
+            &directory,
+            Arc::new(Talk),
+            Model::new("fixture", "test"),
+            RuntimeConfig {
+                main_session: true,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let session = runtime.create(None).unwrap().id;
+        let item = runtime.create_work_item(serde_json::from_value(serde_json::json!({
+            "work_id": "anchored-work", "owner_main_session_id": session,
+            "title": "observe original root", "goal": "check the opened workspace",
+            "acceptance_criteria": [{"criterion_id": "contents", "description": "original contents",
+                "check": {"kind": "file_equals", "path": "result.txt", "text": "original"}}]
+        })).unwrap()).unwrap();
+        std::fs::rename(&directory, temp.path().join("moved")).unwrap();
+        std::fs::create_dir(&directory).unwrap();
+        std::fs::write(directory.join("result.txt"), "replacement").unwrap();
+        let observed = runtime
+            .evaluate_work_acceptance(&item.work_id, "contents")
+            .unwrap();
+        assert_eq!(observed.acceptance_records.len(), 1);
+        assert_eq!(
+            observed.acceptance_records[0].result,
+            work_items::AcceptanceResult::Passed
+        );
+        runtime.shutdown_background();
+    }
+
+    #[tokio::test]
+    async fn due_loop_does_not_keep_last_runtime_alive() {
+        let temp = tempfile::tempdir().unwrap();
+        let workspace = temp.path().join("workspace");
+        std::fs::create_dir(&workspace).unwrap();
+        let runtime = Runtime::open(
+            temp.path().join("session.db"),
+            workspace,
+            Arc::new(Talk),
+            Model::new("fixture", "test"),
+            RuntimeConfig {
+                main_session: true,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let weak = Arc::downgrade(&runtime.inner);
+        let clone = runtime.clone();
+        drop(runtime);
+        tokio::task::yield_now().await;
+        assert!(weak.upgrade().is_some());
+        drop(clone);
+        // The executor is still running: its destruction cannot hide a strong loop owner.
+        assert!(weak.upgrade().is_none());
+        tokio::task::yield_now().await;
+    }
 
     struct Talk;
     impl Provider for Talk {

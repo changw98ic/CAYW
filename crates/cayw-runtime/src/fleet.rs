@@ -78,6 +78,8 @@ pub struct FleetMember {
     pub detached: bool,
     pub state: FleetMemberState,
     pub error: Option<String>,
+    /// Failure to persist the parent-child completion link, distinct from execution.
+    pub audit_error: Option<String>,
 }
 
 /// Bounded FleetView page for SDK / IPC / WebUI.
@@ -98,6 +100,8 @@ pub(crate) struct FleetEntry {
     pub cancel: CancellationToken,
     pub state: FleetMemberState,
     pub error: Option<String>,
+    /// Failure to persist the parent-child completion link, distinct from execution.
+    pub audit_error: Option<String>,
     pub control: Mutex<Option<AgentControl>>,
 }
 
@@ -185,6 +189,12 @@ impl FleetRegistry {
         *lock(&entry.control) = None;
     }
 
+    pub(crate) fn set_audit_error(&self, child_task_id: &str, error: Option<String>) {
+        if let Some(entry) = lock(&self.members).get_mut(child_task_id) {
+            entry.audit_error = error;
+        }
+    }
+
     pub(crate) fn snapshot(
         &self,
         parent_session_id: Option<&str>,
@@ -221,6 +231,7 @@ impl FleetRegistry {
                 detached: entry.detached,
                 state: entry.state,
                 error: entry.error.clone(),
+                audit_error: entry.audit_error.clone(),
             })
             .collect();
         let next_after = (rows.len() > limit).then(|| rows[limit - 1].child_task_id.clone());

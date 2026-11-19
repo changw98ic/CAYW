@@ -338,6 +338,12 @@ fn verify_record(
                 && arguments["tool"].as_str() == Some(record.key.target.as_str())
                 && arguments.get("arguments") == Some(&record.arguments)
         }
+        "mcp.prompts.get" => {
+            record.key.operation == Operation::GetPrompt
+                && arguments["server"].as_str() == Some(source.source.id.as_str())
+                && arguments["name"].as_str() == Some(record.key.target.as_str())
+                && arguments.get("arguments") == Some(&record.arguments)
+        }
         // Listing resources is catalog-only and produces no dispatch record.
         // Reading one must bind the exact original server and opaque URI.
         "mcp.resources.read" => {

@@ -6,7 +6,11 @@ mod batch;
 mod catalog;
 mod code;
 mod filesystem;
+mod readonly;
 mod search;
+mod write_policy;
+pub use readonly::ReadOnlyWorkspace;
+pub use write_policy::DirectoryWritePolicy;
 
 pub use cayw_ai::{CancellationToken, ToolDefinition};
 pub use cayw_codemode::CapabilityError;
@@ -124,6 +128,7 @@ impl Limits {
 
 pub struct Workspace {
     root: Dir,
+    write_policy: DirectoryWritePolicy,
     store: Dir,
     limits: Limits,
     #[cfg(feature = "fault-injection")]
@@ -153,6 +158,11 @@ pub enum FaultAction {
 }
 
 impl Workspace {
+    pub fn with_write_policy(mut self, policy: DirectoryWritePolicy) -> Self {
+        self.write_policy = policy;
+        self
+    }
+
     /// Opens a trusted application-selected root through no-follow directory
     /// handles. Unix is supported; other platforms currently fail closed.
     /// Reopening checks journals and pending path evidence without replaying work.
@@ -206,6 +216,7 @@ impl Workspace {
             let store = filesystem::open_store(&root, context)?;
             let workspace = Self {
                 root,
+                write_policy: DirectoryWritePolicy::default(),
                 store,
                 limits,
                 #[cfg(feature = "fault-injection")]

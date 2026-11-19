@@ -669,7 +669,7 @@ pub(crate) async fn execute(
         }
         "fs.write" | "fs.patch" => {
             // Host holds the shared lock from journal readiness through commit.
-            let (dir, filename) = parent(&host.root, &components)?;
+            let (dir, filename) = host.write_policy.parent(&host.root, &components)?;
             let expected = args.get("expected_sha256").and_then(Value::as_str);
             let permissions = match dir.symlink_metadata(filename) {
                 Ok(metadata) => {

@@ -154,6 +154,10 @@ pub struct StdioControl {
     shared: Arc<Shared>,
 }
 impl StdioControl {
+    pub(crate) fn same_instance(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.shared, &other.shared)
+    }
+
     pub fn snapshot(&self) -> StdioSnapshot {
         self.shared
             .snapshot
@@ -306,6 +310,15 @@ impl StdioSource {
         config: StdioConfig,
         cancel: CancellationToken,
     ) -> Result<Self, CapabilityError> {
+        Self::connect_owned(config, cancel, |_| {}).await
+    }
+
+    /// Transfer cleanup observation before discovery can yield or be cancelled.
+    pub(crate) async fn connect_owned(
+        config: StdioConfig,
+        cancel: CancellationToken,
+        own: impl FnOnce(StdioControl) + Send,
+    ) -> Result<Self, CapabilityError> {
         config.validate()?;
         if cancel.is_cancelled() {
             return Err(failure("stdio connection cancelled before launch"));
@@ -367,6 +380,9 @@ impl StdioSource {
             }),
         };
         tokio::spawn(run(child, stdin, stdout, stderr, receiver, shared, config));
+        own(StdioControl {
+            shared: client.transport.shared.clone(),
+        });
         let result = async {
             let tools = client
                 .request("tools/list", json!({}), cancel.clone(), false)

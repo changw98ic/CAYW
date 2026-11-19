@@ -10,6 +10,7 @@ mod git;
 mod process;
 mod read_fence;
 pub mod terminal;
+mod vision_work;
 pub use cayw_output_filter::{FilterOptions, FilterProfile};
 pub use git::GitWritePolicy;
 pub use read_fence::{
@@ -733,6 +734,7 @@ struct Safety {
 
 #[derive(Clone)]
 pub struct Host {
+    write_policy: cayw_workspace::DirectoryWritePolicy,
     root: Arc<Dir>,
     gate: Arc<dyn PermissionGate>,
     audit: Arc<dyn AuditSink>,
@@ -745,10 +747,28 @@ pub struct Host {
     terminal: Option<Arc<terminal::TerminalManager>>,
     web_access: Option<Arc<cayw_web_access::WebAccess>>,
     vision: Option<Arc<cayw_vision::VisionService>>,
+    vision_work: Arc<vision_work::VisionWork>,
     external: Option<Arc<dyn ExternalHost>>,
     disabled_services: Arc<Vec<DisabledService>>,
 }
+pub use cayw_workspace::ReadOnlyWorkspace;
+
 impl Host {
+    /// Restrict only this scope and its children; trusted writers keep their own Host.
+    pub fn with_read_only_directory(mut self, name: &str) -> Result<Self, CapabilityError> {
+        self.write_policy = cayw_workspace::DirectoryWritePolicy::read_only(name)?;
+        Ok(self)
+    }
+
+    /// Read-only observations rooted at the same directory as this Host.
+    pub fn read_only_workspace(
+        &self,
+    ) -> Result<cayw_workspace::ReadOnlyWorkspace, CapabilityError> {
+        Ok(cayw_workspace::ReadOnlyWorkspace::from_dir(
+            self.root.try_clone().map_err(io_error)?,
+        ))
+    }
+
     /// Opens one directory capability. File operations never reopen an ambient
     /// path after validation; each component is opened without following links.
     pub fn new(
@@ -778,6 +798,7 @@ impl Host {
         // The parent already recorded why an optional service is absent. Carry
         // that reason into the task scope instead of silently dropping it.
         host.disabled_services = self.disabled_services.clone();
+        host.write_policy = self.write_policy.clone();
         Ok(host)
     }
     fn from_root(
@@ -855,6 +876,7 @@ impl Host {
             .map(Arc::new);
         let external = config.external.clone();
         Ok(Self {
+            write_policy: cayw_workspace::DirectoryWritePolicy::default(),
             root: Arc::new(root),
             gate,
             audit,
@@ -867,6 +889,7 @@ impl Host {
             terminal,
             web_access,
             vision,
+            vision_work: Arc::default(),
             external,
             disabled_services: Arc::new(disabled_services),
         })
@@ -956,6 +979,7 @@ impl Host {
         audit: Arc<dyn AuditSink>,
     ) -> Result<Self, CapabilityError> {
         Ok(Self {
+            write_policy: self.write_policy.clone(),
             root: self.root.clone(),
             gate,
             audit,
@@ -968,6 +992,7 @@ impl Host {
             terminal: self.terminal.clone(),
             web_access: self.web_access.clone(),
             vision: self.vision.clone(),
+            vision_work: self.vision_work.clone(),
             external: self.external.clone(),
             disabled_services: self.disabled_services.clone(),
         })
@@ -1091,11 +1116,12 @@ impl Host {
             terminal.close();
         }
         self.runner.close();
+        self.vision_work.close();
     }
 
     /// Supervisors still owned by this task, including dropped call futures.
     pub fn active_processes(&self) -> usize {
-        self.runner.active_count()
+        self.runner.active_count() + self.vision_work.active()
     }
 
     /// Terminal sessions whose original supervisor has not joined.
@@ -1119,16 +1145,26 @@ impl Host {
         if let Some(terminal) = &self.terminal {
             terminal.close();
         }
+        self.vision_work.close();
         let terminal_result = match &self.terminal {
             Some(terminal) => terminal.drain().await,
             None => Ok(()),
         };
         let process_result = self.runner.drain().await;
-        match (terminal_result, process_result) {
-            (Ok(()), Ok(())) => Ok(()),
-            (Err(error), Ok(())) | (Ok(()), Err(error)) => Err(error),
-            (Err(terminal), Err(process)) => Err(cayw_device::DeviceError::CleanupUnconfirmed(
-                format!("terminal cleanup: {terminal}; process cleanup: {process}"),
+        let vision_result = self.vision_work.drain().await;
+        let mut errors: Vec<_> = [terminal_result, process_result, vision_result]
+            .into_iter()
+            .filter_map(Result::err)
+            .collect();
+        match errors.len() {
+            0 => Ok(()),
+            1 => Err(errors.remove(0)),
+            _ => Err(cayw_device::DeviceError::CleanupUnconfirmed(
+                errors
+                    .iter()
+                    .map(ToString::to_string)
+                    .collect::<Vec<_>>()
+                    .join("; "),
             )),
         }
     }
@@ -1299,12 +1335,12 @@ impl Host {
                     .as_ref()
                     .ok_or_else(|| failure("vision capabilities are disabled"))?
                     .clone();
-                tokio::select! {
-                    biased;
-                    _ = cancel.cancelled() => Err(CapabilityError::stopped(CapabilityStop::Cancelled, "vision capability cancelled")),
-                    _ = sleep_deadline(deadline) => Err(CapabilityError::stopped(CapabilityStop::Timeout, "vision capability deadline reached")),
-                    result = cayw_vision::execute(service, name, args, cancel.clone()) => result,
-                }
+                let name = name.to_owned();
+                self.vision_work
+                    .run(cancel, deadline, move |token| async move {
+                        cayw_vision::execute(service, &name, args, token).await
+                    })
+                    .await
             }
             Executor::External => {
                 let external = service
@@ -1349,7 +1385,12 @@ impl Host {
                 cancel.clone(),
                 deadline_instant(deadline),
             ) {
-                Ok(workspace) => return Ok((workspace, deadline)),
+                Ok(workspace) => {
+                    return Ok((
+                        workspace.with_write_policy(self.write_policy.clone()),
+                        deadline,
+                    ));
+                }
                 Err(error)
                     if !error.outcome_unknown
                         && error.message.starts_with("workspace is busy:") =>

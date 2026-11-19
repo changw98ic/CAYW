@@ -1125,6 +1125,7 @@ impl App {
                 // A typed known terminal can release only this local prompt.
                 // A missing or unknown transport result must keep the lock.
                 let known_terminal = not_sent
+                    || (code == "model_not_configured" && session.original_task_id.is_none())
                     || matches!(
                         code,
                         "cancelled"

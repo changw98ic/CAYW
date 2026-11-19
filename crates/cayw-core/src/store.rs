@@ -951,6 +951,136 @@ impl SessionStore {
         Ok(record)
     }
 
+    /// Records a detached child's durable terminal after its originating parent
+    /// attempt may have ended. The trusted Runtime must first verify the child
+    /// task's durable queue terminal. This checks both persisted start links and
+    /// deduplicates the completion in the same transaction as the append.
+    pub fn append_detached_child_completion(
+        &self,
+        parent: &AttemptLease,
+        started_cursor: u64,
+        data: Value,
+    ) -> Result<EventRecord, CoreError> {
+        let mut data = checked_input(data)?;
+        let object = data
+            .as_object_mut()
+            .ok_or_else(|| invalid("child completion must be an object"))?;
+        object.insert("parent_attempt".into(), serde_json::to_value(parent)?);
+        object.insert("parent_started_cursor".into(), Value::from(started_cursor));
+        let child_session = data["child_session"]
+            .as_str()
+            .ok_or_else(|| invalid("child session is required"))?;
+        let child_task = data["child_task"]
+            .as_str()
+            .ok_or_else(|| invalid("child task is required"))?;
+        if data["parent_session"] != parent.session_id
+            || !matches!(
+                data["state"].as_str(),
+                Some("completed" | "failed" | "cancelled")
+            )
+        {
+            return Err(invalid("invalid detached completion identity or terminal"));
+        }
+        let mut connection = self
+            .connection
+            .lock()
+            .map_err(|_| CoreError::StorePoisoned)?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let started_json: String = transaction.query_row(
+            "SELECT record FROM core_events WHERE session_id=?1 AND cursor=?2",
+            params![parent.session_id, started_cursor as i64],
+            |row| row.get(0),
+        )?;
+        let started: EventRecord = checked_input(serde_json::from_str(&started_json)?)?;
+        let CoreEvent::Host {
+            kind,
+            data: identity,
+        } = &started.event
+        else {
+            return Err(invalid("child origin is not a host event"));
+        };
+        if kind != "agent_child_started"
+            || started.attempt.as_ref() != Some(parent)
+            || started.protocol_version != PROTOCOL_VERSION
+            || started.session_id != parent.session_id
+            || started.cursor != started_cursor
+            || identity["detached"] != true
+            || [
+                "parent_session",
+                "parent_task",
+                "child_session",
+                "child_task",
+            ]
+            .iter()
+            .any(|key| identity[*key] != data[*key])
+        {
+            return Err(invalid(
+                "detached completion differs from its durable origin",
+            ));
+        }
+        let read_host_events = |session: &str, kind: &str| -> Result<Vec<EventRecord>, CoreError> {
+            let mut query = transaction.prepare(
+                "SELECT record FROM core_events WHERE session_id=?1 AND json_extract(record, '$.event.type')='host' AND json_extract(record, '$.event.kind')=?2 AND (json_extract(record, '$.event.data.child_task')=?3 OR json_extract(record, '$.event.data.decision.child_task')=?3) ORDER BY cursor",
+            )?;
+            let rows = query.query_map(params![session, kind, child_task], |row| {
+                row.get::<_, String>(0)
+            })?;
+            rows.map(|row| checked_input(serde_json::from_str::<EventRecord>(&row?)?))
+                .collect()
+        };
+        let linked = read_host_events(child_session, "agent_child_linked")?;
+        if !linked.iter().any(|record| {
+            matches!(&record.event,
+            CoreEvent::Host { data, .. } if data["actor"] == "runtime-local-agent"
+                && data["decision"] == *identity)
+        }) {
+            return Err(invalid("child has no matching durable link"));
+        }
+        for record in read_host_events(&parent.session_id, "agent_child_finished")? {
+            if matches!(&record.event, CoreEvent::Host { data: existing, .. }
+                if existing["parent_attempt"] == data["parent_attempt"]
+                    && existing["child_task"] == child_task)
+            {
+                if matches!(&record.event, CoreEvent::Host { data: old, .. } if *old == data) {
+                    return Ok(record);
+                }
+                return Err(invalid("conflicting detached child completion"));
+            }
+        }
+        let mut session = self.cached_projection(&transaction, &parent.session_id)?;
+        self.projection_cache
+            .lock()
+            .map_err(|_| CoreError::StorePoisoned)?
+            .take(&parent.session_id);
+        let state = Arc::make_mut(&mut session);
+        state.cursor = increment(state.cursor)?;
+        state.validate_wait_bindings()?;
+        // Envelope identity follows the current checkpoint (required for log
+        // replay). Original ownership is explicit in parent_attempt in data.
+        let record = EventRecord {
+            protocol_version: PROTOCOL_VERSION,
+            session_id: parent.session_id.clone(),
+            cursor: state.cursor,
+            timestamp: timestamp_ms(),
+            attempt: state.attempt.clone(),
+            event: CoreEvent::Host {
+                kind: "agent_child_finished".into(),
+                data,
+            },
+        };
+        transaction.execute(
+            "INSERT INTO core_events (session_id, cursor, record) VALUES (?1, ?2, ?3)",
+            params![state.id, state.cursor as i64, encode_readable(&record)?],
+        )?;
+        let json = projection_json(&transaction, &state.id)?;
+        transaction.commit()?;
+        self.projection_cache
+            .lock()
+            .map_err(|_| CoreError::StorePoisoned)?
+            .insert(CachedProjection { json, session });
+        Ok(record)
+    }
+
     pub fn append_agent_event(
         &self,
         lease: &AttemptLease,

@@ -138,6 +138,7 @@ impl SearchProvider for BraveSearch {
                     let truncated = omitted || more != Some(false);
                     let mut result = if hits.is_empty() {
                         SearchResponse::empty(
+                            PROVIDER,
                             if more == Some(false) {
                                 SearchEmptyReason::TrueEmpty
                             } else {
@@ -146,7 +147,7 @@ impl SearchProvider for BraveSearch {
                             None,
                         )
                     } else {
-                        SearchResponse::new(hits)
+                        SearchResponse::new(PROVIDER, hits)
                     };
                     result.truncated = truncated;
                     if truncated {
@@ -357,6 +358,68 @@ mod tests {
         guard.release_and_join();
     }
 
+    #[tokio::test]
+    async fn fallback_results_keep_the_actual_provider() {
+        for body in ["{}", "invalid json"] {
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            let address = listener.local_addr().unwrap();
+            listener.set_nonblocking(true).unwrap();
+            let server = thread::spawn(move || {
+                let deadline = std::time::Instant::now() + Duration::from_secs(10);
+                let mut stream = loop {
+                    match listener.accept() {
+                        Ok((stream, _)) => break stream,
+                        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                            assert!(
+                                std::time::Instant::now() < deadline,
+                                "missing Brave request"
+                            );
+                            thread::sleep(Duration::from_millis(1));
+                        }
+                        Err(error) => panic!("accept: {error}"),
+                    }
+                };
+                stream.set_nonblocking(false).unwrap();
+                stream
+                    .set_read_timeout(Some(Duration::from_secs(10)))
+                    .unwrap();
+                read_http_request(&mut stream).unwrap();
+                write!(
+                    stream,
+                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                )
+                .unwrap();
+            });
+            let mut brave = BraveSearch::new("synthetic").unwrap();
+            brave.endpoint = format!("http://{address}/search");
+            let fallback = crate::DuckDuckGoHtmlSearch::new(Arc::new(
+                crate::FixtureTransport::new().insert_html(
+                    "https://html.duckduckgo.com/html/?q=rust",
+                    r#"<a class="result__a" href="https://example.com/rust">Rust</a>"#,
+                ),
+            ));
+            let access = crate::WebAccess::with_fixtures(
+                crate::FixtureTransport::new(),
+                BraveOrFallback::new(
+                    None,
+                    Arc::new(BraveOrFallback::new(Some(brave), Arc::new(fallback))),
+                ),
+            );
+            let response = access.search("rust", Some(5)).await.unwrap();
+            server.join().unwrap();
+            assert_eq!(response.provider, "duckduckgo_html");
+            assert_eq!(response.citations.len(), 1);
+            assert!(
+                response
+                    .citations
+                    .iter()
+                    .all(|citation| citation.provider.as_deref() == Some("duckduckgo_html"))
+            );
+        }
+    }
+
     #[test]
     fn parse_brave_json_extracts_hits() {
         let json_body = br#"{
@@ -464,6 +527,13 @@ mod tests {
     #[tokio::test]
     async fn stops_when_provider_reports_exhaustion() {
         let response = paged_fixture(50, vec![((0..7).collect(), Some(false))]).await;
+        assert_eq!(response.provider, "brave");
+        assert!(
+            response
+                .citations
+                .iter()
+                .all(|citation| citation.provider.as_deref() == Some("brave"))
+        );
         assert_eq!(response.hits.len(), 7);
         assert!(!response.truncated);
     }

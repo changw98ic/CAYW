@@ -1261,6 +1261,9 @@ def main():
         'binary_count': len(manifest.get('binaries') or []),
         'error': manifest.get('error')}
     normals = {}
+    completed = set()
+    expected = {case + '-' + mode for case in ('normal', 'writes', 'storage', 'panic')
+                for mode in ('sdk', 'ipc')}
     try:
         if not manifest.get('complete'):
             report['failures'].append(
@@ -1285,6 +1288,7 @@ def main():
                         'session': normal.identity,
                         'usage_total': normal.ev['model_usage']['usage_total_sum'],
                         'relay_requests': normal.ev['model_usage']['relay_request_numbers']}
+                    completed.add('normal-' + mode)
                 except Exception as error:
                     report['failures'].append('normal-' + mode + ': ' +
                                               type(error).__name__ + ': ' + str(error))
@@ -1297,6 +1301,7 @@ def main():
             for mode in ('sdk', 'ipc') if not report['failures'] else ():
                 try:
                     report['scenarios']['writes-' + mode] = writes_step(mode, normals.get(mode), args)
+                    completed.add('writes-' + mode)
                 except Exception as error:
                     report['failures'].append('writes-' + mode + ': ' +
                                               type(error).__name__ + ': ' + str(error))
@@ -1309,20 +1314,35 @@ def main():
                     name = case + '-' + mode
                     try:
                         report['scenarios'][name] = root_probe(case, mode, args, relay)
+                        completed.add(name)
                     except Exception as error:
                         report['failures'].append(name + ': ' + type(error).__name__ +
                                                   ': ' + str(error))
                         report['scenarios'][name] = {
                             'passed': False, 'error': type(error).__name__ + ': ' + str(error)}
                         break
+        report['passed'] = completed == expected and not report['failures']
+    except KeyboardInterrupt:
+        report['failures'].append('interrupted: KeyboardInterrupt')
+        raise
     finally:
-        relay.close()
-        summary = relay.summary()
-        report['relay'] = {key: summary[key] for key in
-                           ('base', 'upstream', 'actual_posts', 'max_actual_posts',
-                            'refused_posts', 'reported_usage_sum', 'unknown_count')}
+        pending_exception = sys.exc_info()[0] is not None
+        if pending_exception:
+            report['passed'] = False
+        try:
+            relay.close()
+            summary = relay.summary()
+            report['relay'] = {key: summary[key] for key in
+                               ('base', 'upstream', 'actual_posts', 'max_actual_posts',
+                                'refused_posts', 'reported_usage_sum', 'unknown_count')}
+        except BaseException as error:
+            report['passed'] = False
+            report['failures'].append('relay cleanup: ' + type(error).__name__ + ': ' + str(error))
+            # Preserve an in-flight exception, but propagate a cleanup interrupt.
+            if not isinstance(error, Exception) and not pending_exception:
+                save(args.out / 'summary.json', report)
+                raise
         report['finished_at'] = now()
-        report['passed'] = not report['failures']
         save(args.out / 'summary.json', report)
         print(json.dumps(report, ensure_ascii=False, indent=2))
     return 0 if report['passed'] else 1

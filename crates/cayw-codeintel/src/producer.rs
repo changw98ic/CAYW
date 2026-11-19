@@ -199,7 +199,7 @@ pub fn lightweight_rust_outline(source: &str) -> Vec<SymbolInput> {
         }
 
         if let Some(sym) = match_decl(trimmed) {
-            let name_rel = trimmed.find(&sym.name).unwrap_or(0);
+            let name_rel = sym.offset;
             let abs = line_start + leading + name_rel;
             let end = abs + sym.name.len();
             symbols.push(SymbolInput {
@@ -218,6 +218,7 @@ pub fn lightweight_rust_outline(source: &str) -> Vec<SymbolInput> {
 }
 
 struct Decl {
+    offset: usize,
     name: String,
     kind: &'static str,
 }
@@ -236,8 +237,13 @@ fn match_decl(trimmed: &str) -> Option<Decl> {
         ("static ", "static"),
     ] {
         if let Some(rest) = s.strip_prefix(kw) {
+            let rest = rest.trim_start();
             let name = take_ident(rest)?;
-            return Some(Decl { name, kind });
+            return Some(Decl {
+                offset: trimmed.len() - rest.len(),
+                name,
+                kind,
+            });
         }
     }
     if let Some(rest) = s.strip_prefix("impl") {
@@ -253,7 +259,12 @@ fn match_decl(trimmed: &str) -> Option<Decl> {
             rest
         };
         let name = take_impl_name(target)?;
-        return Some(Decl { name, kind: "impl" });
+        let offset = name.as_ptr() as usize - trimmed.as_ptr() as usize;
+        return Some(Decl {
+            offset,
+            name: name.to_owned(),
+            kind: "impl",
+        });
     }
     None
 }
@@ -312,7 +323,7 @@ fn take_ident(s: &str) -> Option<String> {
     Some(name)
 }
 
-fn take_impl_name(s: &str) -> Option<String> {
+fn take_impl_name(s: &str) -> Option<&str> {
     let s = s.trim_start();
     let end = s.find(['{', ';', '\n']).unwrap_or(s.len());
     let raw = s[..end].trim();
@@ -327,11 +338,7 @@ fn take_impl_name(s: &str) -> Option<String> {
         .next()
         .unwrap_or(raw);
     let name = name.trim_matches(|c: char| matches!(c, '<' | '>' | ',' | '(' | ')'));
-    if name.is_empty() {
-        None
-    } else {
-        Some(name.to_owned())
-    }
+    if name.is_empty() { None } else { Some(name) }
 }
 
 fn find_for(s: &str) -> Option<usize> {
@@ -383,6 +390,31 @@ fn skip_balanced(s: &str, open: char, close: char) -> Option<&str> {
 mod tests {
     use super::*;
     use crate::DefinitionQuery;
+
+    #[test]
+    fn short_names_have_exact_offsets() {
+        for src in [
+            "fn f() {}",
+            "fn n() {}",
+            "pub fn p() {}",
+            "  pub struct s;",
+            "impl<T> x::T {}",
+        ] {
+            let symbols = lightweight_rust_outline(src);
+            assert_eq!(symbols.len(), 1, "{src}");
+            let symbol = &symbols[0];
+            assert_eq!(
+                &src[symbol.byte_start as usize..symbol.byte_end as usize],
+                symbol.name
+            );
+            if src == "fn f() {}" || src == "fn n() {}" {
+                assert_eq!(symbol.byte_start, 3);
+            }
+            if src == "pub fn p() {}" {
+                assert_eq!(symbol.byte_start, 7);
+            }
+        }
+    }
 
     #[test]
     fn lightweight_outline_finds_fn_and_struct() {

@@ -352,3 +352,47 @@ fn catchup_pages_preserve_snapshot_history_approvals_and_frozen_state() {
         assert!(app.selected().unwrap().can_fork());
     }
 }
+
+#[test]
+fn model_not_configured_before_admission_releases_local_prompt() {
+    let mut app = attached(snapshot("idle", 0));
+    app.input.insert("keep this draft");
+    key(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+    app.request_failed(
+        "s1",
+        "session.prompt",
+        "model_not_configured: configure a model",
+    );
+    app.upsert_snapshot(snapshot("idle", 0), true).unwrap();
+    assert!(app.selected().unwrap().can_prompt());
+    assert_eq!(app.input.text(), "keep this draft");
+}
+
+#[test]
+fn model_not_configured_after_admission_preserves_original_task() {
+    let mut app = attached(snapshot("idle", 0));
+    app.input.insert("queued draft");
+    key(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+    app.task_admitted("s1", "original-task");
+    app.request_failed(
+        "s1",
+        "session.prompt",
+        "model_not_configured: configure a model",
+    );
+    app.upsert_snapshot(snapshot("idle", 0), true).unwrap();
+    assert!(!app.selected().unwrap().can_prompt());
+    // An idle snapshot does not authorize cancelling an execution. The
+    // uncertain local prompt remains locked until its original task settles.
+    assert!(key(&mut app, KeyCode::Char('x'), KeyModifiers::CONTROL).is_empty());
+    // Once an authoritative snapshot shows a running execution, cancellation
+    // must still address the admitted original task, not a session-wide task.
+    app.upsert_snapshot(snapshot("running", 0), true).unwrap();
+    assert!(!app.selected().unwrap().can_prompt());
+    assert_eq!(
+        key(&mut app, KeyCode::Char('x'), KeyModifiers::CONTROL),
+        vec![Command::Cancel {
+            session_id: "s1".into(),
+            task_id: "original-task".into()
+        }]
+    );
+}

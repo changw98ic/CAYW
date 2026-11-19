@@ -40,10 +40,10 @@ pub fn definitions() -> Vec<ToolDefinition> {
             object(
                 json!({
                     "image": image.clone(),
-                    "x": {"type":"integer","minimum":0},
-                    "y": {"type":"integer","minimum":0},
-                    "width": {"type":"integer","minimum":1},
-                    "height": {"type":"integer","minimum":1}
+                    "x": {"type":"integer","minimum":0,"maximum":u32::MAX},
+                    "y": {"type":"integer","minimum":0,"maximum":u32::MAX},
+                    "width": {"type":"integer","minimum":1,"maximum":u32::MAX},
+                    "height": {"type":"integer","minimum":1,"maximum":u32::MAX}
                 }),
                 &["image", "x", "y", "width", "height"],
             ),

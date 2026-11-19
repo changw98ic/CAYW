@@ -430,7 +430,16 @@ impl Runtime {
         self.inner.queue.recover(id)?;
         self.inner.changed.notify_waiters();
         self.inner.submissions_changed.notify_waiters();
-        self.get(id)
+        // The execution recovery above is already committed. A missing child
+        // link or a failed observational write is separate audit debt, not a
+        // reason to report that recovery failed or suppress its wakeups.
+        let child_audit_error = self
+            .repair_child_audit(id)
+            .err()
+            .map(|error| error.to_string());
+        let mut view = self.get(id)?;
+        view.child_audit_error = child_audit_error;
+        Ok(view)
     }
 
     pub fn reconcile(&self, id: &str, input: Reconciliation) -> Result<SessionView, RuntimeError> {
@@ -760,8 +769,35 @@ impl Runtime {
                     "Core session {} retains original execution {} and these exact capability terminals",
                     facts.snapshot.id, record.cell_id
                 );
-                let execution_terminal = if all_known {
-                    let terminal = terminal_for(&record, core);
+                let terminal = if all_known {
+                    Some(terminal_for(&record, core))
+                } else if core.is_some()
+                    && (record.backend_error.is_some()
+                        || record.host_settlements.iter().any(|entry| {
+                            let prior = &entry.settlement;
+                            prior.execution == execution
+                                && prior.calls == calls
+                                && prior.evidence == evidence
+                                && prior.execution_terminal.as_ref().is_some_and(|old| {
+                                    old.terminal.outcome_unknown
+                                        && old.terminal.status == CellStatus::OutcomeUnknown
+                                        && old.terminal.error == record.error
+                                        && old.terminal.stop == record.stop
+                                })
+                        }))
+                {
+                    // Core's exact execution terminal was read and verified
+                    // above, independently of its still-unknown capability effects.
+                    Some(CellTerminal {
+                        status: CellStatus::OutcomeUnknown,
+                        error: record.error.clone(),
+                        outcome_unknown: true,
+                        stop: record.stop,
+                    })
+                } else {
+                    None
+                };
+                let execution_terminal = if let Some(terminal) = terminal {
                     // A retry retains the original lifecycle error reference;
                     // its committed Cells audit is the proof it was repaired.
                     let prior = record.host_settlements.iter().find_map(|entry| {

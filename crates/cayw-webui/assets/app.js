@@ -1529,6 +1529,7 @@ await refreshSessions();
     if (!ui['fork-confirm'].checked || ui['fork-button'].disabled || !selected || !canFork(activeView())) return;
     const id = selected;
     const login = loginGeneration;
+    const scope = sessionWorkspaces.get(id) || workspaceId;
     ui['fork-button'].disabled = true;
     ui['fork-button'].textContent = '正在创建…';
     ui['fork-error'].textContent = '';
@@ -1541,7 +1542,9 @@ await refreshSessions();
       const source = views.get(id);
       if (source && login === loginGeneration) rememberView({ ...source, writes: source.writes.filter(write => write.method !== 'session.fork') });
       if (login !== loginGeneration) return;
+      sessionWorkspaces.set(snapshot.id, scope);
       rememberView(forkView);
+      if (scope !== workspaceId) return;
       updateSessionSummary(snapshot);
       ui['fork-dialog'].close();
       await selectSession(snapshot.id);
@@ -1549,11 +1552,13 @@ await refreshSessions();
       if (login === loginGeneration) {
         const source = views.get(id);
         if (source) rememberView({ ...source, writes:source.writes.map(write => write.method === 'session.fork' ? { ...write,phase:'uncertain' } : write) });
+        if (error.auth) { disconnect(error.message); return; }
+        if (scope !== workspaceId) return;
         renderView();
-        if (error.auth) disconnect(error.message);
-        else ui['fork-error'].textContent = errorText(error);
+        ui['fork-error'].textContent = errorText(error);
       }
     } finally {
+      if (login !== loginGeneration) return;
       ui['fork-button'].disabled = false;
       ui['fork-button'].textContent = '另开';
     }

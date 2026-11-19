@@ -225,7 +225,18 @@ fn apply_input(
         if let Some(error) = &execution.terminal.error {
             validate_json(&Value::String(error.clone()), Some(1), limits.item_bytes)?;
         }
-        if record.unresolved()
+        let lifecycle_only = execution.terminal.status == CellStatus::OutcomeUnknown
+            && execution.terminal.outcome_unknown;
+        if lifecycle_only {
+            // Replaying already committed lifecycle evidence must not undo a
+            // later capability reconciliation or restore an old unknown state.
+            if already_applied {
+                return Ok((record, false));
+            }
+            if !record.unresolved() || record.backend_error.is_none() {
+                return Err(CellError::Conflict);
+            }
+        } else if record.unresolved()
             || settlement.calls.len() != record.calls.len()
             || execution.terminal.outcome_unknown
             || !execution.terminal.status.is_terminal()
@@ -250,6 +261,15 @@ fn apply_input(
             return Err(CellError::Conflict);
         }
         record.backend_error = None;
+        if lifecycle_only {
+            // The stopped executor and repaired backend journal say nothing
+            // about unresolved effects. Do not fabricate their outcomes.
+            for call in &mut record.calls {
+                if call.status == IntentStatus::Pending {
+                    call.status = IntentStatus::OutcomeUnknown;
+                }
+            }
+        }
         record.status = execution.terminal.status;
         record.error = terminal_error;
         record.stop = execution.terminal.stop;
@@ -268,7 +288,8 @@ fn apply_input(
                 call.status = IntentStatus::OutcomeUnknown;
             }
         }
-        record.backend_error = None;
+        // Capability settlement does not prove that a failed lifecycle hook
+        // was repaired. Only the execution settlement above clears that debt.
         record.status = CellStatus::OutcomeUnknown;
     }
     if already_applied {

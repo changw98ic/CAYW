@@ -672,3 +672,39 @@ fn large_artifacts_preserve_body_through_preview_update_and_disk_recovery() {
             .unwrap();
     assert_eq!(recovered.store.preview("large").unwrap().html, updated);
 }
+
+#[test]
+fn local_update_commits_state_and_applied_before_cancellation_can_observe_it() {
+    let ws = Arc::new(ArtifactWorkspace::new());
+    put_card(&ws, "card-local", "session-local", "<p>state</p>", 1);
+    let start = Arc::new(std::sync::Barrier::new(2));
+    let cancel_ws = ws.clone();
+    let cancel_start = start.clone();
+    let cancel = std::thread::spawn(move || {
+        cancel_start.wait();
+        cancel_ws.actions.cancel("local-update")
+    });
+    start.wait();
+    let outcome = ws
+        .actions
+        .dispatch(ActionRequest {
+            action_id: "local-update".into(),
+            artifact_id: "card-local".into(),
+            session_id: "session-local".into(),
+            kind: ActionKind::Button,
+            intent: ActionIntent::UpdateState {
+                key: "tab".into(),
+                value_json: "42".into(),
+            },
+            expected_content_version: Some(1),
+            requested_at_ms: 2,
+        })
+        .unwrap();
+    assert_eq!(outcome.record.status, ActionStatus::Applied);
+    assert!(cancel.join().unwrap().is_err());
+    assert_eq!(
+        ws.actions.artifact_state("card-local").unwrap().get("tab"),
+        Some(&"42".to_owned())
+    );
+    assert!(ws.actions.cancel("local-update").is_err());
+}

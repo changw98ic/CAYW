@@ -939,6 +939,9 @@ function buildModel(framework, files, revision, instrument) {
         reason: record.reason,
         file: model.path,
         start: record.startBytes,
+        text_source: record.editable && !record.textDynamic && !record.void
+          && !record.selfClosing && record.contentEndJs !== null
+          ? record.fileSource.slice(record.contentStartJs, record.contentEndJs) : null,
       };
       nodes.push(node);
       byId.set(record.id, { record, model });

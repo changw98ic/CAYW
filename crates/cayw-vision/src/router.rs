@@ -270,10 +270,10 @@ impl VisionRouter {
             result.billed_requests = 0;
             return Ok(result);
         }
-        let before = self.describe.billed_requests();
         let answer = self.describe.describe(image, request, cancel)?;
-        let after = self.describe.billed_requests();
-        let billed = after.saturating_sub(before);
+        // DescribeBackend defines each successful call as one billable request.
+        // A shared cumulative counter also includes concurrent callers.
+        let billed = 1;
         let result = DescribeResult {
             answer,
             image_sha256: image.sha256().to_string(),

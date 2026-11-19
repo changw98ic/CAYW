@@ -1562,3 +1562,176 @@ async fn background_submission_queues_when_tree_full_and_queued_child_can_cancel
         TaskState::Cancelled
     );
 }
+
+#[tokio::test]
+async fn detached_completion_audit_failure_repairs_after_reopen_without_execution() {
+    let temp = tempfile::tempdir().unwrap();
+    let provider = Arc::new(Fixture::default());
+    let settings = config(
+        Some(local(vec![])),
+        vec![ScopedPermission::exact(
+            "agent.run",
+            json!({"prompt":"long child","label":"Bg","mode":"background"}),
+        )],
+    );
+    let runtime = runtime(&temp, provider.clone(), settings.clone());
+    let parent = runtime.create(Some("audit parent".into())).unwrap();
+    let admitted = runtime
+        .enqueue(&parent.id, "spawn background child")
+        .unwrap();
+    let running = {
+        let runtime = runtime.clone();
+        tokio::spawn(async move { runtime.resume(&admitted.id, CancellationToken::new()).await })
+    };
+    let child = child_session(&runtime, &parent.id).await;
+    tokio::time::timeout(WATCHDOG, running)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    let starts = runtime.events(&parent.id, 0, 1000).unwrap();
+    let original = starts
+        .iter()
+        .find(|event| {
+            matches!(&event.event,
+        CoreEvent::Host { kind, .. } if kind == "agent_child_started")
+        })
+        .unwrap()
+        .attempt
+        .clone()
+        .unwrap();
+    let sql = rusqlite::Connection::open(temp.path().join("sessions.db")).unwrap();
+    sql.execute_batch(
+        "CREATE TRIGGER reject_detached_completion BEFORE INSERT ON core_events
+        WHEN json_extract(NEW.record, '$.event.kind')='agent_child_finished'
+        BEGIN SELECT RAISE(ABORT, 'injected detached audit failure'); END;",
+    )
+    .unwrap();
+    let child_task = runtime.tasks(&child).unwrap()[0].id.clone();
+    runtime.fleet_stop(&child_task).unwrap();
+    tokio::time::timeout(WATCHDOG, async {
+        loop {
+            let fleet = runtime.fleet(Some(&parent.id), None, 100).unwrap();
+            let member = &fleet.members[0];
+            if member.audit_error.is_some()
+                && member.state == cayw_runtime::FleetMemberState::Cancelled
+            {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("audit error must be visible separately from child terminal");
+    assert_eq!(
+        runtime.task(&child_task).unwrap().state,
+        TaskState::Cancelled
+    );
+    assert!(host_events(&runtime, &parent.id, "agent_child_finished").is_empty());
+    let scripts = provider.scripts();
+    drop(runtime);
+    sql.execute_batch("DROP TRIGGER reject_detached_completion")
+        .unwrap();
+    drop(sql);
+    let reopened = Runtime::open(
+        temp.path().join("sessions.db"),
+        temp.path().join("workspace"),
+        provider.clone(),
+        Model::new("fixture", "local-agents"),
+        settings,
+    )
+    .unwrap();
+    // No live FleetEntry is needed to reconstruct the persisted association.
+    assert!(
+        reopened
+            .fleet(Some(&parent.id), None, 100)
+            .unwrap()
+            .members
+            .is_empty()
+    );
+    reopened.recover(&parent.id).unwrap();
+    assert_eq!(reopened.repair_child_audit(&parent.id).unwrap(), 1);
+    let finished = host_events(&reopened, &parent.id, "agent_child_finished");
+    assert_eq!(finished.len(), 1);
+    assert_eq!(finished[0]["child_task"], child_task);
+    assert_eq!(
+        finished[0]["parent_attempt"],
+        serde_json::to_value(original).unwrap()
+    );
+    assert_eq!(provider.scripts(), scripts);
+    assert_eq!(
+        reopened.task(&child_task).unwrap().state,
+        TaskState::Cancelled
+    );
+}
+
+#[tokio::test]
+async fn failed_child_link_does_not_turn_successful_recovery_into_failure() {
+    let temp = tempfile::tempdir().unwrap();
+    let provider = Arc::new(Fixture::default());
+    let settings = config(
+        Some(local(vec![])),
+        vec![ScopedPermission::exact(
+            "agent.run",
+            json!({"prompt":"long child","label":"Bg","mode":"background"}),
+        )],
+    );
+    let runtime = runtime(&temp, provider.clone(), settings);
+    let sql = rusqlite::Connection::open(temp.path().join("sessions.db")).unwrap();
+    // Real spawn order: parent started is committed, child linked fails, then
+    // abort_started_child settles the queued child without executing it.
+    sql.execute_batch(
+        "CREATE TRIGGER reject_child_link BEFORE INSERT ON core_events
+        WHEN json_extract(NEW.record, '$.event.kind')='agent_child_linked'
+        BEGIN SELECT RAISE(ABORT, 'injected child link failure'); END;",
+    )
+    .unwrap();
+    let parent = runtime.create(Some("link failure parent".into())).unwrap();
+    let admitted = runtime
+        .enqueue(&parent.id, "spawn background child")
+        .unwrap();
+    let _ = tokio::time::timeout(
+        WATCHDOG,
+        runtime.resume(&admitted.id, CancellationToken::new()),
+    )
+    .await
+    .unwrap();
+    let starts = host_events(&runtime, &parent.id, "agent_child_started");
+    assert!(!starts.is_empty());
+    for started in &starts {
+        let child_task = started["child_task"].as_str().unwrap();
+        let child_session = started["child_session"].as_str().unwrap();
+        let task = runtime.task(child_task).unwrap();
+        assert_eq!(task.state, TaskState::Failed);
+        assert!(!task.holds_slot);
+        assert!(task.attempt_id.is_none(), "aborted queued child never ran");
+        assert!(host_events(&runtime, child_session, "agent_child_linked").is_empty());
+    }
+    sql.execute_batch("DROP TRIGGER reject_child_link").unwrap();
+    let scripts = provider.scripts();
+    for _ in 0..2 {
+        let recovered = runtime
+            .recover(&parent.id)
+            .expect("primary recovery must succeed");
+        assert!(recovered.attempt.is_none());
+        assert!(
+            recovered
+                .child_audit_error
+                .as_deref()
+                .is_some_and(|error| error.contains("matching durable link"))
+        );
+        let encoded = serde_json::to_value(&recovered).unwrap();
+        assert!(encoded["child_audit_error"].is_string());
+        assert!(
+            runtime.repair_child_audit(&parent.id).is_err(),
+            "explicit audit repair continues to report the missing evidence"
+        );
+    }
+    assert!(host_events(&runtime, &parent.id, "agent_child_finished").is_empty());
+    assert_eq!(
+        provider.scripts(),
+        scripts,
+        "audit repair must not rerun children"
+    );
+    assert!(runtime.enqueue(&parent.id, "parent follow up").is_ok());
+}

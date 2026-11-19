@@ -1144,11 +1144,22 @@ impl BackgroundRegistry {
         let view = self
             .load(id)?
             .ok_or_else(|| RuntimeError::InvalidInput("background task not found".into()))?;
+        self.request_kill_loaded(id, view)
+    }
+
+    fn request_kill_loaded(
+        &self,
+        id: &str,
+        view: BackgroundTaskView,
+    ) -> Result<BackgroundTaskView, RuntimeError> {
         if view.status.is_terminal() {
             return Ok(view);
         }
-        if let Some(live) = lock(&self.live).get(id) {
-            live.cancel.cancel();
+        // Never hold live while acquiring connection: recovery takes them in
+        // the opposite order. The token remains valid if the task finishes.
+        let local_cancel = { lock(&self.live).get(id).map(|live| live.cancel.clone()) };
+        if let Some(cancel) = local_cancel {
+            cancel.cancel();
             let connection = lock(&self.connection);
             connection.execute(
                 "INSERT INTO runtime_background_cancels(task_id, requested_ms) VALUES(?1, ?2)
@@ -2544,6 +2555,62 @@ mod tests {
             )
             .unwrap();
         assert!(registry.try_lock_background(&id).unwrap().is_some());
+    }
+
+    #[test]
+    fn cancel_releases_live_before_waiting_for_the_database() {
+        let dir = tempdir().unwrap();
+        let registry = Arc::new(
+            BackgroundRegistry::open(
+                &dir.path().join("sessions.db"),
+                &BackgroundConfig::default(),
+            )
+            .unwrap(),
+        );
+        let id = hex32(0x47);
+        insert(&registry, &id);
+        let cancel = CancellationToken::new();
+        let file = registry.try_lock_background(&id).unwrap().unwrap();
+        lock(&registry.live).insert(
+            id.clone(),
+            LiveHandle {
+                cancel: cancel.clone(),
+                _lock: Arc::new(file),
+                persistence_failure: None,
+                execution_done: false,
+            },
+        );
+        let view = registry.load(&id).unwrap().unwrap();
+        // Model recovery's connection -> live ordering, after kill's initial load.
+        let connection = lock(&registry.connection);
+        let worker = {
+            let registry = registry.clone();
+            let id = id.clone();
+            std::thread::spawn(move || registry.request_kill_loaded(&id, view))
+        };
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        while !cancel.is_cancelled() && std::time::Instant::now() < deadline {
+            std::thread::yield_now();
+        }
+        let cancelled = cancel.is_cancelled();
+        let live_available = registry.live.try_lock().is_ok();
+        // Always release the database before reporting a regression, so the
+        // worker can exit even with the former inverted lock order.
+        drop(connection);
+        worker.join().unwrap().unwrap();
+        assert!(cancelled, "the local cancellation path must have run");
+        assert!(
+            live_available,
+            "recovery must be able to inspect live while holding connection"
+        );
+        let count: i64 = lock(&registry.connection)
+            .query_row(
+                "SELECT count(*) FROM runtime_background_cancels WHERE task_id=?1",
+                [&id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(count, 1);
     }
 
     #[test]

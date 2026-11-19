@@ -726,6 +726,7 @@ impl ChildService {
                     cancel: child_cancel.clone(),
                     state: FleetMemberState::Queued,
                     error: None,
+                    audit_error: None,
                     control: Mutex::new(None),
                 },
             )
@@ -1235,12 +1236,14 @@ async fn finish_detached(
         }
     };
     if join_ok && outcome.confirmed() && !outcome.unknown() {
-        let event = finish_event(&context, &outcome);
-        let _ =
-            context
-                .inner
-                .store
-                .append_host_event(&context.lease, "agent_child_finished", event);
+        let runtime = Runtime {
+            inner: context.inner.clone(),
+        };
+        let audit_error = runtime
+            .repair_detached_child_audit(&context.lease.session_id, Some(&task_id))
+            .err()
+            .map(|error| error.to_string());
+        context.inner.fleet.set_audit_error(&task_id, audit_error);
         context.inner.fleet.mark_terminal(
             &task_id,
             FleetMemberState::from_task(outcome.state),
@@ -1536,6 +1539,101 @@ impl RunScope {
             max_capability_calls: Some(1024),
             max_capability_bytes: Some(1024),
         }
+    }
+}
+
+impl Runtime {
+    /// Explicitly repairs missing detached-child completion observations from
+    /// durable start links and terminal queue records. It never runs a child.
+    /// Also available after reopen, when the in-memory Fleet registry is empty.
+    pub fn repair_child_audit(&self, parent_session: &str) -> Result<usize, RuntimeError> {
+        self.repair_detached_child_audit(parent_session, None)
+    }
+
+    fn repair_detached_child_audit(
+        &self,
+        parent_session: &str,
+        only_child: Option<&str>,
+    ) -> Result<usize, RuntimeError> {
+        let mut after = 0;
+        let mut confirmed = 0;
+        loop {
+            let events = self.inner.store.events_by_kind(
+                parent_session,
+                after,
+                256,
+                "host",
+                Some("agent_child_started"),
+            )?;
+            if events.is_empty() {
+                break;
+            }
+            for event in events {
+                after = event.cursor;
+                let cayw_core::CoreEvent::Host { data: identity, .. } = &event.event else {
+                    continue;
+                };
+                if identity["detached"] != true {
+                    continue;
+                }
+                let child_task = identity["child_task"].as_str().ok_or_else(|| {
+                    RuntimeError::InvalidInput("child start has no task identity".into())
+                })?;
+                if only_child.is_some_and(|id| id != child_task) {
+                    continue;
+                }
+                let task = self.inner.queue.get(child_task)?;
+                if !matches!(
+                    task.state,
+                    TaskState::Completed | TaskState::Failed | TaskState::Cancelled
+                ) || task.holds_slot
+                {
+                    continue;
+                }
+                if identity["child_session"] != task.session_id {
+                    return Err(RuntimeError::InvalidInput(
+                        "child task and start session differ".into(),
+                    ));
+                }
+                let parent = event.attempt.as_ref().ok_or_else(|| {
+                    RuntimeError::InvalidInput("child start has no original parent attempt".into())
+                })?;
+                // This completion is reconstructible from the durable task. The
+                // transient returned text is not an audit source after reopen.
+                let data = json!({
+                    "parent_session": parent_session,
+                    "parent_task": identity["parent_task"],
+                    "child_session": task.session_id,
+                    "child_task": task.id,
+                    "depth": identity["depth"],
+                    "label": identity["label"].as_str().map(|text| bounded(text, RESULT_LABEL_BYTES)),
+                    "state": task.state,
+                    "error": task.error.as_deref().map(|text| bounded(text, RESULT_ERROR_BYTES)),
+                });
+                match self
+                    .inner
+                    .store
+                    .append_detached_child_completion(parent, event.cursor, data)
+                {
+                    Ok(_) => {
+                        self.inner.fleet.set_audit_error(child_task, None);
+                        confirmed += 1;
+                    }
+                    Err(error) => {
+                        self.inner
+                            .fleet
+                            .set_audit_error(child_task, Some(error.to_string()));
+                        return Err(error.into());
+                    }
+                }
+            }
+        }
+        if only_child.is_some() && confirmed == 0 {
+            return Err(RuntimeError::InvalidInput(
+                "detached child terminal/start link unavailable".into(),
+            ));
+        }
+        Ok(confirmed)
     }
 }
 

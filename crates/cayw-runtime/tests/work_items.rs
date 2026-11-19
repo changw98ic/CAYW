@@ -373,6 +373,7 @@ fn notifications_save_intent_before_receipt_and_never_blindly_resend() {
             Some("result:1"),
             &[],
             &targets,
+            None,
         )
         .expect("intent");
     assert_eq!(notification.status, NotificationStatus::Pending);
@@ -391,6 +392,7 @@ fn notifications_save_intent_before_receipt_and_never_blindly_resend() {
             None,
             &[],
             &targets,
+            None,
         )
         .is_err()
     );

@@ -2610,3 +2610,62 @@ async fn session_content_scope_preserves_configured_and_disabled_services() {
     let fetch_html = String::from_utf8(fetch_body).expect("valid utf-8 HTML body");
     assert!(fetch_html.contains("Example Domain"));
 }
+
+#[tokio::test]
+async fn scope_local_memory_protection_reaches_native_and_workspace_writes() {
+    let temp = Workspace::new();
+    std::fs::create_dir(temp.path().join("memory")).unwrap();
+    let (trusted, gate, audit) = host(temp.path(), HostConfig::default());
+    let restricted = trusted
+        .as_ref()
+        .clone()
+        .with_read_only_directory("memory")
+        .unwrap();
+    let scoped = restricted.scoped(gate.clone(), audit.clone()).unwrap();
+    let task = restricted.task_host(gate, audit).unwrap();
+    for scope in [&restricted, &scoped, &task] {
+        for path in ["memory/new.txt", "Memory/new.txt"] {
+            if path.starts_with("Memory") && !temp.path().join("Memory").exists() {
+                continue; // The alias assertion executes on a real insensitive volume.
+            }
+            let error = call(scope, "fs.write", json!({"path":path,"content":"model"}))
+                .await
+                .unwrap_err();
+            assert!(error.message.contains("read-only"), "{error}");
+        }
+        let error = call(
+            scope,
+            "fs.mkdir",
+            json!({"path":"memory/new-dir","expected_absent":true}),
+        )
+        .await
+        .unwrap_err();
+        assert!(error.message.contains("read-only"), "{error}");
+    }
+    assert!(!temp.path().join("memory/new.txt").exists());
+    call(
+        &trusted,
+        "fs.write",
+        json!({"path":"memory/new.txt","content":"trusted"}),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        std::fs::read_to_string(temp.path().join("memory/new.txt")).unwrap(),
+        "trusted"
+    );
+    use sha2::{Digest, Sha256};
+    let digest = format!("{:x}", Sha256::digest(b"trusted"));
+    let error = call(
+        &restricted,
+        "fs.patch",
+        json!({"path":"memory/new.txt","old":"trusted","new":"model","expected_sha256":digest}),
+    )
+    .await
+    .unwrap_err();
+    assert!(error.message.contains("read-only"), "{error}");
+    assert_eq!(
+        std::fs::read_to_string(temp.path().join("memory/new.txt")).unwrap(),
+        "trusted"
+    );
+}

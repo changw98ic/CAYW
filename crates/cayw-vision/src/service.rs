@@ -197,10 +197,18 @@ impl VisionService {
 
     fn crop(&self, args: &Value) -> Result<Value, VisionError> {
         let image = self.decode_image(&args["image"])?;
-        let x = args["x"].as_u64().unwrap_or(0) as u32;
-        let y = args["y"].as_u64().unwrap_or(0) as u32;
-        let width = args["width"].as_u64().unwrap_or(0) as u32;
-        let height = args["height"].as_u64().unwrap_or(0) as u32;
+        let coordinate = |field: &str| {
+            args[field]
+                .as_u64()
+                .and_then(|value| u32::try_from(value).ok())
+                .ok_or_else(|| {
+                    VisionError::InvalidInput(format!("crop {field} must be a u32 integer"))
+                })
+        };
+        let x = coordinate("x")?;
+        let y = coordinate("y")?;
+        let width = coordinate("width")?;
+        let height = coordinate("height")?;
         let cropped = self
             .router
             .crop(&image, Region::new(x, y, width, height)?)?;
@@ -310,12 +318,10 @@ pub fn execute(
             if worker_token.is_cancelled() {
                 return Err(error("cancelled", "vision operation cancelled"));
             }
-            let result = service.execute_value(&name, &args, &worker_token);
-            if worker_token.is_cancelled() {
-                Err(error("cancelled", "vision operation cancelled"))
-            } else {
-                result
-            }
+            // The operation owns its result: cancellation arriving during a
+            // successful sink commit cannot turn that committed write into a
+            // cancelled failure (nor erase an unknown effect).
+            service.execute_value(&name, &args, &worker_token)
         });
         let cancelled = tokio::select! {
             biased;
@@ -328,8 +334,7 @@ pub fn execute(
         let _ = cancelled;
         // Cancel won: backends KillOnDrop the child; await join so cleanup finishes.
         let result = match handle.await {
-            Ok(Err(err)) => Err(err),
-            Ok(Ok(_)) => Err(error("cancelled", "vision operation cancelled")),
+            Ok(result) => result,
             Err(_) => Err(error("worker", "vision worker failed")),
         };
         drop(guard);
@@ -356,5 +361,10 @@ fn vision_error(err: VisionError) -> CapabilityError {
 }
 
 fn error(kind: &str, message: impl std::fmt::Display) -> CapabilityError {
-    CapabilityError::new(format!("{kind}: {message}"))
+    let message = format!("{kind}: {message}");
+    if kind == "cancelled" {
+        CapabilityError::stopped(cayw_codemode::CapabilityStop::Cancelled, message)
+    } else {
+        CapabilityError::new(message)
+    }
 }

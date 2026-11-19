@@ -119,6 +119,7 @@ pub fn parse_duckduckgo_response(html: Option<&str>, status: Option<u16>) -> Sea
             ),
         };
         return SearchResponse::empty(
+            PROVIDER,
             reason,
             Some(SearchEvidence {
                 http_status: Some(status_code),
@@ -131,6 +132,7 @@ pub fn parse_duckduckgo_response(html: Option<&str>, status: Option<u16>) -> Sea
     // HTTP 200 path: check whether HTTP original text exists
     let Some(raw_html) = html else {
         return SearchResponse::empty(
+            PROVIDER,
             SearchEmptyReason::Unattributed,
             Some(SearchEvidence {
                 http_status: Some(status_code),
@@ -144,6 +146,7 @@ pub fn parse_duckduckgo_response(html: Option<&str>, status: Option<u16>) -> Sea
 
     if raw_html.trim().is_empty() {
         return SearchResponse::empty(
+            PROVIDER,
             SearchEmptyReason::Unattributed,
             Some(SearchEvidence {
                 http_status: Some(status_code),
@@ -158,7 +161,7 @@ pub fn parse_duckduckgo_response(html: Option<&str>, status: Option<u16>) -> Sea
     // Parse result anchors (`result__a`)
     let hits = extract_ddg_hits(raw_html);
     if !hits.is_empty() {
-        let mut response = SearchResponse::new(hits);
+        let mut response = SearchResponse::new(PROVIDER, hits);
         if has_next_page(raw_html) {
             response.truncated = true;
             response.evidence = Some(SearchEvidence {
@@ -179,6 +182,7 @@ pub fn parse_duckduckgo_response(html: Option<&str>, status: Option<u16>) -> Sea
     if is_ddg_challenge(&lower) {
         let summary = extract_challenge_summary(raw_html);
         SearchResponse::empty(
+            PROVIDER,
             SearchEmptyReason::Challenge,
             Some(SearchEvidence {
                 http_status: Some(status_code),
@@ -189,6 +193,7 @@ pub fn parse_duckduckgo_response(html: Option<&str>, status: Option<u16>) -> Sea
     } else if is_ddg_true_empty(&lower) {
         let summary = extract_no_results_summary(raw_html);
         SearchResponse::empty(
+            PROVIDER,
             SearchEmptyReason::TrueEmpty,
             Some(SearchEvidence {
                 http_status: Some(status_code),
@@ -199,6 +204,7 @@ pub fn parse_duckduckgo_response(html: Option<&str>, status: Option<u16>) -> Sea
     } else {
         let summary = extract_structural_mismatch_summary(raw_html);
         SearchResponse::empty(
+            PROVIDER,
             SearchEmptyReason::StructuralMismatch,
             Some(SearchEvidence {
                 http_status: Some(status_code),

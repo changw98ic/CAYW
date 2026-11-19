@@ -396,6 +396,11 @@ impl Backend {
             .host_root
             .task_host(Arc::new(CatalogGate), Arc::new(CatalogAudit))
             .map_err(|error| RuntimeError::Workspace(error.to_string()))?;
+        if context.inner.config.main_session {
+            host = host
+                .with_read_only_directory(crate::main_memory::MEMORY_DIRECTORY)
+                .map_err(|error| RuntimeError::Workspace(error.to_string()))?;
+        }
         if let Some(content) = &context.inner.content {
             host = host.with_session_content(content.clone(), &context.lease.session_id);
         }

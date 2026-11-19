@@ -689,3 +689,25 @@ test('older messages can be loaded and long messages are not clipped', async t =
   assert(app.ui.messages.textContent.includes('LAST_TAIL'));
   assert(!/id="prompt"[^>]*maxlength/.test(html));
 });
+
+test('fork receipt after workspace switch keeps its original workspace', async t => {
+ let release; let active='A';
+ const frozen=snapshot({frozen:true,binding:{plugin_id:'missing',frozen:true}});
+ const app=await page(t,async(method,params)=>{
+  if(method==='settings.workspaces.list') return {workspaces:[{id:'A',path:'/A'},{id:'B',path:'/B'}]};
+  if(method==='settings.workspace')return {workspace:'/A'};
+  if(method==='settings.workspaces.open'){active=params.id;return{id:params.id,path:'/'+params.id};}
+  if(method==='session.list')return active==='A'?[frozen]:[];
+  if(method==='session.get')return params.session_id==='forkA'?snapshot({id:'forkA'}):frozen;
+  if(method==='session.events')return [];
+  if(method==='session.fork')return await new Promise(r=>release=r);
+ });
+ await app.ui['open-fork'].dispatch('click'); app.ui['fork-confirm'].checked=true;
+ const pending=app.ui['fork-form'].dispatch('submit');
+ while(!release)await new Promise(r=>setTimeout(r,5));
+ app.ui['workspace-choice'].value='B';await app.ui['switch-workspace'].dispatch('click');
+ release(snapshot({id:'forkA'}));await pending;
+ const get=app.calls.find(c=>c.method==='session.get'&&c.params.session_id==='forkA');
+ assert.equal(get, undefined);
+
+});

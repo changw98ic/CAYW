@@ -1367,3 +1367,84 @@ async fn start_persistence_failure_stops_before_effect_and_conservatively_requir
     assert_eq!(rt.get(&id).unwrap().state, SessionState::Idle);
     assert_eq!(provider.calls.load(Ordering::SeqCst), 1);
 }
+
+#[tokio::test]
+async fn unresolved_capability_does_not_freeze_a_repaired_lifecycle() {
+    let dir = setup();
+    let service = Arc::new(UnknownService(AtomicUsize::new(0)));
+    let mut config = RuntimeConfig::default();
+    config.host.external = Some(service.clone());
+    config.permissions = vec![ScopedPermission::exact(
+        "search.query",
+        json!({"query":"test"}),
+    )];
+    let provider = Arc::new(Script {
+        script: "return cayw.call('search.query',{query='test'})",
+        calls: AtomicUsize::new(0),
+    });
+    let rt = open(&dir, provider.clone(), config);
+    let id = rt.create(None).unwrap().id;
+    let db = rusqlite::Connection::open(dir.path().join("sessions.db")).unwrap();
+    db.execute_batch(
+        "CREATE TRIGGER reject_execution_finish BEFORE INSERT ON core_events
+         WHEN json_extract(NEW.record,'$.event.type')='execution_finished'
+         BEGIN SELECT RAISE(ABORT,'synthetic backend lifecycle failure'); END;",
+    )
+    .unwrap();
+    assert!(
+        rt.prompt(
+            &id,
+            "lose response and lifecycle record",
+            CancellationToken::new()
+        )
+        .await
+        .is_err()
+    );
+    let body = || -> Value {
+        let text: String = db
+            .query_row("SELECT body FROM cells_v1 WHERE session=?1", [&id], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        serde_json::from_str(&text).unwrap()
+    };
+    let original_error = body()["backend_error"].clone();
+    assert!(
+        original_error
+            .as_str()
+            .unwrap()
+            .contains("synthetic backend lifecycle failure")
+    );
+    db.execute_batch("DROP TRIGGER reject_execution_finish")
+        .unwrap();
+    // Core has durably repaired its execution terminal. This discharges the
+    // lifecycle hook without making the capability outcome known.
+    let recovered = rt.recover(&id).unwrap();
+    assert_eq!(recovered.state, SessionState::Idle);
+    assert!(body()["backend_error"].is_null());
+    assert_eq!(body()["status"], "outcome_unknown");
+    assert_eq!(
+        body()["host_settlements"][0]["settlement"]["execution_terminal"]["expected_backend_error"],
+        original_error
+    );
+    let view = rt.get(&id).unwrap();
+    assert_eq!(view.unresolved_capabilities.len(), 1);
+    let call = view.unresolved_capabilities[0].clone();
+    let input = host_receipt(
+        &dir,
+        CapabilityReconciliation {
+            expected: (&call).into(),
+            key: call.key.clone(),
+            actor: "fixture-host".into(),
+            evidence: "Synthetic service observed one effect".into(),
+            outcome: CapabilityOutcome::Completed {
+                result: json!({"count":1}),
+            },
+            external_provenance: call.external_provenance,
+        },
+    );
+    rt.reconcile_capability(&id, input).unwrap();
+    assert!(body()["backend_error"].is_null());
+    assert_eq!(service.0.load(Ordering::SeqCst), 1);
+    assert_eq!(provider.calls.load(Ordering::SeqCst), 1);
+}

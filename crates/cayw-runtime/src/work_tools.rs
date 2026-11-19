@@ -716,6 +716,22 @@ impl Service<'_> {
         Ok(item)
     }
 
+    fn notification_owner(
+        &self,
+        notification: &crate::work_items::Notification,
+    ) -> Result<(), CapabilityError> {
+        if let Some(owner) = notification.owner_session_id.as_deref() {
+            if owner != self.owner() {
+                return Err(known("notification belongs to a different main session"));
+            }
+            if notification.work_id == "main-session" {
+                return Ok(());
+            }
+        }
+        self.item(&notification.work_id)?;
+        Ok(())
+    }
+
     async fn attach_and_sync_dispatched_task(
         &self,
         router: &Arc<dyn WorkRouter>,
@@ -1193,7 +1209,7 @@ impl cayw_host::ExternalHost for Service<'_> {
                     known("this criterion has no program check; the user judges it")
                 })?;
                 let passed = check
-                    .evaluate(self.scope.context.inner.root.as_path())
+                    .evaluate_root(&self.scope.context.inner.acceptance_root)
                     .map_err(known)?;
                 let work = owner
                     .record_program_acceptance(
@@ -1267,6 +1283,7 @@ impl cayw_host::ExternalHost for Service<'_> {
                         input.content_ref.as_deref(),
                         &input.artifact_refs,
                         &self.scope.context.inner.config.notification_targets,
+                        Some(self.owner()),
                     )
                     .map_err(known)?;
                 let decision = self
@@ -1288,7 +1305,7 @@ impl cayw_host::ExternalHost for Service<'_> {
                     .notification(&input.notification_id)
                     .map_err(known)?
                     .ok_or_else(|| known("notification not found"))?;
-                self.item(&notification.work_id)?;
+                self.notification_owner(&notification)?;
                 let decision = self
                     .scope
                     .context
@@ -1308,7 +1325,7 @@ impl cayw_host::ExternalHost for Service<'_> {
                     .notification(&input.notification_id)
                     .map_err(known)?
                     .ok_or_else(|| known("notification not found"))?;
-                self.item(&notification.work_id)?;
+                self.notification_owner(&notification)?;
                 encode(notification)
             }
             NOTIFY_LIST => {
@@ -1324,13 +1341,62 @@ impl cayw_host::ExternalHost for Service<'_> {
                 )
             }
             NOTIFY_SEND | WORK_NOTIFY_SEND => {
-                let input: NotifySendInput = serde_json::from_value(arguments).map_err(known)?;
-                if let Some(work_id) = input.work_id.as_deref() {
+                let mut input: NotifySendInput =
+                    serde_json::from_value(arguments).map_err(known)?;
+                if input.notification_id.is_none() && input.work_id.is_none() {
+                    let target = input
+                        .target
+                        .as_deref()
+                        .ok_or_else(|| known("notification target is required"))?;
+                    let notification = self
+                        .scope
+                        .context
+                        .inner
+                        .work_items
+                        .prepare_notification(
+                            "main-session",
+                            input.work_version.unwrap_or(1),
+                            target,
+                            input.content_ref.as_deref().or(input.text.as_deref()),
+                            &input.artifact_refs,
+                            &self.scope.context.inner.config.notification_targets,
+                            Some(self.owner()),
+                        )
+                        .map_err(known)?;
+                    input.notification_id = Some(notification.notification_id);
+                }
+                if let Some(id) = input.notification_id.as_deref() {
+                    let notification = self
+                        .scope
+                        .context
+                        .inner
+                        .work_items
+                        .notification(id)
+                        .map_err(known)?
+                        .ok_or_else(|| known("notification not found"))?;
+                    self.notification_owner(&notification)?;
+                    if input
+                        .work_id
+                        .as_ref()
+                        .is_some_and(|id| id != &notification.work_id)
+                        || input
+                            .target
+                            .as_ref()
+                            .is_some_and(|target| target != &notification.target)
+                        || input
+                            .work_version
+                            .is_some_and(|version| version != notification.work_version)
+                    {
+                        return Err(known(
+                            "notification identity conflicts with the stored intent",
+                        ));
+                    }
+                } else if let Some(work_id) = input.work_id.as_deref() {
                     self.item(work_id)?;
                 }
                 let notification = self
                     .runtime()
-                    .send_notification(
+                    .send_notification_async(
                         input.notification_id.as_deref(),
                         input.work_id.as_deref(),
                         input.work_version,
@@ -1338,8 +1404,16 @@ impl cayw_host::ExternalHost for Service<'_> {
                         input.text.as_deref(),
                         input.content_ref.as_deref(),
                         &input.artifact_refs,
+                        cancel.clone(),
                     )
-                    .map_err(known)?;
+                    .await
+                    .map_err(|error| {
+                        if error.outcome_unknown() {
+                            CapabilityError::unknown(error.to_string())
+                        } else {
+                            known(error)
+                        }
+                    })?;
                 encode(notification)
             }
             PROACTIVE_TRIGGER => {

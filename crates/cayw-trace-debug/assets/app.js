@@ -47,6 +47,7 @@
   var editorNotice = null;
   var pendingSave = false;
   var pendingUndo = false;
+  var undoRequest = 0;
   var undoNotice = null;
 
   var nodeElements = new Map();
@@ -677,7 +678,7 @@
       selectedNode = null;
       editorKey = null;
     }
-    if (moduleFilter && (!plan || !plan.nodes.some(function (node) { return node.module === moduleFilter; }))) {
+    if (moduleFilter !== null && (!plan || !plan.nodes.some(function (node) { return node.module === moduleFilter; }))) {
       moduleFilter = null;
     }
     if (compareVersion !== null && !evaluations.some(function (item) { return item.version === compareVersion; })) {
@@ -832,6 +833,7 @@
     editorKey = null;
     pendingSave = false;
     pendingUndo = false;
+    undoRequest += 1;
     ui['workspace'].hidden = true;
     ui['login-panel'].hidden = false;
     ui['web-token'].value = '';
@@ -1531,7 +1533,7 @@
 
     var visible = new Set();
     nodes.forEach(function (node) {
-      if (!moduleFilter || node.module === moduleFilter) visible.add(node.id);
+      if (moduleFilter === null || node.module === moduleFilter) visible.add(node.id);
     });
 
     edges.forEach(function (edge) {
@@ -1676,7 +1678,7 @@
     var order = [];
     var groups = new Map();
     nodes.forEach(function (node) {
-      var name = node.module || '未命名模块';
+      var name = node.module;
       if (!groups.has(name)) {
         groups.set(name, []);
         order.push(name);
@@ -1743,7 +1745,7 @@
 
     var transitions = actualTransitions(evaluation);
     var modulesById = new Map();
-    plan.nodes.forEach(function (node) { modulesById.set(node.id, node.module || '未命名模块'); });
+    plan.nodes.forEach(function (node) { modulesById.set(node.id, node.module); });
     var aggregate = new Map();
     function aggregateEdge(from, to) {
       if (from === to || !layout.positions.has(from) || !layout.positions.has(to)) return null;
@@ -1827,7 +1829,7 @@
         class: classes.join(' '),
         tabindex: '0',
         role: 'button',
-        'aria-label': '模块 ' + name + '，' + moduleNodes.length + ' 个节点，状态 ' + statusLabel(status)
+        'aria-label': '模块 ' + (name || '未命名模块') + '，' + moduleNodes.length + ' 个节点，状态 ' + statusLabel(status)
       });
       group.dataset.module = name;
       group.append(svgEl('rect', {
@@ -1847,13 +1849,13 @@
         rx: 8
       }));
       var title = svgEl('text', { class: 'g-title', x: position.x + 12, y: position.y + 26 });
-      title.textContent = clip(name, 26);
+      title.textContent = clip(name || '未命名模块', 26);
       var meta = svgEl('text', { class: 'g-meta', x: position.x + 12, y: position.y + 46 });
       meta.textContent = moduleNodes.length + ' 个节点 · ' + executed + ' 步已执行' + (failed ? ' · ' + failed + ' 个错误' : '');
       var meta2 = svgEl('text', { class: 'g-meta', x: position.x + 12, y: position.y + 62 });
       meta2.textContent = '状态 ' + statusLabel(status);
       var fullTitle = svgEl('title');
-      fullTitle.textContent = '模块 ' + name + '\n节点：' + moduleNodes.map(function (node) { return node.id; }).join(', ');
+      fullTitle.textContent = '模块 ' + (name || '未命名模块') + '\n节点：' + moduleNodes.map(function (node) { return node.id; }).join(', ');
       group.append(title, meta, meta2, fullTitle);
       group.addEventListener('click', function () { drillModule(name); });
       group.addEventListener('keydown', function (event) {
@@ -1867,7 +1869,7 @@
     });
 
     container.append(svg);
-    if (focusedModule && moduleElements.has(focusedModule)) {
+    if (focusedModule !== null && moduleElements.has(focusedModule)) {
       try { moduleElements.get(focusedModule).focus({ preventScroll: true }); } catch (error) { /* keep going */ }
     }
   }
@@ -1876,9 +1878,9 @@
     var plan = planForSelected();
     var evaluation = currentEvaluation();
     var project = currentProject();
-    ui['graph-filter-label'].textContent = moduleFilter ? '已下钻：' + clip(moduleFilter, 60) : '显示全部模块';
-    ui['graph-show-all'].hidden = !moduleFilter;
-    ui['module-graph-note'].textContent = moduleFilter ? '当前高亮模块：' + clip(moduleFilter, 60) : '点击模块下钻到节点图。';
+    ui['graph-filter-label'].textContent = moduleFilter !== null ? '已下钻：' + clip(moduleFilter || '未命名模块', 60) : '显示全部模块';
+    ui['graph-show-all'].hidden = moduleFilter === null;
+    ui['module-graph-note'].textContent = moduleFilter !== null ? '当前高亮模块：' + clip(moduleFilter || '未命名模块', 60) : '点击模块下钻到节点图。';
     renderModuleGraph(plan, evaluation, project);
     renderNodeGraph(plan, evaluation, project);
   }
@@ -1890,7 +1892,7 @@
     if (!node) return;
     if (selectedNode !== id) editorNotice = null;
     selectedNode = id;
-    if (moduleFilter && node.module !== moduleFilter) moduleFilter = null;
+    if (moduleFilter !== null && node.module !== moduleFilter) moduleFilter = null;
     renderGraphs();
     renderTimeline();
     renderNodeDetail();
@@ -2321,6 +2323,8 @@
     if (undoTarget === expected) return;
     var projectId = project.id;
     var target = undoTarget;
+    var request = ++undoRequest;
+    var current = function () { return request === undoRequest && selectedProject === projectId; };
     pendingUndo = true;
     undoNotice = null;
     updateActionButtons();
@@ -2331,6 +2335,7 @@
         method: 'POST',
         body: JSON.stringify({ expected_version: expected, target_version: target })
       }, 60000);
+      if (request !== undoRequest) return;
       if (result.status === 401) {
         disconnect('网页访问令牌已失效，请重新连接。');
         return;
@@ -2339,46 +2344,46 @@
         var message = '版本冲突：' + (extractError(result.payload) || '服务端已有更新') + ' 撤销没有执行，已刷新状态。';
         if (checkDocument(result.payload)) applyDocument(result.payload, { force: true });
         else await refreshState();
-        undoNotice = { kind: 'error', text: message };
+        if (current()) undoNotice = { kind: 'error', text: message };
         return;
       }
       if (result.status === 422 || result.status === 400) {
-        undoNotice = { kind: 'error', text: '撤销被拒绝：' + (extractError(result.payload) || '目标版本无效。') };
+        if (current()) undoNotice = { kind: 'error', text: '撤销被拒绝：' + (extractError(result.payload) || '目标版本无效。') };
         return;
       }
       if (result.status !== 200 || !checkDocument(result.payload)) {
-        undoNotice = { kind: 'error', text: '撤销失败（HTTP ' + result.status + '）。' };
+        if (current()) undoNotice = { kind: 'error', text: '撤销失败（HTTP ' + result.status + '）。' };
         return;
       }
 
       Array.from(drafts.keys()).forEach(function (key) {
         if (key.indexOf(projectId + '\u001f') === 0) drafts.delete(key);
       });
-      editorKey = null;
-      editorNotice = null;
+      if (current()) { editorKey = null; editorNotice = null; }
       var updated = result.payload.projects && result.payload.projects[projectId] ? result.payload.projects[projectId] : null;
       var latest = updated ? latestEvaluationVersion(updated) : null;
       var newVersion = updated ? projectVersion(updated) : null;
       var ready = latest !== null && newVersion !== null && newVersion > expected && latest >= newVersion;
-      if (ready) selectedEvaluation = latest;
+      if (ready && current()) selectedEvaluation = latest;
       applyDocument(result.payload, { force: true });
-      undoNotice = {
+      if (current()) undoNotice = {
         kind: 'ok',
         text: '已撤销到 v' + target + (newVersion !== null ? '，并新建 v' + newVersion : '') +
           (ready ? '，当前显示第 v' + latest + ' 轮结果' : '，等待新的结果轮次') + '。草稿已清空。'
       };
-      undoTarget = null;
+      if (current()) undoTarget = null;
       normalizeSelection();
       renderAll();
     } catch (error) {
-      undoNotice = {
+      if (current()) undoNotice = {
         kind: 'error',
         text: error && error.name === 'AbortError'
           ? '撤销请求超时，结果未确认。页面会继续刷新状态。'
           : '连接中断，撤销结果未确认。页面会继续刷新状态。'
       };
-      refreshNow();
+      if (request === undoRequest) refreshNow();
     } finally {
+      if (request !== undoRequest) return;
       pendingUndo = false;
       updateActionButtons();
       renderHistory();

@@ -97,6 +97,8 @@ pub struct SearchResult {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SearchResponse {
+    /// Backend that produced this response, including fallback results.
+    pub provider: String,
     pub hits: Vec<SearchHit>,
     /// The provider stopped before establishing that its result set was exhausted.
     #[serde(default)]
@@ -108,8 +110,9 @@ pub struct SearchResponse {
 }
 
 impl SearchResponse {
-    pub fn new(hits: Vec<SearchHit>) -> Self {
+    pub fn new(provider: impl Into<String>, hits: Vec<SearchHit>) -> Self {
         Self {
+            provider: provider.into(),
             hits,
             truncated: false,
             empty_reason: None,
@@ -117,8 +120,13 @@ impl SearchResponse {
         }
     }
 
-    pub fn empty(reason: SearchEmptyReason, evidence: Option<SearchEvidence>) -> Self {
+    pub fn empty(
+        provider: impl Into<String>,
+        reason: SearchEmptyReason,
+        evidence: Option<SearchEvidence>,
+    ) -> Self {
         Self {
+            provider: provider.into(),
             hits: Vec::new(),
             truncated: false,
             empty_reason: Some(reason),

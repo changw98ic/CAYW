@@ -366,6 +366,22 @@ impl PiCompatHost {
     /// Unload a previously installed package and wait for owned process cleanup.
     pub async fn unload(&self, package: &PiPackageId) -> Result<PluginDescription, PiCompatError> {
         self.ensure_enabled()?;
+        // Cleanup retries belong to the retained instance, not its API compatibility verdict.
+        if let Some(description) = self
+            .registry
+            .pending_cleanup()
+            .into_iter()
+            .find(|description| {
+                description.manifest.name == package.name
+                    && description.manifest.version == package.version
+            })
+        {
+            return self
+                .registry
+                .retry_cleanup_exact_and_wait(&description)
+                .await
+                .map_err(map_plugin_err);
+        }
         let surface = SurfaceId::new(SurfaceFamily::Lifecycle, "unload");
         let row = {
             let matrix = self.matrix.lock().expect("compat matrix poisoned");
@@ -388,16 +404,12 @@ impl PiCompatHost {
             return Err(PiCompatError::NotLoaded(package.key()));
         }
         self.registry
-            .unload_exact_and_wait(&description)
+            .request_unload_exact(&description)
+            .map_err(map_plugin_err)?;
+        self.registry
+            .retry_cleanup_exact_and_wait(&description)
             .await
-            .map_err(|err| match err {
-                PluginError::NotFound(name) => PiCompatError::NotLoaded(name),
-                other => {
-                    let mut matrix = self.matrix.lock().expect("compat matrix poisoned");
-                    matrix.record_incompatible(package.clone(), surface, other.to_string());
-                    map_plugin_err(other)
-                }
-            })
+            .map_err(map_plugin_err)
     }
 
     /// Probe a surface without invoking side effects; records incompatible when refused.
@@ -542,7 +554,11 @@ impl SourceHandle for PiBridgeHandle {
     }
 
     fn disconnect(&self) {
-        let _ = self.host.registry.unload_exact(&self.description);
+        if self.description.manifest.kind == cayw_plugins::PluginKind::External {
+            let _ = self.host.registry.request_unload_exact(&self.description);
+        } else {
+            let _ = self.host.registry.unload_exact(&self.description);
+        }
     }
 }
 
@@ -583,6 +599,99 @@ mod tests {
     use super::*;
     use cayw_bridge::{Operation, RequestKey};
     use serde_json::json;
+
+    struct RetryCleanup {
+        fixture: PiFixturePlugin,
+        waits: std::sync::atomic::AtomicUsize,
+    }
+
+    #[async_trait]
+    impl cayw_plugins::Plugin for RetryCleanup {
+        fn manifest(&self) -> &cayw_plugins::PluginManifest {
+            cayw_plugins::Plugin::manifest(&self.fixture)
+        }
+
+        async fn call(
+            &self,
+            method: &str,
+            arguments: Value,
+            cancel: CancellationToken,
+        ) -> Result<Value, PluginError> {
+            cayw_plugins::Plugin::call(&self.fixture, method, arguments, cancel).await
+        }
+
+        async fn wait_shutdown(&self) -> Result<(), PluginError> {
+            if self.waits.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 0 {
+                Err(PluginError::OutcomeUnknown(
+                    "cleanup not yet confirmed".into(),
+                ))
+            } else {
+                Ok(())
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn unload_retries_same_instance_after_cleanup_failure() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let host = PiCompatHost::new(true);
+        let package = PiFixturePlugin::package_id();
+        let plugin = Arc::new(RetryCleanup {
+            fixture: PiFixturePlugin::new(),
+            waits: AtomicUsize::new(0),
+        });
+        let description = host
+            .registry
+            .load_native(
+                plugin.clone(),
+                PluginContext::new([PiFixturePlugin::TOOL.into()], []),
+            )
+            .unwrap();
+
+        assert!(matches!(
+            host.unload(&package).await,
+            Err(PiCompatError::OutcomeUnknown(_))
+        ));
+        assert_eq!(plugin.waits.load(Ordering::SeqCst), 1);
+        assert_eq!(host.registry.pending_cleanup(), vec![description.clone()]);
+        assert_eq!(
+            host.matrix_snapshot()
+                .lookup(
+                    &package,
+                    &SurfaceId::new(SurfaceFamily::Lifecycle, "unload")
+                )
+                .level,
+            CompatibilityLevel::Partial
+        );
+        assert!(host.install_fixture().is_err());
+        assert!(matches!(
+            host.call_tool(
+                &package,
+                PiFixturePlugin::TOOL,
+                json!({"text": "blocked"}),
+                CancellationToken::new()
+            )
+            .await,
+            Err(PiCompatError::NotLoaded(_))
+        ));
+        assert_eq!(plugin.fixture.call_count(), 0);
+        host.matrix.lock().unwrap().record_incompatible(
+            package.clone(),
+            SurfaceId::new(SurfaceFamily::Lifecycle, "unload"),
+            "previous unload verdict",
+        );
+        assert_eq!(host.unload(&package).await.unwrap(), description);
+        assert_eq!(plugin.waits.load(Ordering::SeqCst), 2);
+        assert!(host.registry.pending_cleanup().is_empty());
+        let replacement = host.install_fixture().unwrap();
+        assert!(matches!(
+            host.unload(&package).await,
+            Err(PiCompatError::Incompatible(_))
+        ));
+        assert_eq!(host.registry.describe(&package.name).unwrap(), replacement);
+        assert_eq!(plugin.waits.load(Ordering::SeqCst), 2);
+    }
 
     #[tokio::test]
     async fn old_bridge_source_cannot_call_or_unload_a_replacement() {

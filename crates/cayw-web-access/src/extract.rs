@@ -28,7 +28,8 @@ pub fn extract_html(
     let mut title: Option<String> = None;
     let mut in_title = false;
     let mut skip_depth: usize = 0;
-    let mut parts: Vec<String> = Vec::new();
+    let mut text = String::new();
+    let mut used = 0;
     let mut truncated = false;
 
     for token in Tokenizer::new(input) {
@@ -55,8 +56,8 @@ pub fn extract_html(
                     skip_depth -= 1;
                 }
             }
-            Token::String(text) => {
-                let s = token_text(&text);
+            Token::String(token) => {
+                let s = token_text(&token);
                 if in_title {
                     let t = s.trim();
                     if !t.is_empty() {
@@ -74,24 +75,15 @@ pub fn extract_html(
                 if trimmed.is_empty() {
                     continue;
                 }
-                let used: usize = parts.iter().map(String::len).sum();
-                let remaining = max_chars.saturating_sub(used);
-                if remaining == 0 {
+                if append_fragment(&mut text, &mut used, &trimmed, max_chars) {
                     truncated = true;
                     break;
                 }
-                if trimmed.chars().count() > remaining {
-                    parts.push(trimmed.chars().take(remaining).collect());
-                    truncated = true;
-                    break;
-                }
-                parts.push(trimmed);
             }
             _ => {}
         }
     }
 
-    let text = collapse_ws(&parts.join(" "));
     if text.is_empty() && title.is_none() {
         return Err(WebAccessError::new(
             FailureClass::ExtractFailed,
@@ -112,13 +104,14 @@ pub fn extract_pdf(bytes: &[u8], max_chars: usize) -> Result<(String, bool), Web
         ));
     }
     let mut out = String::new();
+    let mut used = 0;
     let mut truncated = false;
     let mut i = 0;
     while i < bytes.len() {
         if bytes[i] == b'('
             && let Some((s, next)) = read_pdf_literal(bytes, i + 1)
         {
-            push_pdf_fragment(&mut out, &s, max_chars, &mut truncated);
+            push_pdf_fragment(&mut out, &mut used, &s, max_chars, &mut truncated);
             i = next;
             if truncated {
                 break;
@@ -182,7 +175,13 @@ fn read_pdf_literal(bytes: &[u8], mut i: usize) -> Option<(String, usize)> {
     None
 }
 
-fn push_pdf_fragment(out: &mut String, s: &str, max_chars: usize, truncated: &mut bool) {
+fn push_pdf_fragment(
+    out: &mut String,
+    used: &mut usize,
+    s: &str,
+    max_chars: usize,
+    truncated: &mut bool,
+) {
     let cleaned: String = s
         .chars()
         .filter(|c| !c.is_control() || *c == '\n' || *c == '\t')
@@ -195,20 +194,31 @@ fn push_pdf_fragment(out: &mut String, s: &str, max_chars: usize, truncated: &mu
     if letters == 0 && !cleaned.chars().any(|c| c.is_numeric()) {
         return;
     }
-    if out.len() >= max_chars {
-        *truncated = true;
-        return;
+    let cleaned = collapse_ws(cleaned);
+    *truncated |= append_fragment(out, used, &cleaned, max_chars);
+}
+
+// Fragments have already been whitespace-normalized. Count Unicode scalars,
+// including the separator, before appending; a separator alone is not content.
+fn append_fragment(out: &mut String, used: &mut usize, text: &str, max_chars: usize) -> bool {
+    if text.is_empty() {
+        return false;
     }
-    if !out.is_empty() {
+    let separator = usize::from(!out.is_empty());
+    let remaining = max_chars.saturating_sub(*used);
+    if remaining <= separator {
+        return true;
+    }
+    if separator != 0 {
         out.push(' ');
+        *used += 1;
     }
-    let room = max_chars.saturating_sub(out.len());
-    if cleaned.len() > room {
-        out.extend(cleaned.chars().take(room));
-        *truncated = true;
-    } else {
-        out.push_str(cleaned);
+    let mut chars = text.chars();
+    for ch in chars.by_ref().take(remaining - separator) {
+        out.push(ch);
+        *used += 1;
     }
+    chars.next().is_some()
 }
 
 /// Choose extractor from MIME / magic, returning kind + title + text + truncated.
@@ -273,6 +283,31 @@ fn collapse_ws(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn extraction_counts_unicode_and_separators() {
+        for (left, right, cap, expected, truncated) in [
+            ("ab", "cd", 4, "ab c", true),
+            ("中文", "abc", 5, "中文 ab", true),
+            ("中😀", "文", 4, "中😀 文", false),
+            ("ab", "cd", 2, "ab", true),
+            ("ab", "cd", 3, "ab", true),
+            ("ab", "cd", 5, "ab cd", false),
+            ("ab", "cd", usize::MAX, "ab cd", false),
+        ] {
+            let html = format!("<p>{left}</p><p>{right}</p>");
+            let (_, text, cut) = extract_html(&html, cap).unwrap();
+            assert_eq!((text.as_str(), cut), (expected, truncated));
+            let pdf = format!("%PDF-1.4 ({left}) ({right})");
+            let (text, cut) = extract_pdf(pdf.as_bytes(), cap).unwrap();
+            assert_eq!((text.as_str(), cut), (expected, truncated));
+            assert!(text.chars().count() <= cap);
+        }
+        let (title, text, cut) = extract_html("<title>title</title><p>x</p>", 0).unwrap();
+        assert_eq!(title.as_deref(), Some("title"));
+        assert!(text.is_empty());
+        assert!(cut);
+    }
 
     #[test]
     fn html_skips_script_and_reads_title() {

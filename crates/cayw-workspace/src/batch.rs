@@ -212,6 +212,14 @@ fn anchor(root: &Dir, path: &str) -> Result<Anchor, CapabilityError> {
         name: name.into(),
     })
 }
+fn writable_anchor(workspace: &Workspace, path: &str) -> Result<Anchor, CapabilityError> {
+    let parts = fs::components(path, false)?;
+    let (dir, name) = workspace.write_policy.parent(&workspace.root, &parts)?;
+    Ok(Anchor {
+        dir,
+        name: name.into(),
+    })
+}
 fn expected(actual: &Option<Blob>, expected: &Expected) -> Result<(), CapabilityError> {
     match (actual, expected) {
         (None, Expected::Absent) => Ok(()),
@@ -575,7 +583,7 @@ impl Workspace {
         check_paths(paths.iter().cloned(), context)?;
         let targets = paths
             .iter()
-            .map(|path| anchor(&self.root, path))
+            .map(|path| writable_anchor(self, path))
             .collect::<Result<Vec<_>, _>>()?;
         check_target_aliases(&targets, context)?;
         // Count unpublished directories as well, so repeated interrupted prepares
@@ -960,7 +968,7 @@ impl Workspace {
         self.verify_blobs(&journal, context)?;
         let mut anchors = vec![];
         for operation in &journal.manifest.operations {
-            let target = anchor(&self.root, &operation.path)?;
+            let target = writable_anchor(self, &operation.path)?;
             self.require_old(operation, &target, context)?;
             anchors.push(target);
         }
@@ -1053,7 +1061,7 @@ impl Workspace {
         let mut anchors = vec![];
         let mut actual = vec![];
         for operation in &journal.manifest.operations {
-            let target = anchor(&self.root, &operation.path).map_err(unknown)?;
+            let target = writable_anchor(self, &operation.path).map_err(unknown)?;
             let (current, _) =
                 capture(&target, self.limits.max_file_bytes, context).map_err(unknown)?;
             if current != operation.old && current != operation.new {

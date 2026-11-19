@@ -86,6 +86,7 @@ struct Inner {
     manifest: Manifest,
     server_info: ServerInfo,
     live: Option<Live>,
+    retiring: Vec<StdioControl>,
     connect_generation: u64,
     spawn_count: u64,
     recycle_count: u64,
@@ -134,18 +135,19 @@ impl ManagedControl {
         shutdown(&self.shared);
     }
 
-    pub async fn wait_closed(&self) {
+    pub async fn wait_closed(&self) -> Result<(), CapabilityError> {
         loop {
             let notified = self.shared.notify.notified();
             tokio::pin!(notified);
             notified.as_mut().enable();
             if self.shared.closed.load(Ordering::Acquire) {
+                wait_retiring(&self.shared).await?;
                 let done = {
                     let state = lock(&self.shared.state);
-                    state.live.is_none() && state.in_flight == 0
+                    state.live.is_none() && state.in_flight == 0 && state.retiring.is_empty()
                 };
                 if done {
-                    return;
+                    return Ok(());
                 }
             }
             notified.await;
@@ -183,11 +185,10 @@ impl ManagedStdio {
         } else {
             probe_handle.disconnect();
             control.wait_closed().await;
-            if !control.snapshot().reaped {
-                return Err(failure(
-                    "managed MCP probe cleanup unconfirmed; refusing lazy registration",
-                ));
-            }
+            require_reaped(
+                control.snapshot().reaped,
+                "managed MCP probe cleanup unconfirmed; refusing lazy registration",
+            )?;
             None
         };
         let shared = Arc::new(Shared {
@@ -203,6 +204,7 @@ impl ManagedStdio {
                 manifest: manifest.clone(),
                 server_info: server_info.clone(),
                 live,
+                retiring: Vec::new(),
                 connect_generation: u64::from(keep_live),
                 spawn_count: 1,
                 recycle_count: 0,
@@ -302,6 +304,21 @@ impl Drop for InFlightGuard {
     }
 }
 
+async fn wait_retiring(shared: &Arc<Shared>) -> Result<(), CapabilityError> {
+    let controls = lock(&shared.state).retiring.clone();
+    for control in controls {
+        control.wait_closed().await;
+        require_reaped(
+            control.snapshot().reaped,
+            "managed MCP process cleanup unconfirmed",
+        )?;
+    }
+    lock(&shared.state)
+        .retiring
+        .retain(|control| !control.snapshot().reaped);
+    Ok(())
+}
+
 async fn ensure_connected(
     shared: &Arc<Shared>,
     cancel: CancellationToken,
@@ -325,7 +342,16 @@ async fn ensure_connected(
             return Ok(live.handle.clone());
         }
     }
-    let source = StdioSource::connect(shared.config.clone(), cancel).await?;
+    wait_retiring(shared).await?;
+    let source = StdioSource::connect_owned(shared.config.clone(), cancel, |control| {
+        let mut state = lock(&shared.state);
+        if shared.closed.load(Ordering::Acquire) {
+            control.close();
+        }
+        state.retiring.push(control);
+        shared.notify.notify_waiters();
+    })
+    .await?;
     let server_info = source.server_info().clone();
     let control = source.control();
     let (manifest, handle) = source.into_parts();
@@ -336,57 +362,59 @@ async fn ensure_connected(
     };
     if !compatible {
         handle.disconnect();
-        control.wait_closed().await;
+        wait_retiring(shared).await?;
         return Err(failure(
             "managed MCP catalog or identity changed after recycle; reconnect explicitly",
         ));
     }
-    if shared.closed.load(Ordering::Acquire) {
-        handle.disconnect();
-        control.wait_closed().await;
-        return Err(failure("managed MCP source closed during connect"));
-    }
-    {
+    let published = {
         let mut state = lock(&shared.state);
-        state.connect_generation = state.connect_generation.saturating_add(1);
-        state.spawn_count = state.spawn_count.saturating_add(1);
-        state.last_activity = Instant::now();
-        state.live = Some(Live {
-            handle: handle.clone(),
-            control,
-            _server_info: server_info,
-        });
+        if shared.closed.load(Ordering::Acquire) {
+            false
+        } else {
+            state
+                .retiring
+                .retain(|pending| !pending.same_instance(&control));
+            state.connect_generation = state.connect_generation.saturating_add(1);
+            state.spawn_count = state.spawn_count.saturating_add(1);
+            state.last_activity = Instant::now();
+            state.live = Some(Live {
+                handle: handle.clone(),
+                control,
+                _server_info: server_info,
+            });
+            true
+        }
+    };
+    if !published {
+        handle.disconnect();
+        shared.notify.notify_waiters();
+        wait_retiring(shared).await?;
+        return Err(failure("managed MCP source closed during connect"));
     }
     shared.notify.notify_waiters();
     Ok(handle)
 }
 
 fn compatible_catalog(pinned: &Manifest, fresh: &Manifest) -> bool {
-    pinned.tools.len() == fresh.tools.len()
-        && pinned.resources.len() == fresh.resources.len()
-        && pinned.prompts.len() == fresh.prompts.len()
-        && pinned
-            .tools
-            .iter()
-            .zip(fresh.tools.iter())
-            .all(|(left, right)| left.name == right.name)
-        && pinned
-            .resources
-            .iter()
-            .zip(fresh.resources.iter())
-            .all(|(left, right)| left.uri == right.uri)
-        && pinned
-            .prompts
-            .iter()
-            .zip(fresh.prompts.iter())
-            .all(|(left, right)| left.name == right.name)
+    match (serde_json::to_value(pinned), serde_json::to_value(fresh)) {
+        (Ok(pinned), Ok(fresh)) => pinned == fresh,
+        _ => false,
+    }
 }
 
 fn shutdown(shared: &Arc<Shared>) {
-    shared.closed.store(true, Ordering::Release);
     let live = {
         let mut state = lock(&shared.state);
-        state.live.take()
+        shared.closed.store(true, Ordering::Release);
+        for control in &state.retiring {
+            control.close();
+        }
+        let live = state.live.take();
+        if let Some(live) = &live {
+            state.retiring.push(live.control.clone());
+        }
+        live
     };
     if let Some(live) = live {
         live.handle.disconnect();
@@ -423,7 +451,8 @@ fn spawn_idle_watch(shared: Arc<Shared>) {
                     >= shared.idle_timeout
                 {
                     let live = state.live.take();
-                    if live.is_some() {
+                    if let Some(live) = &live {
+                        state.retiring.push(live.control.clone());
                         state.recycle_count = state.recycle_count.saturating_add(1);
                     }
                     live
@@ -449,7 +478,7 @@ fn validate_spec(spec: &ServerSpec) -> Result<(), CapabilityError> {
         || spec.origin.len() > 2048
         || spec.version.chars().any(char::is_control)
         || spec.origin.chars().any(char::is_control)
-        || spec.idle_timeout > Duration::from_secs(24 * 60 * 60)
+        || Instant::now().checked_add(spec.idle_timeout).is_none()
     {
         return Err(failure("invalid managed MCP server specification"));
     }
@@ -462,6 +491,118 @@ fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
         .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
+fn require_reaped(reaped: bool, message: &str) -> Result<(), CapabilityError> {
+    if reaped {
+        Ok(())
+    } else {
+        Err(CapabilityError::unknown(message))
+    }
+}
+
 fn failure(message: &str) -> CapabilityError {
     CapabilityError::new(message)
+}
+
+#[cfg(test)]
+mod regression_tests {
+    use super::*;
+
+    #[test]
+    fn unconfirmed_probe_cleanup_is_unknown() {
+        let message = "managed MCP probe cleanup unconfirmed; refusing lazy registration";
+        let error = require_reaped(false, message).unwrap_err();
+        assert!(error.outcome_unknown);
+        assert_eq!(error.message, message);
+        assert!(require_reaped(true, message).is_ok());
+    }
+
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    async fn discovery_owner_survives_drop_and_close_until_reap() {
+        for abort_discovery in [true, false] {
+            let root = tempfile::tempdir().unwrap();
+            let mut config = StdioConfig::new(std::path::PathBuf::from("/bin/sleep"), root.path());
+            config.arguments = vec!["60".into()];
+            let shared = Arc::new(Shared {
+                id: "pending-discovery".into(),
+                ownership_key: "pending-discovery".into(),
+                config,
+                lifecycle: LifecycleMode::LazyKeepAlive,
+                idle_timeout: Duration::ZERO,
+                closed: AtomicBool::new(false),
+                notify: Notify::new(),
+                connect_lock: tokio::sync::Mutex::new(()),
+                state: Mutex::new(Inner {
+                    manifest: Manifest::default(),
+                    server_info: ServerInfo {
+                        name: "fixture".into(),
+                        version: "1".into(),
+                    },
+                    live: None,
+                    retiring: Vec::new(),
+                    connect_generation: 0,
+                    spawn_count: 0,
+                    recycle_count: 0,
+                    in_flight: 1,
+                    last_activity: Instant::now(),
+                }),
+            });
+            let task_shared = shared.clone();
+            let task = tokio::spawn(async move {
+                let _flight = InFlightGuard {
+                    shared: task_shared.clone(),
+                };
+                ensure_connected(&task_shared, CancellationToken::new()).await
+            });
+            let process = tokio::time::timeout(Duration::from_secs(5), async {
+                loop {
+                    if let Some(control) = lock(&shared.state).retiring.first().cloned() {
+                        break control;
+                    }
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .expect("discovery registered its process before yielding");
+            assert!(!process.snapshot().cleanup_complete);
+            if abort_discovery {
+                task.abort();
+            }
+            let control = ManagedControl {
+                shared: shared.clone(),
+            };
+            control.close();
+            tokio::time::timeout(Duration::from_secs(5), control.wait_closed())
+                .await
+                .expect("shutdown deadline")
+                .expect("reaped discovery process");
+            assert!(process.snapshot().reaped);
+            assert!(lock(&shared.state).retiring.is_empty());
+            if abort_discovery {
+                match task.await {
+                    Err(error) => assert!(error.is_cancelled()),
+                    Ok(_) => panic!("discovery task should have been aborted"),
+                }
+            } else {
+                assert!(task.await.unwrap().is_err());
+            }
+        }
+    }
+
+    #[test]
+    fn recycled_catalog_compares_contract_not_only_names() {
+        let mut pinned = Manifest::default();
+        pinned.tools.push(cayw_bridge::ToolSpec {
+            name: "echo".into(), description: "echo".into(),
+            input_schema: serde_json::json!({"type":"object","properties":{},"additionalProperties":false}),
+            output_schema: None,
+        });
+        assert!(compatible_catalog(&pinned, &pinned.clone()));
+        let mut changed = pinned.clone();
+        changed.tools[0].output_schema = Some(serde_json::json!({"type":"string"}));
+        assert!(!compatible_catalog(&pinned, &changed));
+        let mut changed = pinned.clone();
+        changed.tools[0].description = "changed".into();
+        assert!(!compatible_catalog(&pinned, &changed));
+    }
 }

@@ -1229,3 +1229,56 @@ fn large_binding_metadata_is_admitted_without_an_artificial_ceiling() {
         "the admitted bindings must still expose the source catalog"
     );
 }
+
+#[tokio::test]
+async fn runtime_prompt_dispatch_keeps_bridge_usable() {
+    let temp = setup();
+    let state = SourceState::new();
+    let registry = Registry::new(Limits::default(), Arc::new(Policy(true))).unwrap();
+    let mut catalog = manifest();
+    catalog.prompts.push(cayw_bridge::PromptSpec {
+        name: "review".into(),
+        description: "review".into(),
+        arguments_schema: None,
+    });
+    registry
+        .register(
+            identity(),
+            catalog,
+            Box::new(Source {
+                key: "prompt-source".into(),
+                state: state.clone(),
+                behavior: Behavior::Reply,
+                db: Some(temp.path().join("session.db")),
+            }),
+        )
+        .unwrap();
+    let permissions = vec![
+        (
+            "mcp.prompts.get",
+            json!({"server":"local","name":"review","arguments":{}}),
+        ),
+        (
+            "mcp.call",
+            json!({"server":"local","tool":"echo","arguments":{"text":"fixture"}}),
+        ),
+    ];
+    let (rt, _) = open(
+        &temp,
+        config(&registry, &permissions),
+        "local p=cayw.call('mcp.prompts.get',{server='local',name='review',arguments={}})\nlocal t=cayw.call('mcp.call',{server='local',tool='echo',arguments={text='fixture'}})\nreturn {prompt=p,tool=t}",
+        None,
+    );
+    let id = rt.create(None).unwrap().id;
+    assert_eq!(
+        rt.prompt(&id, "get prompt then call tool", CancellationToken::new())
+            .await
+            .unwrap()
+            .state,
+        SessionState::Idle
+    );
+    assert_eq!(state.count(), 2);
+    let records = history(&rt, &id);
+    assert_eq!(records.len(), 4);
+    assert_eq!(core_calls(&rt, &id).len(), 2);
+}

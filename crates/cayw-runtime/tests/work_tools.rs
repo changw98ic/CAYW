@@ -1551,3 +1551,207 @@ async fn a_busy_session_does_not_hold_another_sessions_due_report() {
     prompt.await.expect("hold turn");
     main.shutdown_background();
 }
+
+#[tokio::test]
+async fn notification_id_uses_persisted_work_owner() {
+    struct MutableScript(Mutex<String>);
+    impl Provider for MutableScript {
+        fn stream(&self, request: ModelRequest, _: CancellationToken) -> AssistantStream {
+            Box::pin(futures::stream::iter([AssistantEvent::Done {
+                message: script_response(&request, &self.0.lock().unwrap(), "owner-check"),
+            }]))
+        }
+    }
+    let temp = TempDir::new().unwrap();
+    let provider = Arc::new(MutableScript(Mutex::new(String::new())));
+    let runtime = open(
+        temp.path(),
+        provider.clone(),
+        Model::new("fixture", "test"),
+        main_config(temp.path(), vec!["desk".into()]),
+    );
+    let a = runtime.create(Some("A".into())).unwrap().id;
+    let b = runtime.create(Some("B".into())).unwrap().id;
+    let mut a_work = due_spec(&a, "work-a", "A", 0);
+    a_work.next_check_at = None;
+    runtime.create_work_item(a_work).unwrap();
+    let mut b_work = due_spec(&b, "work-b", "B", 0);
+    b_work.next_check_at = None;
+    let work = runtime.create_work_item(b_work).unwrap();
+    let notification = runtime
+        .prepare_notification(
+            &work.work_id,
+            work.work_version,
+            "desk",
+            Some("original"),
+            &[],
+        )
+        .unwrap();
+    *provider.0.lock().unwrap() = format!(
+        r#"
+local first = pcall(function()
+  cayw.call('work.notify.send', {{notification_id='{id}', text='changed'}})
+end)
+local second = pcall(function()
+  cayw.call('work.notify.send', {{notification_id='{id}', work_id='work-a', text='changed'}})
+end)
+assert(not first and not second, 'foreign owner send was allowed')
+return {{checked=true}}
+"#,
+        id = notification.notification_id
+    );
+    runtime
+        .prompt(&a, "check notification ownership", CancellationToken::new())
+        .await
+        .unwrap();
+    assert_eq!(
+        runtime
+            .notification(&notification.notification_id)
+            .unwrap()
+            .unwrap()
+            .status,
+        cayw_runtime::NotificationStatus::Pending
+    );
+    assert!(
+        !runtime
+            .workspace()
+            .join(".cayw-notifications.jsonl")
+            .exists()
+    );
+    let events = runtime.events(&a, 0, 1000).unwrap();
+    let attempts = events
+        .iter()
+        .map(|event| serde_json::to_value(event).unwrap())
+        .filter(|event| {
+            event["event"]["type"] == "capability_settled"
+                && event["event"]["call"]["name"] == "work.notify.send"
+        })
+        .count();
+    assert_eq!(attempts, 2, "both foreign-ID forms must actually execute");
+    runtime.shutdown_background();
+}
+
+#[tokio::test]
+async fn session_notification_owner_is_persisted_and_checked() {
+    let temp = TempDir::new().unwrap();
+    let script = r#"
+local own = cayw.call('notify.send', {target='desk', text='first text'})
+local fetched = cayw.call('work.notify.get', {notification_id=own.notification_id})
+assert(fetched.notification_id == own.notification_id)
+return {notification_id=own.notification_id}
+"#;
+    let runtime = open(
+        temp.path(),
+        Arc::new(Script(script.into())),
+        Model::new("fixture", "test"),
+        main_config(temp.path(), vec!["desk".into()]),
+    );
+    let a = runtime.create(Some("A".into())).unwrap().id;
+    let b = runtime.create(Some("B".into())).unwrap().id;
+    runtime
+        .prompt(&a, "send my notification", CancellationToken::new())
+        .await
+        .unwrap();
+    let store = cayw_runtime::WorkItems::open(temp.path().join("sessions.sqlite")).unwrap();
+    let notifications = store.notifications_for_work("main-session").unwrap();
+    assert_eq!(notifications.len(), 1);
+    assert_eq!(
+        notifications[0].owner_session_id.as_deref(),
+        Some(a.as_str())
+    );
+    assert_eq!(
+        notifications[0].status,
+        cayw_runtime::NotificationStatus::Queued
+    );
+    let foreign = store
+        .prepare_notification(
+            "main-session",
+            1,
+            "desk",
+            Some("B original"),
+            &[],
+            &["desk".into()],
+            Some(&b),
+        )
+        .unwrap();
+    // Reopen with another deterministic script, keeping the durable owner fact.
+    runtime.shutdown_background();
+    drop(store);
+    drop(runtime);
+    let script = format!(
+        r#"
+local sent = pcall(function() cayw.call('work.notify.send', {{notification_id='{id}', text='A replacement'}}) end)
+local read = pcall(function() cayw.call('work.notify.get', {{notification_id='{id}'}}) end)
+assert(not sent and not read)
+return {{checked=true}}
+"#,
+        id = foreign.notification_id
+    );
+    let runtime = open(
+        temp.path(),
+        Arc::new(Script(script)),
+        Model::new("fixture", "test"),
+        main_config(temp.path(), vec!["desk".into()]),
+    );
+    runtime
+        .prompt(&a, "check foreign notification", CancellationToken::new())
+        .await
+        .unwrap();
+    let pending = runtime
+        .notification(&foreign.notification_id)
+        .unwrap()
+        .unwrap();
+    assert_eq!(pending.status, cayw_runtime::NotificationStatus::Pending);
+    assert_eq!(pending.content_ref.as_deref(), Some("B original"));
+    let events = serde_json::to_string(&runtime.events(&a, 0, 1000).unwrap()).unwrap();
+    assert!(
+        events
+            .matches("notification belongs to a different main session")
+            .count()
+            >= 2,
+        "both calls must reach the owner check rather than wait for approval"
+    );
+    runtime.shutdown_background();
+}
+
+#[tokio::test]
+async fn no_id_notification_uncertainty_preserves_identity_in_capability_error() {
+    let temp = TempDir::new().unwrap();
+    let runtime = open(
+        temp.path(),
+        Arc::new(Script(
+            "return cayw.call('notify.send',{target='desk',text='first text'})".into(),
+        )),
+        Model::new("fixture", "test"),
+        main_config(temp.path(), vec!["desk".into()]),
+    );
+    let session = runtime.create(None).unwrap().id;
+    let db = rusqlite::Connection::open(temp.path().join("sessions.sqlite")).unwrap();
+    db.execute_batch("CREATE TRIGGER reject_notification_queued BEFORE UPDATE ON runtime_notifications
+        WHEN NEW.status='queued' BEGIN SELECT RAISE(ABORT,'fixture notification acknowledgement failed'); END;").unwrap();
+    let _ = runtime
+        .prompt(&session, "send once", CancellationToken::new())
+        .await;
+    let id: String = db
+        .query_row(
+            "SELECT notification_id FROM runtime_notifications WHERE status='unknown'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let view = runtime.get(&session).unwrap();
+    let call = view
+        .unresolved_capabilities
+        .iter()
+        .find(|call| call.name == "notify.send")
+        .expect("uncertain local write must not become a known capability failure");
+    assert!(serde_json::to_string(call).unwrap().contains(&id));
+    assert_eq!(
+        std::fs::read_to_string(runtime.workspace().join(".cayw-notifications.jsonl"))
+            .unwrap()
+            .lines()
+            .count(),
+        1
+    );
+    runtime.shutdown_background();
+}

@@ -1486,3 +1486,50 @@ async fn more_than_20000_nodes_can_be_opened_and_reloaded() {
     let reopened = fixture.open().await;
     assert_eq!(reopened.snapshot().await.unwrap().nodes.len(), 20_001);
 }
+
+#[tokio::test]
+async fn explicit_nested_list_items_keep_their_parent_and_editability() {
+    let fixture = Fixture::new(
+        "<!doctype html><html><body><ul><li>outer<ul><li>inner</li></ul></li></ul></body></html>",
+    );
+    let project = fixture.open().await;
+    let snapshot = project.snapshot().await.unwrap();
+    let inner = tagged(&snapshot, "li", 1);
+    let inner_list = tagged(&snapshot, "ul", 1);
+    assert!(inner.editable, "{:?}", inner.reason);
+    assert_eq!(inner.parent.as_ref(), Some(&inner_list.id));
+    assert_eq!(inner.text_source.as_deref(), Some("inner"));
+    project
+        .apply(json!({"kind":"text", "id":inner.id, "text":"changed"}))
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn full_static_text_is_available_and_survives_save_above_editor_old_limit() {
+    let raw = format!("  \n{} &amp; TAIL\n  ", "字".repeat(24004));
+    let fixture = Fixture::new(&format!(
+        "<!doctype html><html><body><pre>{raw}</pre></body></html>"
+    ));
+    let project = fixture.open().await;
+    let before = project.snapshot().await.unwrap();
+    let element = editable(&before, "pre");
+    assert_eq!(element.text_source.as_deref(), Some(raw.as_str()));
+    let edited = format!("changed  \n{} & TAIL\n  ", "字".repeat(24004));
+    let after = project
+        .apply(json!({"kind":"text", "id":element.id, "text":edited}))
+        .await
+        .unwrap();
+    assert_eq!(
+        editable(&after, "pre").text_source.as_deref(),
+        Some(edited.replace('&', "&amp;").as_str())
+    );
+    project.save(&before.sha256).await.unwrap();
+    assert!(fixture.read().contains(&edited.replace('&', "&amp;")));
+    drop(project);
+    let reopened = fixture.open().await.snapshot().await.unwrap();
+    assert_eq!(
+        editable(&reopened, "pre").text_source,
+        editable(&after, "pre").text_source
+    );
+}

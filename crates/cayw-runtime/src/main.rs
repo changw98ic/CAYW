@@ -403,6 +403,7 @@ async fn open_main_session(
         .await?;
     let host = workspaces.host(&id).await?;
     cli_settings::ensure_main_session(&host.runtime, &paths)?;
+    workspaces.register_main(&host).await?;
     // The main session can dispatch, pause, stop and observe Tasks in the
     // Client's registered workspaces. The router owns only a weak reference to
     // the Client catalog, so shutdown is not held open by the Runtime.

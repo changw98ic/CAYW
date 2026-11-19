@@ -21,7 +21,7 @@ use std::{
     error::Error,
     os::unix::ffi::OsStrExt,
     path::{Path, PathBuf},
-    sync::{Arc, Weak},
+    sync::{Arc, OnceLock, Weak},
     time::Duration,
 };
 
@@ -101,11 +101,16 @@ impl WorkspaceResources {
                     failures.push(format!("MCP source {}: {error}", entry.id));
                 }
                 entry.control.close();
-                if tokio::time::timeout(Duration::from_secs(10), entry.control.wait_closed())
+                match tokio::time::timeout(Duration::from_secs(10), entry.control.wait_closed())
                     .await
-                    .is_err()
                 {
-                    failures.push(format!("MCP source {} did not confirm shutdown", entry.id));
+                    Ok(Ok(())) => {}
+                    Ok(Err(error)) => {
+                        failures.push(format!("MCP source {} cleanup: {error}", entry.id))
+                    }
+                    Err(_) => {
+                        failures.push(format!("MCP source {} did not confirm shutdown", entry.id))
+                    }
                 }
             }
         }
@@ -283,6 +288,7 @@ struct Inner {
     discoverable: bool,
     hosts: tokio::sync::RwLock<BTreeMap<String, Arc<WorkspaceHost>>>,
     opening: tokio::sync::Mutex<()>,
+    main: OnceLock<Weak<WorkspaceHost>>,
     #[cfg(feature = "plugins")]
     plugins: crate::cli_plugins::Plugins,
 }
@@ -316,10 +322,36 @@ impl Workspaces {
                 discoverable,
                 hosts: tokio::sync::RwLock::new(hosts),
                 opening: tokio::sync::Mutex::new(()),
+                main: OnceLock::new(),
                 #[cfg(feature = "plugins")]
                 plugins,
             }),
         }
+    }
+
+    // Called once during Client startup, before IPC begins accepting requests.
+    pub async fn register_main(&self, host: &Arc<WorkspaceHost>) -> Result<()> {
+        if !host.runtime.is_main_session() {
+            return Err("work owner must be the main session".into());
+        }
+        self.inner
+            .main
+            .set(Arc::downgrade(host))
+            .map_err(|_| "main session is already registered")?;
+        let primary = self
+            .inner
+            .hosts
+            .read()
+            .await
+            .get("local")
+            .cloned()
+            .ok_or("primary workspace is unavailable")?;
+        if !primary.runtime.is_main_session() {
+            primary.runtime.set_work_owner(Arc::new(ClientWorkOwner {
+                inner: Arc::downgrade(&self.inner),
+            }))?;
+        }
+        Ok(())
     }
 
     pub fn id_for(&self, path: &Path) -> String {
@@ -594,8 +626,8 @@ impl Workspaces {
     ) -> std::result::Result<bool, WorkRouterError> {
         let workspace = self.router_resolve(workspace).await?;
         let host = self.router_open(&workspace).await?;
-        check
-            .evaluate(host.runtime.workspace())
+        host.runtime
+            .evaluate_acceptance(check)
             .map_err(router_runtime_error)
     }
 
@@ -845,6 +877,15 @@ impl ClientWorkOwner {
             .map(|inner| Workspaces { inner })
             .ok_or_else(|| WorkRouterError::known("the local Client is shut down"))
     }
+
+    fn main(&self) -> std::result::Result<Arc<WorkspaceHost>, WorkRouterError> {
+        self.client()?
+            .inner
+            .main
+            .get()
+            .and_then(Weak::upgrade)
+            .ok_or_else(|| WorkRouterError::known("the main session is unavailable"))
+    }
 }
 
 #[async_trait]
@@ -853,7 +894,7 @@ impl WorkOwner for ClientWorkOwner {
         &self,
         work_id: &str,
     ) -> std::result::Result<cayw_runtime::WorkItem, WorkRouterError> {
-        let host = self.client()?.router_open("local").await?;
+        let host = self.main()?;
         host.runtime
             .work_item(work_id)
             .map_err(router_runtime_error)?
@@ -867,7 +908,7 @@ impl WorkOwner for ClientWorkOwner {
         passed: bool,
         evidence: String,
     ) -> std::result::Result<cayw_runtime::WorkItem, WorkRouterError> {
-        let host = self.client()?.router_open("local").await?;
+        let host = self.main()?;
         host.runtime
             .record_child_program_acceptance(work_id, criterion_id, passed, evidence)
             .map_err(router_runtime_error)
@@ -877,7 +918,7 @@ impl WorkOwner for ClientWorkOwner {
         &self,
         report: WorkStatusReport,
     ) -> std::result::Result<WorkSessionNoticeReply, WorkRouterError> {
-        let host = self.client()?.router_open("local").await?;
+        let host = self.main()?;
         host.runtime
             .relay_task_status(report)
             .map_err(router_runtime_error)
@@ -1058,6 +1099,181 @@ pub fn optional_tools(pi_enabled: bool) -> Result<Value> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn routed_acceptance_keeps_the_original_workspace_after_rename() {
+        let temp = tempfile::tempdir().unwrap();
+        let directory = temp.path().join("workspace");
+        std::fs::create_dir(&directory).unwrap();
+        std::fs::write(directory.join("result.txt"), "original").unwrap();
+        let runtime = Arc::new(
+            Runtime::open(
+                temp.path().join("session.sqlite"),
+                &directory,
+                Arc::new(UnconfiguredProvider),
+                Model::new("fixture", "check"),
+                RuntimeConfig::default(),
+            )
+            .unwrap(),
+        );
+        let paths = LocalPaths::from_environment(&directory).unwrap();
+        let host = Arc::new(WorkspaceHost::new(
+            runtime,
+            None,
+            None,
+            WorkspaceResources::default(),
+            false,
+            "fixture".into(),
+            OptionalServicesReport::default(),
+        ));
+        let client = Workspaces::new(
+            paths,
+            None,
+            true,
+            false,
+            host,
+            #[cfg(feature = "plugins")]
+            crate::cli_plugins::Plugins::new(temp.path().join("plugins.json")),
+        );
+        std::fs::rename(&directory, temp.path().join("moved")).unwrap();
+        std::fs::create_dir(&directory).unwrap();
+        std::fs::write(directory.join("result.txt"), "replacement").unwrap();
+        let router = client.work_router();
+        assert!(
+            router
+                .evaluate_check(
+                    "local",
+                    &cayw_runtime::AcceptanceCheck::FileEquals {
+                        path: "result.txt".into(),
+                        text: "original".into(),
+                    }
+                )
+                .await
+                .unwrap()
+        );
+        assert!(
+            !router
+                .evaluate_check(
+                    "local",
+                    &cayw_runtime::AcceptanceCheck::FileEquals {
+                        path: "result.txt".into(),
+                        text: "replacement".into(),
+                    }
+                )
+                .await
+                .unwrap()
+        );
+        assert!(
+            !router
+                .evaluate_check(
+                    "local",
+                    &cayw_runtime::AcceptanceCheck::PathExists {
+                        path: "missing.txt".into(),
+                    }
+                )
+                .await
+                .unwrap()
+        );
+        client.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn child_owner_uses_registered_main_not_primary() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut hosts = Vec::new();
+        for (name, main_session) in [("primary", false), ("main", true), ("other", false)] {
+            let path = temp.path().join(name);
+            std::fs::create_dir(&path).unwrap();
+            let runtime = Arc::new(
+                Runtime::open(
+                    temp.path().join(format!("{name}.sqlite")),
+                    &path,
+                    Arc::new(UnconfiguredProvider),
+                    Model::new("fixture", name),
+                    RuntimeConfig {
+                        main_session,
+                        ..Default::default()
+                    },
+                )
+                .unwrap(),
+            );
+            hosts.push(Arc::new(WorkspaceHost::new(
+                runtime,
+                None,
+                None,
+                WorkspaceResources::default(),
+                false,
+                "fixture".into(),
+                OptionalServicesReport::default(),
+            )));
+        }
+        let primary = &hosts[0];
+        let main = &hosts[1];
+        let paths = LocalPaths::from_environment(temp.path().join("primary")).unwrap();
+        let client = Workspaces::new(
+            paths,
+            None,
+            true,
+            true,
+            primary.clone(),
+            #[cfg(feature = "plugins")]
+            crate::cli_plugins::Plugins::new(temp.path().join("plugins.json")),
+        );
+        client
+            .inner
+            .hosts
+            .write()
+            .await
+            .insert("main-fixture".into(), main.clone());
+        client.register_main(main).await.unwrap();
+        let owner = Arc::new(ClientWorkOwner {
+            inner: Arc::downgrade(&client.inner),
+        });
+        assert!(Arc::ptr_eq(&owner.main().unwrap(), main));
+        // register_main must have installed the owner on the already-cached primary.
+        assert!(
+            primary
+                .runtime
+                .set_work_owner(owner.clone())
+                .unwrap_err()
+                .to_string()
+                .contains("already installed")
+        );
+        hosts[2].runtime.set_work_owner(owner.clone()).unwrap();
+        let session = main.runtime.create(None).unwrap().id;
+        let spec = serde_json::from_value(json!({
+            "work_id":"routed-work", "owner_main_session_id":session,
+            "title":"route", "goal":"record on actual main",
+            "acceptance_criteria":[{"criterion_id":"check", "description":"exists"}]
+        }))
+        .unwrap();
+        main.runtime.create_work_item(spec).unwrap();
+        assert_eq!(
+            owner.work_item("routed-work").await.unwrap().work_id,
+            "routed-work"
+        );
+        owner
+            .record_program_acceptance("routed-work", "check", true, "fixture evidence".into())
+            .await
+            .unwrap();
+        let observed = main.runtime.work_item("routed-work").unwrap().unwrap();
+        assert_eq!(observed, owner.work_item("routed-work").await.unwrap());
+        let reply = owner
+            .report_status(WorkStatusReport {
+                work_id: "routed-work".into(),
+                task_id: "fixture-task".into(),
+                session_id: "child-session".into(),
+                state: "completed".into(),
+                error: None,
+            })
+            .await
+            .unwrap();
+        assert_eq!(reply.session_id.as_deref(), Some(session.as_str()));
+        assert!(client.register_main(main).await.is_err());
+        client.shutdown().await.unwrap();
+        drop(client);
+        assert!(owner.main().is_err());
+    }
 
     #[tokio::test]
     async fn mcp_failure_is_reported_without_stopping_setup() {

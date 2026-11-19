@@ -362,8 +362,8 @@ impl Plugin for ExternalPlugin {
             // of returning the cached error or treating a missing handle as success.
             return self.reobserve_cleanup();
         }
-        let supervisor = self.supervisor.lock().await.take();
-        let result = match supervisor {
+        let mut supervisor = self.supervisor.lock().await;
+        let result = match supervisor.as_mut() {
             Some(supervisor) => match supervisor.await {
                 Ok(result) => result,
                 Err(error) => Err(PluginError::OutcomeUnknownProcess {
@@ -373,23 +373,13 @@ impl Plugin for ExternalPlugin {
                     process: self.identity.clone(),
                 }),
             },
-            None => {
-                if self
-                    .process
-                    .lock()
-                    .expect("plugin process poisoned")
-                    .is_none()
-                {
-                    Ok(())
-                } else {
-                    Err(PluginError::OutcomeUnknownProcess {
-                        message: "plugin cleanup is still unconfirmed".into(),
-                        process: self.identity.clone(),
-                    })
-                }
-            }
+            None => Err(PluginError::OutcomeUnknownProcess {
+                message: "plugin cleanup is still unconfirmed".into(),
+                process: self.identity.clone(),
+            }),
         };
         *self.cleanup.lock().expect("plugin cleanup poisoned") = Some(result.clone());
+        supervisor.take();
         result
     }
 }
@@ -982,6 +972,52 @@ mod tests {
             .unwrap_err();
         assert!(error.outcome_unknown());
         assert!(error.to_string().contains("still running"), "{error}");
+    }
+
+    #[tokio::test]
+    async fn cancelled_cleanup_waiter_retains_supervisor_failure() {
+        let entered = Arc::new(tokio::sync::Notify::new());
+        let release = Arc::new(tokio::sync::Notify::new());
+        let task_entered = entered.clone();
+        let task_release = release.clone();
+        let supervisor = tokio::spawn(async move {
+            task_entered.notify_one();
+            task_release.notified().await;
+            Err(PluginError::OutcomeUnknown(
+                "synthetic cleanup remained unconfirmed".into(),
+            ))
+        });
+        let (sender, _receiver) = mpsc::channel(1);
+        let plugin = Arc::new(ExternalPlugin {
+            manifest: manifest(),
+            sender,
+            stop: CancellationToken::new(),
+            process: Arc::new(Mutex::new(None)),
+            supervisor: tokio::sync::Mutex::new(Some(supervisor)),
+            shutdown_wait: tokio::sync::Mutex::new(()),
+            cleanup: Mutex::new(None),
+            identity: None,
+        });
+
+        let first_plugin = plugin.clone();
+        let first = tokio::spawn(async move { first_plugin.wait_shutdown().await });
+        entered.notified().await;
+        // Wait until the waiter owns the supervisor slot, not just until the runner started.
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if plugin.supervisor.try_lock().is_err() {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        first.abort();
+        assert!(first.await.unwrap_err().is_cancelled());
+        release.notify_one();
+        let result = plugin.wait_shutdown().await;
+        assert!(result.unwrap_err().outcome_unknown());
     }
 
     #[tokio::test]

@@ -1483,3 +1483,146 @@ async fn dropped_exec_and_wait_poll_the_same_capability_through_cleanup() {
         cells.close().await;
     }
 }
+
+#[tokio::test]
+async fn empty_settlement_keeps_unrepaired_lifecycle_error_frozen() {
+    let dir = tempfile::tempdir().unwrap();
+    let journal = Arc::new(SqliteJournal::open(dir.path().join("cells.db")).unwrap());
+    let backend = Backend::new(true);
+    let reads = ReadCoordinator::new(vec![], CellLimits::default()).unwrap();
+    let cells = manager(identity("old"), journal.clone(), backend.clone(), reads);
+    let page = terminal(
+        &cells,
+        cells
+            .exec(
+                request("cayw.call('unknown',{key='original'})"),
+                "parent",
+                CancellationToken::new(),
+            )
+            .await
+            .unwrap(),
+    )
+    .await;
+    let original = cells.record(&page.cell_id).unwrap();
+    assert!(original.backend_error.is_some());
+    cells.close().await;
+    drop(cells);
+    let stopped = journal
+        .stopped_scope(
+            ExecutorStopped {
+                identity: identity("old"),
+                evidence: "original VM joined".into(),
+            },
+            CellLimits::default(),
+        )
+        .unwrap();
+    let input = HostSettlement {
+        execution: original.execution(),
+        calls: vec![],
+        execution_terminal: None,
+        evidence: "VM stopped; capability and lifecycle receipts still unknown".into(),
+    };
+    let settled = stopped.settle(input.clone()).unwrap();
+    assert_eq!(settled.backend_error, original.backend_error);
+    assert_eq!(settled.status, CellStatus::OutcomeUnknown);
+    assert_eq!(settled.calls[0].status, IntentStatus::OutcomeUnknown);
+    assert_eq!(stopped.settle(input).unwrap().revision, settled.revision);
+    assert!(matches!(stopped.finish(), Err(CellError::Frozen)));
+    assert_eq!(backend.calls.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn explicit_unknown_execution_repairs_only_the_lifecycle_debt() {
+    let dir = tempfile::tempdir().unwrap();
+    let journal = Arc::new(SqliteJournal::open(dir.path().join("cells.db")).unwrap());
+    let backend = Backend::new(true);
+    let reads = ReadCoordinator::new(vec![], CellLimits::default()).unwrap();
+    let cells = manager(identity("old"), journal.clone(), backend.clone(), reads);
+    let page = terminal(
+        &cells,
+        cells
+            .exec(
+                request("cayw.call('unknown',{key='original'})"),
+                "parent",
+                CancellationToken::new(),
+            )
+            .await
+            .unwrap(),
+    )
+    .await;
+    let original = cells.record(&page.cell_id).unwrap();
+    assert!(original.backend_error.is_some());
+    cells.close().await;
+    drop(cells);
+    let stopped = journal
+        .stopped_scope(
+            ExecutorStopped {
+                identity: identity("old"),
+                evidence: "original VM joined".into(),
+            },
+            CellLimits::default(),
+        )
+        .unwrap();
+    let input = HostSettlement {
+        execution: original.execution(),
+        calls: vec![],
+        execution_terminal: Some(HostExecutionSettlement {
+            expected_backend_error: original.backend_error.clone(),
+            terminal: CellTerminal {
+                status: CellStatus::OutcomeUnknown,
+                error: original.error.clone(),
+                outcome_unknown: true,
+                stop: original.stop,
+            },
+            evidence: "exact host execution Interrupted terminal was persisted and read back"
+                .into(),
+        }),
+        evidence: "lifecycle repair only; original capability remains unknown".into(),
+    };
+    let mut wrong = input.clone();
+    wrong
+        .execution_terminal
+        .as_mut()
+        .unwrap()
+        .expected_backend_error = Some("unrelated error".into());
+    assert!(matches!(stopped.settle(wrong), Err(CellError::Conflict)));
+    let settled = stopped.settle(input.clone()).unwrap();
+    assert!(settled.backend_error.is_none());
+    assert_eq!(settled.status, CellStatus::OutcomeUnknown);
+    assert_eq!(settled.calls[0].status, IntentStatus::OutcomeUnknown);
+    assert_eq!(
+        stopped.settle(input.clone()).unwrap().revision,
+        settled.revision
+    );
+    stopped.finish().unwrap();
+    let intent = &original.calls[0];
+    let known = stopped
+        .settle(HostSettlement {
+            execution: original.execution(),
+            calls: vec![HostCallSettlement {
+                sequence: intent.sequence,
+                name: intent.name.clone(),
+                arguments: intent.arguments.clone(),
+                dependencies: intent.dependencies.clone(),
+                terminal: HostCallTerminal::Succeeded {
+                    result: HostResult::Value(json!("host-observed-effect")),
+                },
+            }],
+            execution_terminal: Some(HostExecutionSettlement {
+                expected_backend_error: None,
+                terminal: CellTerminal {
+                    status: CellStatus::Reconciled,
+                    error: None,
+                    outcome_unknown: false,
+                    stop: None,
+                },
+                evidence: "original capability receipt verified".into(),
+            }),
+            evidence: "all original effects now known".into(),
+        })
+        .unwrap();
+    let replay = stopped.settle(input).unwrap();
+    assert_eq!(replay.status, CellStatus::Reconciled);
+    assert_eq!(replay.revision, known.revision);
+    assert_eq!(backend.calls.load(Ordering::SeqCst), 1);
+}

@@ -109,6 +109,10 @@ pub(crate) fn execute(
 fn syntax_shape(text: &str, max_depth: usize, context: &Context) -> Result<(), CapabilityError> {
     let bytes = text.as_bytes();
     let mut at = 0;
+    // Angle candidates belong to their delimiter scope. A completed block,
+    // parenthesized expression, or statement cannot leave an open generic in
+    // its enclosing scope; const blocks must not erase the enclosing generic.
+    let mut angles = vec![0usize];
     let mut nesting = 0usize;
     let mut prefix_steps = 0usize;
     while at < bytes.len() {
@@ -240,11 +244,27 @@ fn syntax_shape(text: &str, max_depth: usize, context: &Context) -> Result<(), C
             } else {
                 prefix_steps = 0;
             }
-            if matches!(bytes[at], b'(' | b'[' | b'{' | b'<') {
-                nesting += 1;
-            }
-            if matches!(bytes[at], b')' | b']' | b'}' | b'>') {
-                nesting = nesting.saturating_sub(1);
+            match bytes[at] {
+                b'(' | b'[' | b'{' => {
+                    angles.push(0);
+                    nesting += 1;
+                }
+                b')' | b']' | b'}' if angles.len() > 1 => {
+                    nesting = nesting.saturating_sub(1 + angles.pop().unwrap());
+                }
+                b'<' if bytes.get(at + 1) != Some(&b'=') => {
+                    *angles.last_mut().unwrap() += 1;
+                    nesting += 1;
+                }
+                b'>' if *angles.last().unwrap() > 0 => {
+                    *angles.last_mut().unwrap() -= 1;
+                    nesting -= 1;
+                }
+                b';' => {
+                    nesting -= *angles.last().unwrap();
+                    *angles.last_mut().unwrap() = 0;
+                }
+                _ => {}
             }
             if nesting > max_depth || prefix_steps > 512 {
                 return Err(failure("Rust syntax complexity limit exceeded"));
@@ -531,13 +551,71 @@ fn hunk_header(text: &str) -> Result<(Range, Range), CapabilityError> {
         .ok_or_else(|| failure("malformed unified diff ranges"))?;
     Ok((range(old, '-')?, range(new, '+')?))
 }
+// Decode a Git C-quoted pathname and return the unconsumed header suffix.
+fn quoted_diff_path(input: &str) -> Result<(String, &str), CapabilityError> {
+    let bytes = input.as_bytes();
+    let mut out = Vec::new();
+    let mut at = 1;
+    while at < bytes.len() {
+        match bytes[at] {
+            b'"' => {
+                return Ok((
+                    String::from_utf8(out).map_err(|_| failure("diff path is not UTF-8"))?,
+                    &input[at + 1..],
+                ));
+            }
+            b'\\' => {
+                at += 1;
+                let byte = *bytes
+                    .get(at)
+                    .ok_or_else(|| failure("unfinished diff path escape"))?;
+                match byte {
+                    b'0'..=b'7' => {
+                        let mut value = 0u16;
+                        let mut count = 0;
+                        while count < 3 && at < bytes.len() && matches!(bytes[at], b'0'..=b'7') {
+                            value = value * 8 + u16::from(bytes[at] - b'0');
+                            at += 1;
+                            count += 1;
+                        }
+                        out.push(
+                            u8::try_from(value).map_err(|_| failure("invalid diff path escape"))?,
+                        );
+                        continue;
+                    }
+                    b'a' => out.push(7),
+                    b'b' => out.push(8),
+                    b't' => out.push(b'\t'),
+                    b'n' => out.push(b'\n'),
+                    b'v' => out.push(11),
+                    b'f' => out.push(12),
+                    b'r' => out.push(b'\r'),
+                    b'\\' | b'"' => out.push(byte),
+                    _ => return Err(failure("invalid diff path escape")),
+                }
+            }
+            byte => out.push(byte),
+        }
+        at += 1;
+    }
+    Err(failure("unfinished quoted diff path"))
+}
+
 fn diff_path(header: &str, marker: &str, prefix: &str) -> Result<Option<String>, CapabilityError> {
-    let path = header
+    let raw = header
         .strip_prefix(marker)
-        .ok_or_else(|| failure("missing unified diff file header"))?
-        .split('\t')
-        .next()
-        .unwrap_or_default();
+        .ok_or_else(|| failure("missing unified diff file header"))?;
+    let decoded;
+    let path = if raw.starts_with('"') {
+        let (path, rest) = quoted_diff_path(raw)?;
+        if !rest.is_empty() && !rest.starts_with('\t') {
+            return Err(failure("invalid suffix after quoted diff path"));
+        }
+        decoded = path;
+        decoded.as_str()
+    } else {
+        raw.split('\t').next().unwrap_or_default()
+    };
     if path == "/dev/null" {
         return Ok(None);
     }
@@ -546,6 +624,40 @@ fn diff_path(header: &str, marker: &str, prefix: &str) -> Result<Option<String>,
         .map_err(|error| failure(format!("invalid diff path: {}", error.message)))?;
     Ok(Some(path.into()))
 }
+
+fn match_git_path<'a>(input: &'a str, expected: &str) -> Result<&'a str, CapabilityError> {
+    if input.starts_with('"') {
+        let (path, rest) = quoted_diff_path(input)?;
+        if path == expected {
+            return Ok(rest);
+        }
+    } else if let Some(rest) = input.strip_prefix(expected) {
+        return Ok(rest);
+    }
+    Err(failure("Git and unified diff paths disagree"))
+}
+
+fn check_git_paths(
+    wrapper: &str,
+    old: Option<&str>,
+    new: Option<&str>,
+) -> Result<(), CapabilityError> {
+    let old_path = old
+        .or(new)
+        .ok_or_else(|| failure("both diff paths are /dev/null"))?;
+    let new_path = new
+        .or(old)
+        .ok_or_else(|| failure("both diff paths are /dev/null"))?;
+    let rest = match_git_path(wrapper, &format!("a/{old_path}"))?;
+    let rest = rest
+        .strip_prefix(' ')
+        .ok_or_else(|| failure("malformed Git diff paths"))?;
+    if !match_git_path(rest, &format!("b/{new_path}"))?.is_empty() {
+        return Err(failure("Git and unified diff paths disagree"));
+    }
+    Ok(())
+}
+
 fn diff(
     text: &str,
     max: usize,
@@ -578,7 +690,7 @@ fn diff(
     let mut hunks: Vec<Value> = vec![];
     let mut section_hunks = 0;
     let mut paths: Option<(Option<String>, Option<String>)> = None;
-    let mut git_paths: Option<(Option<String>, Option<String>)> = None;
+    let mut git_paths: Option<&str> = None;
     let mut at = 0;
     let mut hunk_count = 0;
     let mut last_old = 0;
@@ -596,16 +708,7 @@ fn diff(
             if git_paths.is_some() {
                 return Err(failure("Git diff metadata has no file headers"));
             }
-            let Some((old, new)) = line
-                .strip_prefix("diff --git ")
-                .and_then(|s| s.split_once(' '))
-            else {
-                return Err(failure("malformed Git diff paths"));
-            };
-            git_paths = Some((
-                diff_path(&format!("--- {old}"), "--- ", "a/")?,
-                diff_path(&format!("+++ {new}"), "+++ ", "b/")?,
-            ));
+            git_paths = line.strip_prefix("diff --git ");
             at += 1;
             continue;
         }
@@ -635,11 +738,8 @@ fn diff(
             if old.is_none() && new.is_none() {
                 return Err(failure("both diff paths are /dev/null"));
             }
-            if let Some((git_old, git_new)) = git_paths.take()
-                && (old.as_ref().is_some_and(|p| Some(p) != git_old.as_ref())
-                    || new.as_ref().is_some_and(|p| Some(p) != git_new.as_ref()))
-            {
-                return Err(failure("Git and unified diff paths disagree"));
+            if let Some(wrapper) = git_paths.take() {
+                check_git_paths(wrapper, old.as_deref(), new.as_deref())?;
             }
             let header = json!({"old_path":old,"new_path":new});
             output.add(&header)?;

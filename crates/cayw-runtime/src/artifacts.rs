@@ -76,6 +76,13 @@ impl RuntimeHostDispatch {
         lock(&self.flights).remove(action_id)
     }
 
+    // Called only after the synchronous worker driver has returned/joined.
+    fn settle_tool_flight(&self, action_id: &str, started: bool, stopped: bool) {
+        if !started || stopped {
+            self.take_flight(action_id);
+        }
+    }
+
     pub(crate) fn is_flight_active(&self, action_id: &str) -> bool {
         let mut flights = lock(&self.flights);
         if let Some(flight) = flights.get(action_id) {
@@ -223,6 +230,9 @@ impl HostActionDispatch for RuntimeHostDispatch {
         )
         .map_err(HostDispatchError::rejected)?;
         let executor = Arc::new(_executor);
+        // Joined startup/readiness failures cannot leave a running Host behind.
+        let started = Arc::new(AtomicBool::new(false));
+        let started_worker = Arc::clone(&started);
         let stopped = Arc::new(AtomicBool::new(false));
         let stopped_worker = Arc::clone(&stopped);
         let tool = req.tool.to_owned();
@@ -246,6 +256,7 @@ impl HostActionDispatch for RuntimeHostDispatch {
             session_runtime
                 .check_ready_locked(&session_id)
                 .map_err(|error| CapabilityError::new(error.to_string()))?;
+            started_worker.store(true, Ordering::Release);
             let result = host.call(&tool, args, cancel).await;
             host.close_processes();
             if let Err(error) = host.drain_processes().await {
@@ -268,9 +279,11 @@ impl HostActionDispatch for RuntimeHostDispatch {
             stopped_worker.store(true, Ordering::Release);
             result
         });
-        if stopped.load(Ordering::Acquire) {
-            self.take_flight(req.action_id);
-        }
+        self.settle_tool_flight(
+            req.action_id,
+            started.load(Ordering::Acquire),
+            stopped.load(Ordering::Acquire),
+        );
         let result = match result {
             Ok(val) => val,
             Err(err) => {
@@ -1403,6 +1416,51 @@ mod tests {
     };
     use cayw_host::AuditSink;
     use tempfile::tempdir;
+
+    #[test]
+    fn joined_tool_startup_failure_releases_flight_but_unconfirmed_cleanup_does_not() {
+        let dispatch = RuntimeHostDispatch::new(Weak::new());
+        for (started, stopped, active) in [
+            (false, false, false),
+            (true, false, true),
+            (true, true, false),
+        ] {
+            dispatch.register_flight(
+                "action",
+                ArtifactFlight::Tool {
+                    cancel: CancellationToken::new(),
+                    _executor: None,
+                },
+            );
+            dispatch.settle_tool_flight("action", started, stopped);
+            assert_eq!(dispatch.is_flight_active("action"), active);
+        }
+    }
+
+    #[test]
+    fn host_pre_call_failure_is_joined_without_starting_host() {
+        let started = Arc::new(AtomicBool::new(false));
+        let marker = started.clone();
+        let result: Result<(), CapabilityError> = block_on_host(async move {
+            let readiness: Result<(), CapabilityError> =
+                Err(CapabilityError::new("readiness failed"));
+            readiness?;
+            marker.store(true, Ordering::Release);
+            Ok(())
+        });
+        assert!(result.is_err());
+        assert!(!started.load(Ordering::Acquire));
+        let dispatch = RuntimeHostDispatch::new(Weak::new());
+        dispatch.register_flight(
+            "action",
+            ArtifactFlight::Tool {
+                cancel: CancellationToken::new(),
+                _executor: None,
+            },
+        );
+        dispatch.settle_tool_flight("action", started.load(Ordering::Acquire), false);
+        assert!(!dispatch.is_flight_active("action"));
+    }
 
     #[derive(Default)]
     struct DummyProvider;

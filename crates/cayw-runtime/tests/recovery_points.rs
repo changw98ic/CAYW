@@ -758,3 +758,31 @@ fn restore_accepts_over_256_paths_and_status_distinguishes_unborn_repo_from_dama
         "corrupted state.json must surface state_error: {damaged}"
     );
 }
+
+#[test]
+fn reused_tree_refreshes_coverage_diagnostics() {
+    let Some(git) = available_git() else {
+        return;
+    };
+    let fixture = Fixture::new();
+    fixture.write("small.txt", "small\n");
+    let points = fixture.points_with_limits(
+        &git,
+        RecoveryLimits {
+            max_file_bytes: 16,
+            ..Default::default()
+        },
+    );
+    let (id, created, complete) = point(points.ensure_point("initial").unwrap());
+    assert!(created && complete);
+    fixture.write("large.bin", &"x".repeat(1024));
+    let (again, created, complete) = point(points.ensure_point("same tree").unwrap());
+    assert_eq!(again, id);
+    assert!(!created && !complete);
+    assert_eq!(points.status()["out_of_scope"], 1);
+    fs::remove_file(fixture.workspace.join("large.bin")).unwrap();
+    let (again, created, complete) = point(points.ensure_point("same tree again").unwrap());
+    assert_eq!(again, id);
+    assert!(!created && complete);
+    assert_eq!(points.status()["out_of_scope"], 0);
+}

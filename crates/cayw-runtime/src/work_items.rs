@@ -92,13 +92,28 @@ impl AcceptanceCheck {
 
     /// Actually observe the workspace. A model cannot substitute its own text.
     pub fn evaluate(&self, workspace: &Path) -> Result<bool, RuntimeError> {
-        match self {
-            Self::PathExists { path } => Ok(workspace.join(relative(path)?).exists()),
-            Self::FileContains { path, text } => {
-                Ok(read_check_file(workspace, path)?.contains(text))
-            }
-            Self::FileEquals { path, text } => Ok(read_check_file(workspace, path)? == *text),
-        }
+        let workspace = workspace
+            .canonicalize()
+            .map_err(|error| RuntimeError::Workspace(error.to_string()))?;
+        let root = cayw_host::ReadOnlyWorkspace::open(&workspace)
+            .map_err(|error| RuntimeError::Workspace(error.to_string()))?;
+        self.evaluate_root(&root)
+    }
+
+    pub(crate) fn evaluate_root(
+        &self,
+        root: &cayw_host::ReadOnlyWorkspace,
+    ) -> Result<bool, RuntimeError> {
+        let result = match self {
+            Self::PathExists { path } => root.exists(&relative(path)?),
+            Self::FileContains { path, text } => root
+                .open_file(&relative(path)?)
+                .and_then(|file| match_check_file(file, text, false)),
+            Self::FileEquals { path, text } => root
+                .open_file(&relative(path)?)
+                .and_then(|file| match_check_file(file, text, true)),
+        };
+        result.map_err(|error| RuntimeError::Workspace(format!("acceptance check: {error}")))
     }
 }
 
@@ -119,10 +134,65 @@ fn relative(path: &str) -> Result<PathBuf, RuntimeError> {
     })
 }
 
-fn read_check_file(workspace: &Path, path: &str) -> Result<String, RuntimeError> {
-    let path = workspace.join(relative(path)?);
-    std::fs::read_to_string(&path)
-        .map_err(|error| RuntimeError::Workspace(format!("acceptance check file: {error}")))
+fn match_check_file(mut file: std::fs::File, text: &str, equals: bool) -> std::io::Result<bool> {
+    use std::io::{Error, ErrorKind, Read};
+    let pattern = text.as_bytes();
+    let mut prefix = vec![0; pattern.len()];
+    for i in 1..pattern.len() {
+        let mut j = prefix[i - 1];
+        while j > 0 && pattern[i] != pattern[j] {
+            j = prefix[j - 1];
+        }
+        if pattern[i] == pattern[j] {
+            j += 1;
+        }
+        prefix[i] = j;
+    }
+    let mut block = [0u8; 8192];
+    let mut utf8 = Vec::with_capacity(block.len() + 3);
+    let mut offset = 0usize;
+    let mut matched = 0usize;
+    let mut found = pattern.is_empty();
+    let mut equal = true;
+    loop {
+        let count = match file.read(&mut block) {
+            Err(error) if error.kind() == ErrorKind::Interrupted => continue,
+            result => result?,
+        };
+        if count == 0 {
+            break;
+        }
+        utf8.extend_from_slice(&block[..count]);
+        match std::str::from_utf8(&utf8) {
+            Ok(_) => utf8.clear(),
+            Err(error) if error.error_len().is_none() => {
+                utf8.drain(..error.valid_up_to());
+            }
+            Err(error) => return Err(Error::new(ErrorKind::InvalidData, error)),
+        }
+        for byte in &block[..count] {
+            if equals {
+                equal &= pattern.get(offset) == Some(byte);
+                offset = offset.saturating_add(1);
+            } else if !found {
+                while matched > 0 && pattern[matched] != *byte {
+                    matched = prefix[matched - 1];
+                }
+                if pattern[matched] == *byte {
+                    matched += 1;
+                }
+                found = matched == pattern.len();
+            }
+        }
+    }
+    if !utf8.is_empty() {
+        return Err(Error::new(ErrorKind::InvalidData, "incomplete UTF-8"));
+    }
+    Ok(if equals {
+        equal && offset == pattern.len()
+    } else {
+        found
+    })
 }
 
 /// The text a dispatched session receives. It is built only from the durable
@@ -604,6 +674,7 @@ impl NotificationStatus {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Notification {
+    pub owner_session_id: Option<String>,
     pub notification_id: String,
     pub work_id: String,
     pub work_version: u64,
@@ -614,6 +685,14 @@ pub struct Notification {
     pub receipt_ref: Option<String>,
     pub created_at: u64,
     pub updated_at: u64,
+}
+
+pub(crate) enum NotificationEnqueue {
+    Existing(Notification),
+    Ready {
+        notification: Notification,
+        envelope: serde_json::Value,
+    },
 }
 
 /// What the sender may do next. An unknown result never means "resend".
@@ -683,6 +762,8 @@ impl WorkItems {
              );
              CREATE TABLE IF NOT EXISTS runtime_notifications (
                 notification_id TEXT PRIMARY KEY,
+                owner_session_id TEXT,
+                envelope TEXT,
                 work_id TEXT NOT NULL,
                 work_version INTEGER NOT NULL,
                 target TEXT NOT NULL,
@@ -933,6 +1014,22 @@ impl WorkItems {
         writer: &str,
         at: u64,
     ) -> Result<WorkItem, RuntimeError> {
+        let workspace = workspace
+            .canonicalize()
+            .map_err(|error| RuntimeError::Workspace(error.to_string()))?;
+        let root = cayw_host::ReadOnlyWorkspace::open(&workspace)
+            .map_err(|error| RuntimeError::Workspace(error.to_string()))?;
+        self.evaluate_acceptance_root_at(work_id, criterion_id, &root, writer, at)
+    }
+
+    pub(crate) fn evaluate_acceptance_root_at(
+        &self,
+        work_id: &str,
+        criterion_id: &str,
+        root: &cayw_host::ReadOnlyWorkspace,
+        writer: &str,
+        at: u64,
+    ) -> Result<WorkItem, RuntimeError> {
         // Observe the check before taking the write transaction. Running an
         // external program while holding a SQLite IMMEDIATE lock would block
         // unrelated durable writes for its whole duration.
@@ -957,7 +1054,7 @@ impl WorkItems {
                 })?
         };
         // The observable result comes from the check, never from caller text.
-        let passed = check.evaluate(workspace)?;
+        let passed = check.evaluate_root(root)?;
         let mut db = lock(&self.connection);
         let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let mut item = load(&tx, work_id)?
@@ -1515,6 +1612,7 @@ impl WorkItems {
 
     /// Save the send intent before any external action. The target must come
     /// from user configuration; a model cannot add one here.
+    #[allow(clippy::too_many_arguments)]
     pub fn prepare_notification(
         &self,
         work_id: &str,
@@ -1523,6 +1621,7 @@ impl WorkItems {
         content_ref: Option<&str>,
         artifact_refs: &[String],
         user_targets: &[String],
+        owner_session_id: Option<&str>,
     ) -> Result<Notification, RuntimeError> {
         if !user_targets.iter().any(|allowed| allowed == target) {
             return Err(RuntimeError::InvalidInput(
@@ -1531,6 +1630,7 @@ impl WorkItems {
         }
         let at = now_ms();
         let notification = Notification {
+            owner_session_id: owner_session_id.map(str::to_owned),
             notification_id: uuid::Uuid::new_v4().to_string(),
             work_id: work_id.into(),
             work_version,
@@ -1545,7 +1645,7 @@ impl WorkItems {
         let mut db = lock(&self.connection);
         let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
         tx.execute(
-            "INSERT INTO runtime_notifications(notification_id,work_id,work_version,target,content_ref,artifact_refs,status,receipt_ref,created_at,updated_at) VALUES (?1,?2,?3,?4,?5,?6,'pending',NULL,?7,?8)",
+            "INSERT INTO runtime_notifications(notification_id,work_id,work_version,target,content_ref,artifact_refs,status,receipt_ref,created_at,updated_at,owner_session_id) VALUES (?1,?2,?3,?4,?5,?6,'pending',NULL,?7,?8,?9)",
             params![
                 notification.notification_id,
                 notification.work_id,
@@ -1554,7 +1654,8 @@ impl WorkItems {
                 notification.content_ref,
                 serde_json::to_string(&notification.artifact_refs)?,
                 sql_u64(at, "notification time")?,
-                sql_u64(at, "notification time")?
+                sql_u64(at, "notification time")?,
+                notification.owner_session_id,
             ],
         )?;
         tx.commit()?;
@@ -1571,12 +1672,104 @@ impl WorkItems {
     pub fn notifications_for_work(&self, work_id: &str) -> Result<Vec<Notification>, RuntimeError> {
         let db = lock(&self.connection);
         let mut statement = db.prepare(
-            "SELECT notification_id,work_id,work_version,target,content_ref,artifact_refs,status,receipt_ref,created_at,updated_at FROM runtime_notifications WHERE work_id=?1 ORDER BY created_at",
+            "SELECT notification_id,work_id,work_version,target,content_ref,artifact_refs,status,receipt_ref,created_at,updated_at,owner_session_id FROM runtime_notifications WHERE work_id=?1 ORDER BY created_at",
         )?;
         let rows = statement
             .query_map([work_id], notification_row)?
             .collect::<Result<Vec<_>, _>>()?;
         rows.into_iter().map(notification_from_row).collect()
+    }
+
+    /// Commit one writer's ownership before touching the external JSONL outbox.
+    /// A crash after this point leaves this notification Unknown for host verification.
+    pub(crate) fn claim_notification_enqueue(
+        &self,
+        id: &str,
+        text: Option<&str>,
+    ) -> Result<NotificationEnqueue, RuntimeError> {
+        self.notification_enqueue(id, text, true)
+    }
+
+    /// Fix the payload while waiting without claiming that any write may have begun.
+    pub(crate) fn prepare_notification_enqueue(
+        &self,
+        id: &str,
+        text: Option<&str>,
+    ) -> Result<NotificationEnqueue, RuntimeError> {
+        self.notification_enqueue(id, text, false)
+    }
+
+    fn notification_enqueue(
+        &self,
+        id: &str,
+        text: Option<&str>,
+        claim: bool,
+    ) -> Result<NotificationEnqueue, RuntimeError> {
+        let mut db = lock(&self.connection);
+        let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let notification = load_notification(&tx, id)?
+            .ok_or_else(|| RuntimeError::InvalidInput("notification not found".into()))?;
+        let saved: Option<String> = tx.query_row(
+            "SELECT envelope FROM runtime_notifications WHERE notification_id=?1",
+            [id],
+            |row| row.get(0),
+        )?;
+        let envelope = match saved {
+            Some(saved) => {
+                let envelope: serde_json::Value = serde_json::from_str(&saved)?;
+                if text.is_some_and(|text| envelope["text"].as_str() != Some(text)) {
+                    return Err(RuntimeError::InvalidInput("notification payload is already fixed; create a new intent for different text".into()));
+                }
+                envelope
+            }
+            None => serde_json::json!({
+                "notification_id": notification.notification_id,
+                "work_id": notification.work_id,
+                "work_version": notification.work_version,
+                "target": notification.target,
+                "text": text.or(notification.content_ref.as_deref()).unwrap_or(""),
+                "content_ref": notification.content_ref,
+                "artifact_refs": notification.artifact_refs,
+                "status": "queued",
+            }),
+        };
+        match notification.status {
+            NotificationStatus::Pending => {
+                tx.execute(
+                    "UPDATE runtime_notifications SET status=?4,envelope=?2,updated_at=?3 WHERE notification_id=?1 AND status='pending'",
+                    params![id, serde_json::to_string(&envelope)?, sql_u64(now_ms(), "notification time")?, if claim { "unknown" } else { "pending" }],
+                )?;
+                tx.commit()?;
+                Ok(NotificationEnqueue::Ready {
+                    notification,
+                    envelope,
+                })
+            }
+            NotificationStatus::Unknown => Err(RuntimeError::InvalidInput(format!(
+                "notification {id} enqueue or delivery outcome is unknown; verify the outbox or query a real receipt before resending"
+            ))),
+            _ => Ok(NotificationEnqueue::Existing(notification)),
+        }
+    }
+
+    /// Only the writer that committed the exact envelope may settle its local enqueue.
+    /// A concurrently recorded real receipt takes precedence over this local observation.
+    pub(crate) fn settle_notification_enqueue(
+        &self,
+        id: &str,
+        envelope: &serde_json::Value,
+        written: bool,
+    ) -> Result<Notification, RuntimeError> {
+        let mut db = lock(&self.connection);
+        let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        tx.execute(
+            "UPDATE runtime_notifications SET status=?3,updated_at=?4 WHERE notification_id=?1 AND envelope=?2 AND status='unknown' AND receipt_ref IS NULL",
+            params![id, serde_json::to_string(envelope)?, if written { "queued" } else { "pending" }, sql_u64(now_ms(), "notification time")?],
+        )?;
+        let notification = load_notification(&tx, id)?
+            .ok_or_else(|| RuntimeError::InvalidInput("notification not found".into()))?;
+        tx.commit()?;
+        Ok(notification)
     }
 
     /// Record that the notification envelope has been persisted to the local
@@ -1789,6 +1982,7 @@ fn input_record(
 
 fn notification_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<NotificationRow> {
     Ok(NotificationRow {
+        owner_session_id: row.get(10)?,
         notification_id: row.get(0)?,
         work_id: row.get(1)?,
         work_version: read_u64(row, 2)?,
@@ -1803,6 +1997,7 @@ fn notification_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<NotificationRow
 }
 
 struct NotificationRow {
+    owner_session_id: Option<String>,
     notification_id: String,
     work_id: String,
     work_version: u64,
@@ -1817,6 +2012,7 @@ struct NotificationRow {
 
 fn notification_from_row(row: NotificationRow) -> Result<Notification, RuntimeError> {
     Ok(Notification {
+        owner_session_id: row.owner_session_id,
         notification_id: row.notification_id,
         work_id: row.work_id,
         work_version: row.work_version,
@@ -1836,10 +2032,289 @@ fn load_notification(
 ) -> Result<Option<Notification>, RuntimeError> {
     let row: Option<NotificationRow> = connection
         .query_row(
-            "SELECT notification_id,work_id,work_version,target,content_ref,artifact_refs,status,receipt_ref,created_at,updated_at FROM runtime_notifications WHERE notification_id=?1",
+            "SELECT notification_id,work_id,work_version,target,content_ref,artifact_refs,status,receipt_ref,created_at,updated_at,owner_session_id FROM runtime_notifications WHERE notification_id=?1",
             [notification_id],
             notification_row,
         )
         .optional()?;
     row.map(notification_from_row).transpose()
+}
+
+#[cfg(test)]
+mod acceptance_read_tests {
+    use super::*;
+
+    #[test]
+    fn stream_checks_cross_blocks_and_validate_the_tail() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().canonicalize().unwrap();
+        let mut content = "x".repeat(8191);
+        content.push_str("你好 needle tail");
+        std::fs::write(root.join("file"), &content).unwrap();
+        assert!(
+            AcceptanceCheck::FileContains {
+                path: "file".into(),
+                text: "你好 needle".into()
+            }
+            .evaluate(&root)
+            .unwrap()
+        );
+        assert!(
+            AcceptanceCheck::FileEquals {
+                path: "file".into(),
+                text: content.clone()
+            }
+            .evaluate(&root)
+            .unwrap()
+        );
+        let mut bytes = content.into_bytes();
+        bytes.push(0xff);
+        std::fs::write(root.join("file"), bytes).unwrap();
+        assert!(
+            AcceptanceCheck::FileContains {
+                path: "file".into(),
+                text: "needle".into()
+            }
+            .evaluate(&root)
+            .is_err()
+        );
+        assert!(
+            !AcceptanceCheck::PathExists {
+                path: "missing/file".into()
+            }
+            .evaluate(&root)
+            .unwrap()
+        );
+    }
+
+    #[test]
+    fn text_check_rejects_fifo_without_waiting_for_a_writer() {
+        use std::os::unix::ffi::OsStrExt;
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().canonicalize().unwrap();
+        let path = root.join("fifo");
+        let name = std::ffi::CString::new(path.as_os_str().as_bytes()).unwrap();
+        // SAFETY: name is a live, NUL-terminated path in this test's temporary directory.
+        assert_eq!(unsafe { libc::mkfifo(name.as_ptr(), 0o600) }, 0);
+        assert!(
+            AcceptanceCheck::FileContains {
+                path: "fifo".into(),
+                text: "anything".into()
+            }
+            .evaluate(&root)
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn check_rejects_external_links_and_keeps_the_open_root() {
+        use std::os::unix::fs::symlink;
+        let temp = tempfile::tempdir().unwrap();
+        let base = temp.path().canonicalize().unwrap();
+        let root = base.join("workspace");
+        std::fs::create_dir(&root).unwrap();
+        std::fs::write(base.join("outside"), "secret").unwrap();
+        symlink(base.join("outside"), root.join("link")).unwrap();
+        assert!(
+            AcceptanceCheck::FileContains {
+                path: "link".into(),
+                text: "secret".into()
+            }
+            .evaluate(&root)
+            .is_err()
+        );
+        assert!(
+            AcceptanceCheck::PathExists {
+                path: "link".into()
+            }
+            .evaluate(&root)
+            .is_err()
+        );
+        symlink(&base, root.join("directory")).unwrap();
+        assert!(
+            AcceptanceCheck::PathExists {
+                path: "directory/outside".into()
+            }
+            .evaluate(&root)
+            .is_err()
+        );
+        let anchored = cayw_host::ReadOnlyWorkspace::open(&root).unwrap();
+        std::fs::write(root.join("inside"), "original").unwrap();
+        std::fs::rename(&root, base.join("moved")).unwrap();
+        std::fs::create_dir(&root).unwrap();
+        std::fs::write(root.join("inside"), "replacement").unwrap();
+        assert!(
+            AcceptanceCheck::FileEquals {
+                path: "inside".into(),
+                text: "original".into()
+            }
+            .evaluate_root(&anchored)
+            .unwrap()
+        );
+    }
+}
+
+#[cfg(test)]
+mod notification_enqueue_tests {
+    use super::*;
+
+    fn pending(store: &WorkItems) -> Notification {
+        store
+            .prepare_notification(
+                "main-session",
+                1,
+                "desk",
+                Some("initial"),
+                &[],
+                &["desk".into()],
+                Some("owner"),
+            )
+            .unwrap()
+    }
+
+    #[test]
+    fn only_one_connection_claims_and_a_real_receipt_wins() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("notifications.sqlite");
+        let store = WorkItems::open(&path).unwrap();
+        let notification = pending(&store);
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
+        let threads = (0..2)
+            .map(|_| {
+                let path = path.clone();
+                let id = notification.notification_id.clone();
+                let barrier = barrier.clone();
+                std::thread::spawn(move || {
+                    let store = WorkItems::open(path).unwrap();
+                    barrier.wait();
+                    match store.claim_notification_enqueue(&id, Some("final")) {
+                        Ok(NotificationEnqueue::Ready { envelope, .. }) => Some(envelope),
+                        Err(_) => None,
+                        Ok(NotificationEnqueue::Existing(_)) => panic!("no writer has settled yet"),
+                    }
+                })
+            })
+            .collect::<Vec<_>>();
+        let claimed = threads
+            .into_iter()
+            .filter_map(|thread| thread.join().unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(claimed.len(), 1);
+        let envelope = &claimed[0];
+        assert_eq!(envelope["text"], "final");
+        assert!(
+            store
+                .claim_notification_enqueue(&notification.notification_id, Some("changed"))
+                .is_err()
+        );
+        store
+            .record_notification_receipt(
+                &notification.notification_id,
+                NotificationStatus::Delivered,
+                "service:verified",
+            )
+            .unwrap();
+        let final_status = store
+            .settle_notification_enqueue(&notification.notification_id, envelope, true)
+            .unwrap();
+        assert_eq!(final_status.status, NotificationStatus::Delivered);
+        assert_eq!(
+            final_status.receipt_ref.as_deref(),
+            Some("service:verified")
+        );
+        assert!(matches!(
+            store
+                .claim_notification_enqueue(&notification.notification_id, Some("final"))
+                .unwrap(),
+            NotificationEnqueue::Existing(_)
+        ));
+    }
+
+    #[test]
+    fn crash_after_claim() {
+        let Ok(path) = std::env::var("CAYW_TEST_ENQUEUE_DB") else {
+            return;
+        };
+        let id = std::env::var("CAYW_TEST_ENQUEUE_ID").unwrap();
+        let store = WorkItems::open(&path).unwrap();
+        let NotificationEnqueue::Ready { envelope, .. } = store
+            .claim_notification_enqueue(&id, Some("final"))
+            .unwrap()
+        else {
+            panic!("expected claim");
+        };
+        if let Ok(outbox) = std::env::var("CAYW_TEST_ENQUEUE_FILE") {
+            use std::io::Write;
+            let mut file = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(outbox)
+                .unwrap();
+            serde_json::to_writer(&mut file, &envelope).unwrap();
+            file.write_all(b"\n").unwrap();
+            file.sync_all().unwrap();
+        }
+        // Deliberately skip destructors and the local Queued acknowledgement.
+        std::process::exit(86);
+    }
+
+    #[test]
+    fn reopened_claims_do_not_repeat_an_uncertain_append() {
+        for written in [false, true] {
+            let temp = tempfile::tempdir().unwrap();
+            let path = temp.path().join("notifications.sqlite");
+            let outbox = temp.path().join("notifications.jsonl");
+            let store = WorkItems::open(&path).unwrap();
+            let notification = pending(&store);
+            drop(store);
+            let mut child = std::process::Command::new(std::env::current_exe().unwrap());
+            child
+                .args([
+                    "--exact",
+                    "work_items::notification_enqueue_tests::crash_after_claim",
+                    "--nocapture",
+                ])
+                .env("CAYW_TEST_ENQUEUE_DB", &path)
+                .env("CAYW_TEST_ENQUEUE_ID", &notification.notification_id)
+                .env_remove("CAYW_TEST_ENQUEUE_FILE");
+            if written {
+                child.env("CAYW_TEST_ENQUEUE_FILE", &outbox);
+            }
+            assert_eq!(child.status().unwrap().code(), Some(86));
+            let before = std::fs::read(&outbox).ok();
+            assert_eq!(before.is_some(), written);
+            let store = WorkItems::open(&path).unwrap();
+            assert_eq!(
+                store
+                    .notification(&notification.notification_id)
+                    .unwrap()
+                    .unwrap()
+                    .status,
+                NotificationStatus::Unknown
+            );
+            assert!(
+                store
+                    .claim_notification_enqueue(&notification.notification_id, Some("final"))
+                    .is_err()
+            );
+            assert_eq!(std::fs::read(&outbox).ok(), before);
+            store
+                .record_notification_receipt(
+                    &notification.notification_id,
+                    if written {
+                        NotificationStatus::Delivered
+                    } else {
+                        NotificationStatus::Failed
+                    },
+                    "fixture-host-verified-outcome",
+                )
+                .unwrap();
+            assert!(matches!(
+                store
+                    .claim_notification_enqueue(&notification.notification_id, None)
+                    .unwrap(),
+                NotificationEnqueue::Existing(_)
+            ));
+        }
+    }
 }

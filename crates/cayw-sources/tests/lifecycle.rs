@@ -177,6 +177,7 @@ async fn lazy_prepare_stops_probe_and_starts_on_codemode_call() {
     registry.disconnect("local").unwrap();
     tokio::time::timeout(Duration::from_secs(5), control.wait_closed())
         .await
+        .unwrap()
         .unwrap();
 }
 
@@ -240,6 +241,7 @@ async fn lazy_idle_timeout_recycles_without_dropping_catalog() {
     registry.disconnect("local").unwrap();
     tokio::time::timeout(Duration::from_secs(5), control.wait_closed())
         .await
+        .unwrap()
         .unwrap();
 }
 
@@ -290,6 +292,7 @@ async fn import_product_entry_lands_source_in_registry() {
         report.installed[0].control.wait_closed(),
     )
     .await
+    .unwrap()
     .unwrap();
 }
 
@@ -347,5 +350,27 @@ async fn concurrent_lazy_calls_serialize_under_connect_lock_without_duplicate_sp
     registry.disconnect("local").unwrap();
     tokio::time::timeout(Duration::from_secs(5), control.wait_closed())
         .await
+        .unwrap()
+        .unwrap();
+}
+
+#[tokio::test]
+async fn managed_prepare_accepts_imported_forty_eight_hour_timeout() {
+    let root = tempfile::tempdir().unwrap();
+    let prepared = ManagedStdio::prepare(
+        spec(
+            root.path(),
+            LifecycleMode::Lazy,
+            Duration::from_secs(48 * 60 * 60),
+        ),
+        CancellationToken::new(),
+    )
+    .await
+    .unwrap();
+    let control = prepared.control();
+    control.close();
+    tokio::time::timeout(Duration::from_secs(5), control.wait_closed())
+        .await
+        .unwrap()
         .unwrap();
 }

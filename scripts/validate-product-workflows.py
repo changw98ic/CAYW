@@ -153,16 +153,23 @@ try:
     rpc(ready, token, 'settings.plugins.enable', {'name':'process','approve_process':True})
     # Make the management lock invalid: stop must fail before unloading, with
     # explicit uncertainty; repair only our fixture file and retry explicitly.
-    lock = state_dir/'init.lock'; backup_lock = state_dir/'init-lock.bak'
-    lock.rename(backup_lock); lock.mkdir()
+    data_dir = Path(env['CAYW_HOME'])
+    lock = data_dir/'init.lock'; backup_lock = data_dir/'init-lock.bak'
+    assert not backup_lock.exists(), 'fixture lock backup already exists'
+    lock.rename(backup_lock)
+    lock_directory_created = False
     try:
+        lock.mkdir()
+        lock_directory_created = True
         failed_stop = rpc(ready, token, 'settings.plugins.disable', {'name':'process'}, good=False)
         assert failed_stop['outcome_unknown']
         live = next(entry for entry in rpc(ready, token, 'settings.plugins.list')['entries']
                     if entry['name'] == 'process')
         assert live['enabled'] and live['available']
     finally:
-        lock.rmdir(); backup_lock.rename(lock)
+        if lock_directory_created:
+            lock.rmdir()
+        backup_lock.rename(lock)
     rpc(ready, token, 'settings.plugins.disable', {'name':'process'})
     rpc(ready, token, 'settings.plugins.enable', {'name':'process','approve_process':True})
     checks.append('workspace architecture plugin registration, explicit approval and handshake; disable keeps an ordinary Session usable; failed update and failed enable remain explicit')

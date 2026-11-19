@@ -127,3 +127,131 @@ fn dimension_mismatch_is_explicit() {
     let err = router.pixel_diff(&a, &b, 0).unwrap_err();
     assert!(matches!(err, VisionError::DimensionMismatch(_)));
 }
+
+#[test]
+fn uneven_pixel_grids_report_the_actual_bucket_area() {
+    let router = VisionRouter::new(
+        Arc::new(FixtureOcrEngine::new()),
+        Arc::new(CountingDescribeBackend::new()),
+    );
+    for width in [1, 7, 8, 9, 10, 17] {
+        for height in [1, 7, 9, 17] {
+            let original = ImageBuffer::solid(width, height, [0, 0, 0, 255]).unwrap();
+            let changed = ImageBuffer::solid(width, height, [255, 255, 255, 255]).unwrap();
+            let report = router.pixel_diff(&original, &changed, 0).unwrap();
+            assert_eq!(
+                report.differing_pixels,
+                u64::from(width) * u64::from(height)
+            );
+            for region in report.worst_regions {
+                assert_eq!(region.differing_pixels, region.cell_pixels);
+                assert!(region.cell_pixels > 0);
+            }
+            assert_eq!(
+                router
+                    .pixel_diff(&original, &changed, 255)
+                    .unwrap()
+                    .differing_pixels,
+                0
+            );
+            assert_eq!(
+                router
+                    .pixel_diff(&original, &original, 0)
+                    .unwrap()
+                    .differing_pixels,
+                0
+            );
+            let mut pixels = original.rgba().to_vec();
+            let last = pixels.len() - 4;
+            pixels[last] = 1;
+            let sparse = ImageBuffer::from_rgba8(width, height, pixels).unwrap();
+            let sparse = router.pixel_diff(&original, &sparse, 0).unwrap();
+            assert_eq!(sparse.differing_pixels, 1);
+            assert_eq!(sparse.worst_regions.len(), 1);
+            assert!(sparse.worst_regions[0].cell_pixels >= 1);
+        }
+    }
+}
+
+#[test]
+fn concurrent_describe_results_count_only_their_own_request() {
+    use std::sync::{
+        Condvar, Mutex,
+        atomic::{AtomicU64, Ordering},
+    };
+    use std::time::Duration;
+    struct ConcurrentBackend {
+        entered: Mutex<usize>,
+        ready: Condvar,
+        billed: AtomicU64,
+    }
+    impl DescribeBackend for ConcurrentBackend {
+        fn describe(
+            &self,
+            _: &ImageBuffer,
+            request: &DescribeRequest,
+            _: &CancellationToken,
+        ) -> Result<String, VisionError> {
+            self.billed.fetch_add(1, Ordering::SeqCst);
+            let mut entered = self.entered.lock().unwrap();
+            *entered += 1;
+            self.ready.notify_all();
+            let (_guard, timeout) = self
+                .ready
+                .wait_timeout_while(entered, Duration::from_secs(10), |n| *n < 2)
+                .unwrap();
+            assert!(!timeout.timed_out(), "both calls must enter concurrently");
+            Ok(request.question.clone())
+        }
+        fn billed_requests(&self) -> u64 {
+            self.billed.load(Ordering::SeqCst)
+        }
+    }
+    let backend = Arc::new(ConcurrentBackend {
+        entered: Mutex::new(0),
+        ready: Condvar::new(),
+        billed: AtomicU64::new(0),
+    });
+    let router = Arc::new(VisionRouter::new(
+        Arc::new(FixtureOcrEngine::new()),
+        backend.clone(),
+    ));
+    let image = Arc::new(sample_glyph());
+    let workers: Vec<_> = ["first", "second"]
+        .into_iter()
+        .map(|question| {
+            let router = router.clone();
+            let image = image.clone();
+            std::thread::spawn(move || {
+                router
+                    .describe(
+                        &image,
+                        &DescribeRequest {
+                            question: question.into(),
+                            json: false,
+                        },
+                        &CancellationToken::new(),
+                    )
+                    .unwrap()
+            })
+        })
+        .collect();
+    for worker in workers {
+        assert_eq!(worker.join().unwrap().billed_requests, 1);
+    }
+    assert_eq!(backend.billed_requests(), 2);
+    assert_eq!(
+        router
+            .describe(
+                &image,
+                &DescribeRequest {
+                    question: "first".into(),
+                    json: false
+                },
+                &CancellationToken::new()
+            )
+            .unwrap()
+            .billed_requests,
+        0
+    );
+}

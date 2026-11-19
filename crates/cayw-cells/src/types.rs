@@ -599,10 +599,12 @@ pub enum HostResult {
     Omitted { sha256: String },
 }
 
-/// Only provide this after the host execution and every capability have durable
-/// known terminals and the old executor/Device has stopped. The exact failure
-/// string binds repair to the failed lifecycle hook, rather than an unaudited
-/// boolean that can unfreeze any execution.
+/// Durable host execution evidence after the old executor/Device has stopped.
+/// A known terminal requires every capability's known terminal. An explicitly
+/// OutcomeUnknown terminal may instead repair a matching backend lifecycle error
+/// while retaining unresolved capabilities and the cell's OutcomeUnknown state.
+/// The exact failure string binds repair to the failed lifecycle hook, rather
+/// than an unaudited boolean that can unfreeze any execution.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HostExecutionSettlement {
     pub expected_backend_error: Option<String>,

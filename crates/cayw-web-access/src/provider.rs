@@ -212,6 +212,7 @@ impl SearchProvider for FixtureSearch {
             if hits.is_empty() {
                 // Without HTTP original text, must not attribute to TrueEmpty/Challenge/StructuralMismatch.
                 Ok(SearchResponse::empty(
+                    self.name(),
                     SearchEmptyReason::Unattributed,
                     Some(SearchEvidence {
                         http_status: Some(200),
@@ -220,7 +221,7 @@ impl SearchProvider for FixtureSearch {
                     }),
                 ))
             } else {
-                let mut response = SearchResponse::new(hits);
+                let mut response = SearchResponse::new(self.name(), hits);
                 response.truncated = truncated;
                 Ok(response)
             }

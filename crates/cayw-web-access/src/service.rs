@@ -169,12 +169,12 @@ impl WebAccess {
                 title: h.title.clone(),
                 snippet: h.snippet.clone(),
                 content_ref: None,
-                provider: Some(self.search.name().into()),
+                provider: Some(response.provider.clone()),
             })
             .collect();
         Ok(SearchResult {
             query: q.to_string(),
-            provider: self.search.name().to_string(),
+            provider: response.provider,
             hits: response.hits,
             citations,
             truncated,
