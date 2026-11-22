@@ -362,18 +362,6 @@ impl AgentTool for DurableTool {
                 if record.identity != crate::cells::identity(&self.context) {
                     return Err("wait cell belongs to a different task attempt".into());
                 }
-                // Preserve the model's original call in the log; only execution
-                // receives the tool-owned numeric conversion.
-                let original = self
-                    .context
-                    .inner
-                    .store
-                    .snapshot(&self.context.lease.session_id)
-                    .map_err(|error| self.context.recorded_store_error(error))?
-                    .unresolved_calls
-                    .into_iter()
-                    .find(|call| call.call.id == input.call_id)
-                    .ok_or_else(|| "wait requires its original started tool call".to_string())?;
                 self.context
                     .inner
                     .store
@@ -382,7 +370,7 @@ impl AgentTool for DurableTool {
                         &input.call_id,
                         execution_id,
                         &self.context.task.id,
-                        &original.call.arguments,
+                        &input.arguments,
                     )
                     .map_err(|error| self.context.recorded_store_error(error))?;
                 self.context.inner.changed.notify_waiters();

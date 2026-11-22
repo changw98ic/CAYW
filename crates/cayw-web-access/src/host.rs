@@ -24,7 +24,7 @@ pub enum SearchBackend {
     /// In-memory fixture table only (deterministic / offline CI).
     Fixture,
     /// Brave Search when `BRAVE_SEARCH_API_KEY` is set; otherwise DuckDuckGo HTML.
-    /// Empty Brave results or hard failures soft-fall back to DuckDuckGo HTML.
+    /// Provider selection is based on configuration; search results and errors pass through.
     BraveOrDuckDuckGo,
 }
 

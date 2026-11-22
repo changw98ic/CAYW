@@ -397,7 +397,9 @@ impl CellManager {
         };
         tokio::pin!(deadline_elapsed);
         loop {
-            let permission_yield = run.waiting_permission.swap(false, Ordering::AcqRel);
+            // Returning a page does not resolve an approval. Keep yielding to
+            // the model until the scheduler clears the permission wait.
+            let permission_yield = run.waiting_permission.load(Ordering::Acquire);
             let ready = {
                 let record = run.record.lock().expect("cell lock poisoned");
                 let outputs = record.outputs.len() as u64;
@@ -1013,11 +1015,8 @@ impl Run {
             page.has_more = true;
             page.required_budget = Some(page.required_budget.unwrap_or(0).max(full_metadata_bytes));
         }
-        if serde_json::to_vec(&page)?.len() > budget {
-            return Err(CellError::Invalid(
-                "page metadata exceeds output budget".into(),
-            ));
-        }
+        // Even a zero-byte budget must return the execution receipt. Output
+        // entries are still charged against the full serialized page above.
         Ok(page)
     }
 }

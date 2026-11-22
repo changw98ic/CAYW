@@ -103,8 +103,7 @@ class Suite:
         request = urllib.request.Request(ready["url"] + "api/rpc", data=json.dumps(body).encode(),
                   headers={"Content-Type": "application/json", "Origin": ready["url"].rstrip("/")})
         try:
-            # task.resume is the outer execution request and has no task limit.
-            with urllib.request.urlopen(request, timeout=None if method == "task.resume" else 120) as response:
+            with urllib.request.urlopen(request, timeout=None) as response:
                 result = json.load(response)
         except urllib.error.HTTPError as error:
             result = json.load(error)

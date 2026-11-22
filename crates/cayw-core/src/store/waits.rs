@@ -10,23 +10,13 @@ struct WaitArguments {
     /// Omitted means 0 ms. A present value still goes through `wait_integer`.
     #[serde(default, deserialize_with = "wait_integer")]
     yield_time_ms: u64,
-    /// Omitted passes this parse. The stand-in 131072 is not the page: the
-    /// stored call keeps the model's original JSON, and Cells applies its own
-    /// default (lower when a cap is configured). A present value below 1024
-    /// stays invalid so a wait Cells will refuse is not registered.
-    #[serde(
-        default = "default_wait_page_tokens",
-        deserialize_with = "wait_integer"
-    )]
+    #[serde(default, deserialize_with = "wait_integer")]
     max_output_tokens: u64,
     #[serde(default = "continue_default")]
     continue_execution: bool,
 }
 fn continue_default() -> bool {
     true
-}
-fn default_wait_page_tokens() -> u64 {
-    128 * 1024
 }
 fn wait_integer<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<u64, D::Error> {
     let value = Value::deserialize(deserializer)?;
@@ -40,11 +30,12 @@ impl StoredSession {
         identifier(&binding.execution_id, "execution_id")?;
         identifier(&binding.task_id, "task_id")?;
         let arguments: WaitArguments = serde_json::from_value(binding.arguments.clone())?;
-        // Cursor, wait duration and continue control are observation/resume
-        // arguments, not authority. The Cells host enforces its runtime budgets.
+        // Cursor, duration, page budget and continue control do not establish
+        // authority. The Cells host enforces its runtime budgets.
         let _ = (
             arguments.cursor,
             arguments.yield_time_ms,
+            arguments.max_output_tokens,
             arguments.continue_execution,
         );
         let execution = self
@@ -56,7 +47,6 @@ impl StoredSession {
         let call = self.call(&binding.call_id)?;
         if arguments.action != "wait"
             || arguments.cell_id != execution.execution_id
-            || arguments.max_output_tokens < 1024
             || binding.lease.session_id != self.id
             || execution.lease != binding.lease
             || execution.task_id != binding.task_id
@@ -172,6 +162,22 @@ impl SessionStore {
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let mut session = load(&transaction, &lease.session_id)?;
         session.admit_work(lease)?;
+        let previous = session
+            .execution_waits
+            .iter()
+            .find(|b| b.call_id == call_id);
+        // Previously persisted bindings retain their exact historical JSON.
+        if previous.is_none() {
+            for field in ["cursor", "yield_time_ms", "max_output_tokens"] {
+                if let Some(value) = arguments.get(field)
+                    && !value.is_u64()
+                {
+                    return Err(CoreError::InvalidEvent(format!(
+                        "Wait binding {field} must be an unsigned JSON integer"
+                    )));
+                }
+            }
+        }
         session.validate_wait_binding(&binding)?;
         if session.call(call_id)?.record.state != CallState::Started {
             return Err(invalid(
@@ -179,11 +185,7 @@ impl SessionStore {
             ));
         }
         session.check_approval(call_id)?;
-        if let Some(previous) = session
-            .execution_waits
-            .iter()
-            .find(|b| b.call_id == call_id)
-        {
+        if let Some(previous) = previous {
             if previous != &binding {
                 return Err(invalid(
                     "A wait binding cannot change its original execution",

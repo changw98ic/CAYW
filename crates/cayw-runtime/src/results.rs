@@ -360,7 +360,7 @@ pub(crate) async fn maybe_externalize(
                 .store(true, std::sync::atomic::Ordering::Release);
             Err(error)
         }
-        Err(_) => Ok(value),
+        Err(error) => Err(error),
     }
 }
 

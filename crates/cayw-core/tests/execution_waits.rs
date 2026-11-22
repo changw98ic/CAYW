@@ -135,47 +135,83 @@ fn registered_wait_reply_loss_recovers_from_independent_vm_facts() {
 }
 
 #[test]
-fn numeric_string_wait_keeps_original_arguments_across_reopen_and_recovery() {
+fn new_wait_rejects_strings_and_integral_floats_without_registering() {
+    for value in [json!("0"), json!(0.0)] {
+        let path = database();
+        let waiting = ToolCall::new(
+            "wait",
+            "execute_code",
+            json!({"action":"wait", "cell_id":"vm", "cursor":value}),
+        );
+        let (store, lease) = fixture(&path, &[launch(), waiting.clone()]);
+        store.yield_execution(&lease, "vm").unwrap();
+        start(&store, &lease, &waiting);
+        let error = store
+            .register_execution_wait(&lease, &waiting.id, "vm", "task", &waiting.arguments)
+            .unwrap_err();
+        assert!(matches!(error, CoreError::InvalidEvent(_)));
+        assert!(
+            error
+                .to_string()
+                .contains("cursor must be an unsigned JSON integer")
+        );
+        assert!(
+            !store
+                .events(&lease.session_id, 0, 1000)
+                .unwrap()
+                .iter()
+                .any(|event| matches!(event.event, CoreEvent::ExecutionWaitRegistered { .. }))
+        );
+    }
+}
+
+#[test]
+fn reopened_wait_preserves_the_original_historical_numeric_string() {
     let path = database();
     let waiting = ToolCall::new(
         "wait",
         "execute_code",
-        json!({
-            "action":"wait", "cell_id":"vm", "cursor":"0",
-            "yield_time_ms":"30000.0", "max_output_tokens":"8192", "continue_execution":false
-        }),
+        json!({"action":"wait", "cell_id":"vm", "cursor":987654321}),
     );
     let (store, lease) = fixture(&path, &[launch(), waiting.clone()]);
     store.yield_execution(&lease, "vm").unwrap();
     start(&store, &lease, &waiting);
-    let event = store
+    store
         .register_execution_wait(&lease, &waiting.id, "vm", "task", &waiting.arguments)
         .unwrap();
-    assert!(
-        matches!(&event.event, CoreEvent::ExecutionWaitRegistered { binding } if binding.arguments == waiting.arguments)
-    );
     drop(store);
+
+    // Recreate the exact JSON previously stored for a decimal-string wait.
+    let db = rusqlite::Connection::open(&path).unwrap();
+    db.execute_batch(
+        r#"BEGIN;
+           DROP TRIGGER core_events_no_update;
+           UPDATE core_sessions SET projection = replace(json(projection), '"cursor":987654321', '"cursor":"987654321"');
+           UPDATE core_events SET record = replace(json(record), '"cursor":987654321', '"cursor":"987654321"');
+           CREATE TRIGGER core_events_no_update BEFORE UPDATE ON core_events
+           BEGIN SELECT RAISE(ABORT, 'core events are append-only'); END;
+           COMMIT;"#,
+    )
+    .unwrap();
+    drop(db);
+
     let reopened = SessionStore::open(&path).unwrap();
+    let historical = json!({"action":"wait", "cell_id":"vm", "cursor":"987654321"});
+    let events = reopened.events(&lease.session_id, 0, 1000).unwrap();
+    assert!(events.iter().any(|event| matches!(
+        &event.event,
+        CoreEvent::ExecutionWaitRegistered { binding } if binding.arguments == historical
+    )));
     let recovered = reopened.recover(&lease.session_id).unwrap();
-    assert_eq!(recovered.state, SessionState::Idle);
     assert!(recovered.unresolved_calls.is_empty());
-    assert!(recovered.unresolved_capabilities.is_empty());
-    assert!(
-        matches!(&recovered.messages[0], Message::Assistant(message) if message.content.iter().any(|part| matches!(part, Content::ToolCall(call) if call == &waiting)))
-    );
-    assert!(
-        reopened
-            .events(&lease.session_id, 0, 1000)
-            .unwrap()
-            .contains(&event)
-    );
+    assert_eq!(recovered.executions[0].state, ExecutionState::Interrupted);
 }
 
 #[test]
 fn omitted_wait_page_keeps_the_original_arguments() {
     for arguments in [
-        json!({"action":"wait","cell_id":"vm","cursor":"0"}),
-        json!({"action":"wait","cell_id":"vm","cursor":"0","yield_time_ms":"10000"}),
+        json!({"action":"wait","cell_id":"vm","cursor":0}),
+        json!({"action":"wait","cell_id":"vm","cursor":0,"yield_time_ms":10000}),
     ] {
         let path = database();
         let waiting = ToolCall::new("wait", "execute_code", arguments);
@@ -199,29 +235,23 @@ fn omitted_wait_page_keeps_the_original_arguments() {
 }
 
 #[test]
-fn present_wait_page_below_minimum_stays_a_known_rejection() {
+fn a_wait_with_a_zero_byte_page_registers_its_exact_arguments() {
     let path = database();
     let waiting = ToolCall::new(
         "wait",
         "execute_code",
-        json!({
-            "action":"wait",
-            "cell_id":"vm",
-            "cursor":"0",
-            "yield_time_ms":"10000",
-            "max_output_tokens":1023
-        }),
+        json!({"action":"wait", "cell_id":"vm", "cursor":0, "max_output_tokens":0}),
     );
     let (store, lease) = fixture(&path, &[launch(), waiting.clone()]);
     store.yield_execution(&lease, "vm").unwrap();
     start(&store, &lease, &waiting);
-    let error = store
+    let event = store
         .register_execution_wait(&lease, &waiting.id, "vm", "task", &waiting.arguments)
-        .unwrap_err();
-    let text = error.to_string();
-    assert!(matches!(error, CoreError::InvalidEvent(_)), "{text}");
-    assert!(text.contains("Wait binding"), "{text}");
-    assert!(!text.contains("SQLite"), "{text}");
+        .unwrap();
+    assert!(matches!(
+        event.event,
+        CoreEvent::ExecutionWaitRegistered { binding } if binding.arguments == waiting.arguments
+    ));
 }
 
 #[test]

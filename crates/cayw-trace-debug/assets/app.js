@@ -1049,9 +1049,15 @@
     renderAll();
   }
 
+  function selectedVersion(select, entries) {
+    if (select.value === '') return null;
+    var entry = entries.find(function (item) { return String(item.version) === select.value; });
+    return entry ? entry.version : null;
+  }
+
   function onEvaluationChange() {
-    var value = Number(ui['evaluation-select'].value);
-    if (!isFinite(value)) return;
+    var value = selectedVersion(ui['evaluation-select'], sortedEvaluations(currentProject()));
+    if (value === null) return;
     selectedEvaluation = value;
     compareVersion = null;
     editorNotice = null;
@@ -1060,15 +1066,15 @@
   }
 
   function onCompareChange() {
-    var value = Number(ui['compare-select'].value);
-    if (!isFinite(value)) return;
+    var value = selectedVersion(ui['compare-select'], sortedEvaluations(currentProject()));
+    if (value === null) return;
     compareVersion = value;
     renderComparison();
   }
 
   function onUndoTargetChange() {
-    var value = Number(ui['undo-version'].value);
-    if (!isFinite(value)) return;
+    var value = selectedVersion(ui['undo-version'], sortedRevisions(currentProject()));
+    if (value === null) return;
     undoTarget = value;
     updateActionButtons();
   }

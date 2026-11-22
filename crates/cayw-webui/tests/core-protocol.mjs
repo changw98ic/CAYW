@@ -3,7 +3,7 @@ import test from 'node:test';
 import { applySnapshot, beginWrite, consumeEvents, createView, finishWrite, messagePresentation, workspaceIdFromHash } from '../assets/app.js';
 
 const lease = { session_id: 'core3-session', attempt_id: 'attempt-1', worker_id: 'worker-1', fence: 1 };
-const snapshot = { id: lease.session_id, state: 'idle', cursor: 5, attempt: null, messages: [], pending_approvals: [], unresolved_calls: [] };
+const snapshot = { id: lease.session_id, state: 'idle', cursor: 5, attempt: null, messages: [], pending_approvals: [], executions: [], unresolved_calls: [] };
 
 test('workspace launch hash accepts only canonical local workspace IDs', () => {
   const id = `workspace-${'a'.repeat(64)}`;

@@ -556,7 +556,7 @@ async fn normal_externalization_stores_original_in_cells_and_delivers_one_handle
 }
 
 #[tokio::test]
-async fn known_storage_quota_failure_returns_original_value_without_freezing() {
+async fn known_storage_quota_failure_reaches_the_model_without_replacing_host_success() {
     let (_temp, root) = setup();
     let effect = Arc::new(Effect {
         path: root.join("effect"),
@@ -567,10 +567,7 @@ async fn known_storage_quota_failure_returns_original_value_without_freezing() {
     cfg.content.as_mut().unwrap().limits.max_records = 1;
     let rt = open(
         &root,
-        provider(
-            false,
-            "assert(res.payload ~= nil and res.externalized == nil)",
-        ),
+        provider(false, "error('storage failure must stop before this line')"),
         cfg,
     );
     let session = rt.create(None).unwrap().id;
@@ -585,6 +582,30 @@ async fn known_storage_quota_failure_returns_original_value_without_freezing() {
     rt.wait_idle(&session).await;
     assert_original(&rt, &root, &session);
     assert!(rt.pending_result_storage(&session).unwrap().is_empty());
+    let storage_error = rt
+        .events(&session, 0, 1000)
+        .unwrap()
+        .into_iter()
+        .find_map(|record| match record.event {
+            CoreEvent::Host { kind, data } if kind == "runtime_result_storage_terminal" => {
+                let terminal: cayw_runtime::ResultStoragePending =
+                    serde_json::from_value(data).unwrap();
+                assert_eq!(terminal.state, ResultStorageState::Failed);
+                terminal.error
+            }
+            _ => None,
+        })
+        .expect("known storage failure recorded");
+    let view = rt.get(&session).unwrap();
+    let page = view
+        .messages
+        .iter()
+        .find_map(|message| match message {
+            Message::ToolResult(result) if result.is_error => result.structured_content.as_ref(),
+            _ => None,
+        })
+        .expect("storage error must reach the model");
+    assert_eq!(page["error"], format!("Capability: {storage_error}"));
     assert!(rt.fork(&session, "known failure fork", true).is_ok());
     assert_eq!(effect.calls.load(Ordering::SeqCst), 1);
     assert_eq!(plans().lock().unwrap()[&session].prepared, 1);

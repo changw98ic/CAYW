@@ -9,7 +9,7 @@
 //! - offline [`FixtureTransport`] / [`FixtureSearch`] with diagnosable failures
 //! - live [`ReqwestTransport`] for public HTTP(S) URLs
 //! - real search: [`DuckDuckGoHtmlSearch`] (no API key); optional [`BraveSearch`]
-//!   via `BRAVE_SEARCH_API_KEY` with DuckDuckGo fallback ([`SearchBackend::BraveOrDuckDuckGo`])
+//!   via `BRAVE_SEARCH_API_KEY` ([`SearchBackend::BraveOrDuckDuckGo`]); DuckDuckGo is selected only when no Brave key is configured.
 //! - HTML body text via `html5gum`
 //! - **PDF**: minimal parenthesis / literal-string scan only — **not** a full PDF
 //!   engine (no font decoding, ToUnicode, xref repair, or layout)

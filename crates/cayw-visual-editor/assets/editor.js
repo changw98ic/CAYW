@@ -1335,7 +1335,7 @@
     }
     if (!state.editing) return;
     if (data.type === 'cayw:palette-result') {
-      const request = Number(data.request);
+      const request = data.request;
       const pending = state.palettePending.get(request);
       if (!pending) return;
       state.palettePending.delete(request);
@@ -1359,8 +1359,7 @@
     }
     if (data.type === 'cayw:context') {
       const sel = normalizeSelection(data);
-      const x = Number(data.x);
-      const y = Number(data.y);
+      const { x, y } = data;
       if (!sel || !Number.isFinite(x) || !Number.isFinite(y)) return;
       state.selectionAck = null;
       updateSelectionUi(sel);

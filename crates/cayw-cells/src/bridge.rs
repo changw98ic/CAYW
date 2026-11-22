@@ -318,7 +318,11 @@ impl Bridge {
         );
         // All dependencies and the original terminal are now durable. Only this
         // infallible handoff may publish a leader and release its read fence.
+        let published = response.published_result().cloned();
         let result = response.acknowledge();
+        if let Some(value) = published {
+            self.run.emit(CellOutput::Json { value }).map_err(failure)?;
+        }
         match result {
             Ok(value) => {
                 if let Err(error) = validate_json(&value, result_depth, result_bytes) {

@@ -705,6 +705,16 @@ impl CellBackend for Backend {
         // The Host result is settled exactly as produced; Core's metadata bound
         // now matches the Host default, so an accepted result remains durable.
         scope.settle(&host_result)?;
+        if crate::model_approvals::publishes_decision(name) {
+            // A committed decision is an original receipt, not script output
+            // or a result-storage handle. Publish it before the VM can fail.
+            return Ok(cayw_cells::BackendResponse::owned(
+                host_result,
+                None,
+                Box::new(crate::shared_read::Completion::ordinary(scope.clone())),
+            )
+            .with_published_result());
+        }
         let presentation = match &host_result {
             Ok(value) => crate::results::maybe_externalize(&scope, value.clone()).await,
             Err(error) => Err(error.clone()),

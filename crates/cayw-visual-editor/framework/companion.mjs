@@ -105,28 +105,20 @@ function normalizeFiles(files) {
   return output;
 }
 
-async function requireProjectRoot(value) {
-  const root = await realpath(requireString(value, 'root')).catch(() => null);
-  if (root === null) {
-    throw coded('invalid_request', 'root must be an existing directory');
+async function requireDirectory(value, field) {
+  const directory = await realpath(requireString(value, field));
+  if (!(await stat(directory)).isDirectory()) {
+    throw coded('invalid_request', `${field} must be a directory`);
   }
-  const details = await stat(root).catch(() => null);
-  if (details === null || !details.isDirectory()) {
-    throw coded('invalid_request', 'root must be an existing directory');
-  }
-  return root;
+  return directory;
 }
 
-async function requireStateDir(value) {
-  const stateDir = await realpath(requireString(value, 'state_dir')).catch(() => null);
-  if (stateDir === null) {
-    throw coded('invalid_request', 'state_dir must be an existing directory');
-  }
-  const details = await stat(stateDir).catch(() => null);
-  if (details === null || !details.isDirectory()) {
-    throw coded('invalid_request', 'state_dir must be an existing directory');
-  }
-  return stateDir;
+function requireProjectRoot(value) {
+  return requireDirectory(value, 'root');
+}
+
+function requireStateDir(value) {
+  return requireDirectory(value, 'state_dir');
 }
 
 function parseLoopbackAddress(value, name) {
@@ -840,7 +832,7 @@ function responseFor(id, result) {
 }
 
 function errorFor(id, error) {
-  const code = error instanceof CompanionError ? error.code : 'internal';
+  const code = error instanceof Error && typeof error.code === 'string' ? error.code : 'internal';
   const message = error instanceof Error ? error.message : String(error);
   return { id, ok: false, error: { code, message } };
 }

@@ -10,7 +10,7 @@ import vm from 'node:vm';
 const source = await readFile(new URL('../assets/app.js', import.meta.url), 'utf8');
 const html = await readFile(new URL('../assets/index.html', import.meta.url), 'utf8');
 const lease = (attempt = 'attempt-1') => ({ session_id: 's1', attempt_id: attempt, worker_id: 'worker-1', fence: 1 });
-const snapshot = (extra = {}) => ({ id: 's1', label: '会话', messages: [], cursor: 10, state: 'idle', attempt: null, pending_approvals: [], unresolved_calls: [], ...extra });
+const snapshot = (extra = {}) => ({ id: 's1', label: '会话', messages: [], cursor: 10, state: 'idle', attempt: null, pending_approvals: [], executions: [], unresolved_calls: [], ...extra });
 const record = (cursor, event, attempt = lease()) => ({ protocol_version: 4, session_id: 's1', cursor, timestamp: 1, attempt, event });
 const failure = (code, outcome_unknown = false) => ({ status: 502, error: { code, message: 'internal diagnostic is not the main user message', outcome_unknown } });
 
@@ -325,6 +325,23 @@ test('approval questions and options appear in the conversation without system i
   assert.match(question.textContent, /notes\.txt/);
   const actions = question.children.find(child => String(child.className).includes('approval-actions'));
   assert.deepEqual(actions.children.map(button => button.textContent), ['允许一次', '本任务允许', '拒绝']);
+});
+
+test('model approval requires an explicit empty options array', async t => {
+  const current = snapshot({ cursor: 12, state: 'awaiting_approval', attempt: lease(), pending_approvals: [{ id: 'approval-1' }] });
+  const question = { session_id: 's1', approval_id: 'approval-1', approval_mode: 'model_auto', text: '模型正在决定审批' };
+  const app = await page(t, async method => {
+    if (method === 'session.list') return [current];
+    if (method === 'session.get') return current;
+    if (method === 'session.events' || method === 'session.tasks') return [];
+    if (method === 'approval.question') return question;
+  });
+  await app.poll();
+  assert.match(app.ui['global-error'].textContent, /审批询问不完整/);
+  assert.doesNotMatch(app.ui.messages.textContent, /模型正在决定审批/);
+  question.options = [];
+  await app.poll();
+  assert.match(app.ui.messages.textContent, /模型正在决定审批/);
 });
 
 test('frozen Runtime binding locks both prompt and fork until the active attempt settles', async t => {

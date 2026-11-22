@@ -135,7 +135,6 @@ impl CellLimits {
             || self.store_bytes == Some(0)
             || self.store_keys == Some(0)
             || self.json_depth == Some(0)
-            || self.max_output_tokens.is_some_and(|tokens| tokens < 1024)
             || self.max_yield_time.is_some_and(|wait| wait.is_zero());
         if invalid {
             return Err(CellError::Invalid("invalid cell limits".into()));
@@ -152,12 +151,10 @@ impl CellLimits {
     }
     pub(crate) fn page_limits(&self, wait: Duration, tokens: usize) -> Result<(), CellError> {
         let wait_invalid = self.max_yield_time.is_some_and(|max| wait > max);
-        let tokens_invalid =
-            tokens < 1024 || self.max_output_tokens.is_some_and(|max| tokens > max);
+        let tokens_invalid = self.max_output_tokens.is_some_and(|max| tokens > max);
         if wait_invalid || tokens_invalid {
             return Err(CellError::Invalid(
-                "yield_time_ms or max_output_tokens exceeds configured limits (minimum budget 1024)"
-                    .into(),
+                "yield_time_ms or max_output_tokens exceeds configured limits".into(),
             ));
         }
         Ok(())
@@ -508,8 +505,9 @@ impl CellRecord {
 }
 
 /// One serialized UTF-8 byte is charged as one conservative budget unit. This is
-/// NOT a model tokenizer or a media token estimate. The *whole JSON page* fits
-/// max_output_tokens bytes; model-specific accounting remains with the provider.
+/// Counts serialized UTF-8 bytes. Output entries fit within `max_output_tokens`
+/// together with the receipt. If the budget cannot fit the receipt itself, the
+/// receipt still returns without output entries so callers retain the execution ID.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct CellPage {
     pub cell_id: CellId,

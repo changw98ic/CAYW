@@ -369,7 +369,7 @@ export function summarizeRestoreReport(report) {
 }
 
 export function applySnapshot(view, snapshot, initial = false, requestedAfter = view.cursor, requestedEpoch = view.proofEpoch) {
-  if (!object(snapshot) || snapshot.id !== view.id || !Array.isArray(snapshot.messages) || !safeCursor(snapshot.cursor)) {
+  if (!object(snapshot) || snapshot.id !== view.id || !Array.isArray(snapshot.messages) || !safeCursor(snapshot.cursor) || !Array.isArray(snapshot.pending_approvals) || !Array.isArray(snapshot.executions)) {
     throw new Error('Runtime 返回的会话快照不完整；保留当前会话和事件游标。');
   }
   // Events and snapshots share one durable cursor. A delayed projection must
@@ -379,7 +379,7 @@ export function applySnapshot(view, snapshot, initial = false, requestedAfter = 
   if (frozen(snapshot)) faults.frozen = { after: snapshot.cursor };
   // A Core snapshot may predate the runtime binding view. Its missing metadata
   // never clears an explicit frozen rejection, even at the same durable cursor.
-  const pendingIds = new Set(array(snapshot.pending_approvals).map(approval => approval.id).filter(id => typeof id === 'string'));
+  const pendingIds = new Set(snapshot.pending_approvals.map(approval => approval.id).filter(id => typeof id === 'string'));
   const inferredTaskId = inferSnapshotTaskId(snapshot);
   const ownsPrompt = array(view.writes).some(write => write.method === 'session.prompt');
   const previousLease = view.snapshot?.attempt ?? view.activeAttempt?.lease;
@@ -394,7 +394,7 @@ export function applySnapshot(view, snapshot, initial = false, requestedAfter = 
     approvalQuestions: Object.fromEntries(Object.entries(view.approvalQuestions ?? {}).filter(([id]) => pendingIds.has(id))),
     activeAttempt: object(snapshot.attempt) && !sameLease(snapshot.attempt,view.activeAttempt?.lease) ? { lease:snapshot.attempt, after:snapshot.cursor, terminal:null } : view.activeAttempt,
     snapshot,
-    executions: Object.fromEntries(array(snapshot.executions).map(execution => [execution.execution_id, execution])),
+    executions: Object.fromEntries(snapshot.executions.map(execution => [execution.execution_id, execution])),
     totalMessages: snapshot.messages.length,
     snapshotAfter: Math.max(view.snapshotAfter, requestedAfter),
     snapshotEpoch: Math.max(view.snapshotEpoch, requestedEpoch),
@@ -574,8 +574,6 @@ function boot() {
   async function rpc(method, params = {}, scope = sessionWorkspaces.get(params.session_id) || workspaceId) {
     const controller = new AbortController();
     controllers.add(controller);
-    let timeout;
-    if (!['session.prompt', 'task.resume'].includes(method)) timeout = setTimeout(() => controller.abort(), method === 'settings.workspaces.open' ? 45000 : 15000);
     try {
       const requestPayload = { method, params };
       if (scope) requestPayload.workspace_id = scope;
@@ -600,7 +598,6 @@ function boot() {
       if (error instanceof TypeError) throw new RpcError('transport_unknown', '无法连接本机网关。页面继续读取事件，消息不会自动重发。', !readMethods.has(method));
       throw error;
     } finally {
-      clearTimeout(timeout);
       controllers.delete(controller);
     }
   }
@@ -1006,7 +1003,7 @@ function boot() {
   async function refreshApprovalQuestions(id, login) {
     const view = views.get(id);
     if (!view?.snapshot) return;
-    const pending = array(view.snapshot.pending_approvals).map(approval => approval.id).filter(id => typeof id === 'string');
+    const pending = view.snapshot.pending_approvals.map(approval => approval.id).filter(id => typeof id === 'string');
     const questions = {};
     for (const approvalId of pending) {
       const cached = view.approvalQuestions?.[approvalId];
@@ -1015,7 +1012,7 @@ function boot() {
         const question = await rpc('approval.question', { session_id: id, approval_id: approvalId });
         if (login !== loginGeneration) return;
         const isModelAuto = question?.approval_mode === 'model_auto';
-        const validOptions = isModelAuto ? array(question.options).length === 0 : array(question.options).length === 3;
+        const validOptions = Array.isArray(question?.options) && question.options.length === (isModelAuto ? 0 : 3);
         if (question?.session_id !== id || question?.approval_id !== approvalId || !validOptions) {
           throw new RpcError('invalid_response', 'Runtime 返回的审批询问不完整；页面未显示选项。', false);
         }

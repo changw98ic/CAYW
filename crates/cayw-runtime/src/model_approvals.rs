@@ -22,6 +22,10 @@ pub(crate) fn is_tool(name: &str) -> bool {
     )
 }
 
+pub(crate) fn publishes_decision(name: &str) -> bool {
+    matches!(name, "approval.decide" | "capability.decide")
+}
+
 pub(crate) fn definitions(config: &RuntimeConfig) -> Vec<ToolDefinition> {
     if config.approval_mode != ApprovalMode::ModelAuto {
         return vec![];
@@ -38,7 +42,7 @@ pub(crate) fn definitions(config: &RuntimeConfig) -> Vec<ToolDefinition> {
         },
         ToolDefinition {
             name: "approval.decide".into(),
-            description: "Decide one pending approval from this task as model-auto. This grants or denies execution permission, not user acceptance or proof of completion.".into(),
+            description: "Decide one pending approval from this task as model-auto. The committed decision is emitted as original JSON; do not pass its return object to text(). This grants or denies execution permission, not user acceptance or proof of completion.".into(),
             parameters: json!({
                 "type": "object",
                 "additionalProperties": false,
@@ -53,7 +57,7 @@ pub(crate) fn definitions(config: &RuntimeConfig) -> Vec<ToolDefinition> {
     if config.request_policy.is_some() {
         definitions.push(ToolDefinition {
             name: "capability.decide".into(),
-            description: "Evaluate and decide this task's capability.request by its request_id as model-auto. This is request authority, distinct from approval.decide. An allow needs lifetime_ms; reason explains the decision.".into(),
+            description: "Evaluate and decide this task's capability.request by its request_id as model-auto. The committed decision is emitted as original JSON. This is request authority, distinct from approval.decide. An allow needs lifetime_ms; reason explains the decision.".into(),
             parameters: json!({
                 "type": "object",
                 "additionalProperties": false,

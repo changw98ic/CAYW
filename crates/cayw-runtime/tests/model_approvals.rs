@@ -16,6 +16,7 @@ struct Fixture {
     script: String,
     choice: &'static str,
     decision_delay: Duration,
+    wait_before_deciding: bool,
     state: Mutex<(usize, Option<CellPage>)>,
 }
 
@@ -32,7 +33,8 @@ impl Provider for Fixture {
             ..Default::default()
         };
         message.usage_status = UsageStatus::Reported;
-        let args = match step {
+        let action_step = step - usize::from(self.wait_before_deciding && step >= 2);
+        let args = match action_step {
             0 => Some(json!({
                 "action": "exec",
                 "script": self.script,
@@ -66,18 +68,54 @@ impl Provider for Fixture {
                     })
                     .expect("original cell page");
                 assert!(page.vm_alive, "original call must still await permission");
-                state.1 = Some(page);
-                Some(json!({
-                    "action": "exec",
-                    "script": format!(
-                        "local pending = cayw.call('approval.pending', {{}}); assert(#pending == 1); return cayw.call('approval.decide', {{approval_id=pending[1].id, decision='{}'}})",
+                if self.wait_before_deciding && step == 1 {
+                    // No yield deadline and no unread output to wake this wait.
+                    Some(
+                        json!({"action":"wait", "cell_id":page.cell_id, "cursor":page.next_cursor}),
+                    )
+                } else {
+                    state.1 = Some(page);
+                    let decision = format!(
+                        "cayw.call('approval.decide', {{approval_id=pending[1].id, decision='{}'}})",
                         self.choice
-                    ),
-                    "yield_time_ms": 1000,
-                    "max_output_tokens": 8192
-                }))
+                    );
+                    let statement = if self.choice == "deny" {
+                        format!("text({decision})")
+                    } else {
+                        decision
+                    };
+                    Some(json!({
+                        "action": "exec",
+                        "script": format!(
+                            "local pending = cayw.call('approval.pending', {{}}); assert(#pending == 1); {statement}"
+                        ),
+                        "max_output_tokens": 8192
+                    }))
+                }
             }
-            2 => {
+            2 if self.choice == "deny" => {
+                let page = request
+                    .messages
+                    .iter()
+                    .rev()
+                    .find_map(|message| match message {
+                        Message::ToolResult(result) if result.tool_call_id == "fixture-1" => Some(
+                            serde_json::from_value::<CellPage>(
+                                result.structured_content.clone().unwrap(),
+                            )
+                            .unwrap(),
+                        ),
+                        _ => None,
+                    })
+                    .unwrap();
+                assert_eq!(
+                    page.outputs.len(),
+                    1,
+                    "the decision must already be visible"
+                );
+                Some(json!({"action":"wait", "cell_id":page.cell_id, "cursor":page.next_cursor}))
+            }
+            step if step == 2 + usize::from(self.choice == "deny") => {
                 let page = state.1.as_ref().unwrap();
                 Some(json!({
                     "action": "wait",
@@ -112,7 +150,12 @@ impl Provider for Fixture {
     }
 }
 
-async fn run(choice: &'static str, request_authority: bool, decision_delay: Duration) {
+async fn run(
+    choice: &'static str,
+    request_authority: bool,
+    decision_delay: Duration,
+    wait_before_deciding: bool,
+) {
     let root = tempfile::tempdir().unwrap();
     let workspace = root.path().join("workspace");
     std::fs::create_dir(&workspace).unwrap();
@@ -142,6 +185,7 @@ async fn run(choice: &'static str, request_authority: bool, decision_delay: Dura
         script: script.into(),
         choice,
         decision_delay,
+        wait_before_deciding,
         state: Mutex::new((0, None)),
     });
     let runtime = Runtime::open(
@@ -163,6 +207,56 @@ async fn run(choice: &'static str, request_authority: bool, decision_delay: Dura
     assert!(runtime.get(&session).unwrap().pending_approvals.is_empty());
     if choice == "deny" {
         assert!(!workspace.join("result.txt").exists());
+        let records = runtime.events(&session, 0, 1000).unwrap();
+        let original = records
+            .iter()
+            .find_map(|record| match &record.event {
+                cayw_core::CoreEvent::CapabilitySettled { call }
+                    if call.name == "approval.decide" =>
+                {
+                    match call.outcome.as_ref().unwrap() {
+                        cayw_core::CapabilityOutcome::Completed { result } => Some(result),
+                        outcome => panic!("decision did not commit: {outcome:?}"),
+                    }
+                }
+                _ => None,
+            })
+            .unwrap();
+        assert_eq!(original["decision"]["decision"], "deny");
+        assert_eq!(original["decision"]["actor"], "model-auto");
+        let view = runtime.get(&session).unwrap();
+        let page_for = |call_id| {
+            view.messages
+                .iter()
+                .find_map(|message| match message {
+                    Message::ToolResult(result) if result.tool_call_id == call_id => Some((
+                        result.is_error,
+                        serde_json::from_value::<CellPage>(
+                            result.structured_content.clone().unwrap(),
+                        )
+                        .unwrap(),
+                    )),
+                    _ => None,
+                })
+                .unwrap()
+        };
+        let (_, decision) = page_for("fixture-1");
+        let (is_error, terminal) = page_for("fixture-2");
+        assert!(is_error);
+        assert_eq!(terminal.cell_id, decision.cell_id);
+        assert_eq!(terminal.status, cayw_cells::CellStatus::Failed);
+        assert_eq!(
+            terminal.error.as_deref(),
+            Some("Capability: invalid request: invalid type: map, expected a string")
+        );
+        assert!(terminal.outputs.is_empty());
+        assert_eq!(decision.outputs.len(), 1);
+        assert_eq!(
+            &decision.outputs[0].output,
+            &cayw_cells::CellOutput::Json {
+                value: original.clone()
+            }
+        );
     } else {
         assert_eq!(
             std::fs::read_to_string(workspace.join("result.txt")).unwrap(),
@@ -184,17 +278,22 @@ async fn run(choice: &'static str, request_authority: bool, decision_delay: Dura
 
 #[tokio::test]
 async fn model_allows_original_waiting_cell_without_human_or_approval_recursion() {
-    run("allow_once", false, Duration::ZERO).await;
+    run("allow_once", false, Duration::ZERO, false).await;
 }
 
 #[tokio::test]
-async fn model_denies_original_waiting_cell_without_effect() {
-    run("deny", false, Duration::ZERO).await;
+async fn repeated_wait_returns_control_to_the_model_until_it_decides() {
+    run("allow_once", false, Duration::ZERO, true).await;
+}
+
+#[tokio::test]
+async fn denied_approval_receipt_survives_a_later_output_type_error() {
+    run("deny", false, Duration::ZERO, false).await;
 }
 
 #[tokio::test]
 async fn model_decides_request_authority_and_upstream_approval_separately() {
-    run("allow_once", true, Duration::ZERO).await;
+    run("allow_once", true, Duration::ZERO, false).await;
 }
 
 #[test]
@@ -207,5 +306,5 @@ fn sdk_defaults_to_explicit_approval() {
 
 #[tokio::test]
 async fn model_decision_after_execution_budget_still_runs_original_call_once() {
-    run("allow_once", false, Duration::from_secs(3)).await;
+    run("allow_once", false, Duration::from_secs(3), false).await;
 }

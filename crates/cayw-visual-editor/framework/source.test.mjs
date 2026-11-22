@@ -1,10 +1,35 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
+import { readFileSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { spawnSync } from 'node:child_process';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { parse } from '@babel/parser';
 import { mapDocuments, editDocuments } from './source.mjs';
 
 const REVISION = 'a'.repeat(64);
+
+test('companion returns the directory lookup error and distinguishes a regular file', t => {
+  const root = mkdtempSync(join(tmpdir(), 'cayw-companion-'));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const file = join(root, 'file');
+  writeFileSync(file, '');
+  const missing = join(root, 'missing');
+  const requests = [missing, file].map((root, id) => ({ id, method: 'scan', params: { root } }));
+  requests.push({ id: 2, method: 'shutdown' });
+  const child = spawnSync(process.execPath, [fileURLToPath(new URL('./companion.mjs', import.meta.url))], {
+    input: requests.map(request => JSON.stringify(request)).join('\n') + '\n',
+    encoding: 'utf8',
+  });
+  assert.equal(child.status, 0, child.stderr);
+  const responses = child.stdout.trim().split('\n').map(line => JSON.parse(line));
+  assert.equal(responses[0].ok, false);
+  assert.equal(responses[0].error.code, 'ENOENT');
+  assert.ok(responses[0].error.message.includes(missing));
+  assert.deepEqual(responses[1], { id: 1, ok: false, error: { code: 'invalid_request', message: 'root must be a directory' } });
+  assert.deepEqual(responses[2], { id: 2, ok: true, result: {} });
+});
 
 function applyPatches(files, patches) {
   const buffers = new Map(files.map((file) => [file.path, Buffer.from(file.source, 'utf8')]));

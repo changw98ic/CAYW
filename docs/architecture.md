@@ -168,7 +168,7 @@ Trace 网页状态使用 `cayw.trace.state.v1`：首次响应 `reset=true`，后
 - WorkItem 保存在主 session 工作区。被派工的工作区只在 Task 上记录 `work_id` 和唯一的 `dispatch_key`，重复派工返回原 Task。只有程序核对的结果或用户确认才能把验收记为通过；模型自报不算。
 - 上下文管理是 Runtime 内置组件，不是 plugin。它接在现有的请求准备链上，用持续摘要、后台压缩和本地装配控制输入大小；装配不拆开调用与结果，不改写原始记录和 unknown 状态。JEv plugin 以后可以提供增强压缩，失败时回退到内置组件。
 - 摘要、压缩、记忆写入和 Dream 的模型调用是单独的维护请求类别：只记这次调用的用量上界，不设用量上限；在途记录和未知用量不阻塞前台，用量计入来源 session 的预算树。维护请求没有执行 lease 和 Task，不能直接复用 `reconcile_model_request`，需要独立的核对入口。用户说忘掉后，以后不再使用那段内容，日志不擦除。
-- 本地 Client 使用 ModelAuto：模型通过 CodeMode 的 `approval.pending`、`approval.decide` 决定当前 Task 的待决调用，无需另一次人工审批。`capability.decide` 单独处理 capability request，保留独立 request_id 和 evaluation ticket。审批只授权操作，不等于执行成功或用户验收；SDK 默认 Explicit 模式保留明确调用审批 API 的方式。
+- 本地 Client 使用 ModelAuto：模型通过 CodeMode 的 `approval.pending`、`approval.decide` 决定当前 Task 的待决调用，无需另一次人工审批。`capability.decide` 单独处理 capability request，保留独立 request_id 和 evaluation ticket。`approval.decide` 和 `capability.decide` 提交成功后，将原始 JSON 回执写入当前执行的输出流。后续 Luau 错误仍按原样报告，不替换已经保存的回执。审批只授权操作，不等于执行成功或用户验收；SDK 默认 Explicit 模式保留明确调用审批 API 的方式。
 - Git 恢复点使用 CAYW 私有的快照仓库，不在用户目录创建 `.git`，也不读写用户自己的仓库。它是程序内部步骤，不向模型开放 Git 命令，也不改变 Host 为模型提供 Git 能力的配置要求。没有 Git 时警告并继续工作。
 
 ## 一轮持久执行
@@ -225,7 +225,7 @@ Luau 是当前优先方向，已有运行时；Monty 只作可选同契约比较
 | `wait` / cursor | 读取同一 cell 的增量输出并按需继续让出的活 VM；不重新执行原脚本，不把它当新工具效果 |
 | `yield_time_ms` | 控制本次返回/等待窗口；窗口结束不等于取消整个受管执行，也不重置总预算 |
 | `yield_control` | 让出活执行，待显式 wait 继续；进程退出后不能借 wait 复活原 Luau 栈 |
-| `store` / `load` | 会话级有界值存取及版本冲突检查，跨 cell 共享；不是保存任意 VM/进程对象，也不是新的授权来源 |
+| `store` / `load` | 当前会话的有界值存取，无需审批。值可跨 cell 共享，写入检查版本冲突。会话由 Runtime 绑定，调用开始和终态照常记录。 |
 | `ALL_TOOLS` / `toolDefinition` / `tool_search` | 按需目录与 Schema 自省；目录可见性和执行授权分别检查 |
 | `text` / `image` / `audio` / `notify` / `exit` | 类型化、有界、带游标的输出与退出；媒体 MIME/编码和体积需校验，notify 是进度元数据 |
 

@@ -175,7 +175,7 @@ test('workbench_dom: launch hash opens and scopes one workspace before runtime c
 });
 
 test('conversation reads the artifact version list before fetching one preview', async t => {
-  const current = { id: 's1', label: '会话 1', cursor: 10, state: 'idle', messages: [], attempt: null, pending_approvals: [] };
+  const current = { id: 's1', label: '会话 1', cursor: 10, state: 'idle', messages: [], attempt: null, executions: [], pending_approvals: [] };
   const app = await setupApp(t, async (method, params) => {
     switch (method) {
       case 'session.list': return [current];
@@ -212,7 +212,7 @@ test('workbench_dom: interrupted tool history is presented cleanly and never loc
     outcome_unknown: true,
     structured_content: { status: 'outcome_unknown', outputs: [] },
   };
-  const current = { id: 's1', label: '会话 1', cursor: 10, state: 'idle', messages: [interrupted], attempt: null, pending_approvals: [], unresolved_calls: [{ call: { id: 'call-1' }, state: 'outcome_unknown', result: { outcome_unknown: true } }] };
+  const current = { id: 's1', label: '会话 1', cursor: 10, state: 'idle', messages: [interrupted], attempt: null, executions: [], pending_approvals: [], unresolved_calls: [{ call: { id: 'call-1' }, state: 'outcome_unknown', result: { outcome_unknown: true } }] };
   let enqueueAttempted = false;
 
   const app = await setupApp(t, async (method, params, url) => {
@@ -258,10 +258,10 @@ test('workbench_dom: stopping first and second external tasks targets each activ
 
   const currentSnapshot = () => {
     if (phase === 'ext1') {
-      return { id: 's1', label: '会话 1', cursor, state: 'running', messages: [], attempt: lease1, pending_approvals: [], unresolved_calls: [] };
+      return { id: 's1', label: '会话 1', cursor, state: 'running', messages: [], attempt: lease1, executions: [], pending_approvals: [], unresolved_calls: [] };
     }
     if (phase === 'idle1') {
-      return { id: 's1', label: '会话 1', cursor, state: 'idle', messages: [], attempt: null, pending_approvals: [], unresolved_calls: [] };
+      return { id: 's1', label: '会话 1', cursor, state: 'idle', messages: [], attempt: null, executions: [], pending_approvals: [], unresolved_calls: [] };
     }
     if (phase === 'ext2') {
       return {
@@ -271,11 +271,11 @@ test('workbench_dom: stopping first and second external tasks targets each activ
         state: 'running',
         messages: [],
         attempt: lease2,
-        pending_approvals: [],
+        executions: [], pending_approvals: [],
         unresolved_calls: [{ call: { id: 'old-c1', task_id: 'ext-task-1' }, state: 'outcome_unknown', result: { outcome_unknown: true } }],
       };
     }
-    return { id: 's1', label: '会话 1', cursor, state: 'idle', messages: [], attempt: null, pending_approvals: [], unresolved_calls: [] };
+    return { id: 's1', label: '会话 1', cursor, state: 'idle', messages: [], attempt: null, executions: [], pending_approvals: [], unresolved_calls: [] };
   };
 
   const events = [];
@@ -349,12 +349,12 @@ test('workbench_dom: finished local prompt settles while sibling external task r
 
   const currentSnapshot = () => {
     if (phase === 'ext_running') {
-      return { id: 's1', label: '会话 1', cursor, state: 'running', messages: [], attempt: extLease, pending_approvals: [], unresolved_calls: [] };
+      return { id: 's1', label: '会话 1', cursor, state: 'running', messages: [], attempt: extLease, executions: [], pending_approvals: [], unresolved_calls: [] };
     }
     if (phase === 'ext2_running') {
-      return { id: 's1', label: '会话 1', cursor, state: 'running', messages: [], attempt: extLease2, pending_approvals: [], unresolved_calls: [] };
+      return { id: 's1', label: '会话 1', cursor, state: 'running', messages: [], attempt: extLease2, executions: [], pending_approvals: [], unresolved_calls: [] };
     }
-    return { id: 's1', label: '会话 1', cursor, state: 'idle', messages: [], attempt: null, pending_approvals: [], unresolved_calls: [] };
+    return { id: 's1', label: '会话 1', cursor, state: 'idle', messages: [], attempt: null, executions: [], pending_approvals: [], unresolved_calls: [] };
   };
 
   const app = await setupApp(t, async (method, params, url) => {
@@ -377,7 +377,7 @@ test('workbench_dom: finished local prompt settles while sibling external task r
       );
       cursor = 13;
       phase = 'ext_running';
-      return { id: 's1', label: '会话 1', cursor: 12, state: 'idle', messages: [], attempt: null, pending_approvals: [], unresolved_calls: [] };
+      return { id: 's1', label: '会话 1', cursor: 12, state: 'idle', messages: [], attempt: null, executions: [], pending_approvals: [], unresolved_calls: [] };
     }
     if (method === 'session.tasks') {
       if (failTasksPoll) {

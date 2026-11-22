@@ -6,7 +6,19 @@ import { readFile } from 'node:fs/promises';
 const source = await readFile(new URL('../assets/app.js', import.meta.url), 'utf8');
 const { createView, consumeEvents, applySnapshot, sessionBlocked, messageText, beginWrite, finishWrite, selectActiveTaskId, summarizeRestoreReport } = await import(`data:text/javascript;base64,${Buffer.from(source).toString('base64')}`);
 
-const snapshot = (extra = {}) => ({ id: 's1', label: '会话', messages: [], cursor: 7, state: 'idle', pending_approvals: [], unresolved_calls: [], ...extra });
+const snapshot = (extra = {}) => ({ id: 's1', label: '会话', messages: [], cursor: 7, state: 'idle', pending_approvals: [], executions: [], unresolved_calls: [], ...extra });
+
+test('rejects missing or malformed required arrays without changing the current view', () => {
+  const view = applySnapshot(createView('s1'), snapshot(), true);
+  for (const field of ['pending_approvals', 'executions']) {
+    const invalid = snapshot({ cursor: 8 });
+    delete invalid[field];
+    assert.throws(() => applySnapshot(view, invalid, true));
+    invalid[field] = {};
+    assert.throws(() => applySnapshot(view, invalid, true));
+    assert.equal(view.cursor, 7);
+  }
+});
 
 // Resetting cursor on reconnection would duplicate event output or skip unread records.
 test('resumes at the last consumed event and ignores replayed records', () => {

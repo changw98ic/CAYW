@@ -16,6 +16,7 @@ pub struct BackendResponse {
     presentation: Option<Result<Value, CapabilityError>>,
     dependencies: Option<DependencySnapshot>,
     completion: Option<Box<dyn BackendCompletion>>,
+    publish_result: bool,
 }
 impl BackendResponse {
     pub fn new(result: Result<Value, CapabilityError>) -> Self {
@@ -24,6 +25,7 @@ impl BackendResponse {
             presentation: None,
             dependencies: None,
             completion: None,
+            publish_result: false,
         }
     }
     pub fn owned(
@@ -36,6 +38,19 @@ impl BackendResponse {
             presentation: None,
             dependencies,
             completion: Some(completion),
+            publish_result: false,
+        }
+    }
+    /// Publish the original successful result as cell output before Lua resumes.
+    pub fn with_published_result(mut self) -> Self {
+        self.publish_result = true;
+        self
+    }
+    pub(crate) fn published_result(&self) -> Option<&Value> {
+        if self.publish_result {
+            self.result().as_ref().ok()
+        } else {
+            None
         }
     }
     pub fn result(&self) -> &Result<Value, CapabilityError> {

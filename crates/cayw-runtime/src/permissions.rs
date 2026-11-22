@@ -286,6 +286,15 @@ impl Gate {
                 "permission target does not match its fixed capability".into(),
             ));
         }
+        // Runtime binds cell values to the active session before Host dispatch.
+        // Saving or reading that session's own values needs no approval grant.
+        if crate::values::is_value(name) {
+            self.scope.authorize(Authorization {
+                proof: self.scope.proof("session-values".into(), None),
+                grant: None,
+            })?;
+            return context.check(&cancel);
+        }
         let inner = &context.inner;
         // The approval rules file is user-owned configuration. Even an exact
         // RuntimeConfig permission, a durable grant, or a user rule must never

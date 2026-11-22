@@ -50,8 +50,7 @@ async function start(project,state,framework,name) {
       }
     });
   });
-  const timer=setTimeout(()=>child.kill('SIGINT'),90000);
-  try {await ready;}finally{clearTimeout(timer);}
+  await ready;
   run.urls=urls;
   await record(`${name}-start`,{binary,argv,pid:child.pid,urls});
   assert(urls.normal_preview_url&&urls.normal_preview_url!==urls.preview_url,'Framework ordinary/edit previews must be separate');

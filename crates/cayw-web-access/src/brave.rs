@@ -237,14 +237,10 @@ impl SearchProvider for BraveOrFallback {
         limit: u32,
     ) -> BoxFuture<'a, Result<SearchResponse, WebAccessError>> {
         Box::pin(async move {
-            if let Some(brave) = &self.brave {
-                match brave.search(query, limit).await {
-                    Ok(resp) if !resp.hits.is_empty() => return Ok(resp),
-                    Ok(_) => { /* empty → fallback */ }
-                    Err(_) => { /* soft-fallback to DDG/fixture */ }
-                }
+            match &self.brave {
+                Some(brave) => brave.search(query, limit).await,
+                None => self.fallback.search(query, limit).await,
             }
-            self.fallback.search(query, limit).await
         })
     }
 }
@@ -359,7 +355,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn fallback_results_keep_the_actual_provider() {
+    async fn configured_brave_preserves_empty_results_and_search_errors() {
         for body in ["{}", "invalid json"] {
             let listener = TcpListener::bind("127.0.0.1:0").unwrap();
             let address = listener.local_addr().unwrap();
@@ -407,16 +403,16 @@ mod tests {
                     Arc::new(BraveOrFallback::new(Some(brave), Arc::new(fallback))),
                 ),
             );
-            let response = access.search("rust", Some(5)).await.unwrap();
+            let result = access.search("rust", Some(5)).await;
             server.join().unwrap();
-            assert_eq!(response.provider, "duckduckgo_html");
-            assert_eq!(response.citations.len(), 1);
-            assert!(
-                response
-                    .citations
-                    .iter()
-                    .all(|citation| citation.provider.as_deref() == Some("duckduckgo_html"))
-            );
+            if body == "{}" {
+                let response = result.unwrap();
+                assert_eq!(response.provider, "brave");
+                assert!(response.citations.is_empty());
+            } else {
+                let error = result.unwrap_err();
+                assert_eq!(error.diagnostic.provider.as_deref(), Some("brave"));
+            }
         }
     }
 

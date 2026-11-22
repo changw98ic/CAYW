@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createView, applySnapshot, consumeEvents, sessionBlocked, sessionRunning, messageText, messagePresentation, beginWrite, finishWrite, terminalReadCursor, consumeTerminalRead, canFork, stateLabel } from '../assets/app.js';
 
-const snapshot = (extra = {}) => ({ id: 's1', label: '测试', messages: [], cursor: 10, state: 'idle', pending_approvals: [], unresolved_calls: [], ...extra });
+const snapshot = (extra = {}) => ({ id: 's1', label: '测试', messages: [], cursor: 10, state: 'idle', pending_approvals: [], executions: [], unresolved_calls: [], ...extra });
 const initial = (extra = {}) => applySnapshot(createView('s1'), snapshot(extra), true);
 
 test('snapshot refresh does not skip events that have not been consumed', () => {

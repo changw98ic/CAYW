@@ -72,7 +72,7 @@ impl AgentTool for CellTool {
             yield_time_ms["default"] = json!(default_yield_ms);
         }
         let page = limits.default_page_tokens();
-        let mut max_output_tokens = json!({"type":"integer","minimum":1024,"default":page});
+        let mut max_output_tokens = json!({"type":"integer","minimum":0,"default":page});
         if let Some(max) = limits.max_output_tokens {
             max_output_tokens["maximum"] = json!(max);
         }
@@ -84,29 +84,21 @@ impl AgentTool for CellTool {
             format!("{omitted_wait}; omitted max_output_tokens uses a {page}-byte page.");
         ToolDefinition {
             name: "execute_code".into(),
-            description: "Execute or wait for one bounded Luau cell. Arguments are a JSON object. cursor, yield_time_ms and max_output_tokens use JSON integers; exact nonnegative decimal strings (including integral decimal or exponent forms) are converted before the same range checks. Example exec arguments: {\"action\":\"exec\",\"script\":\"return 1 + 1\"}. exec creates a globally unique cell_id; wait reads incremental output after cursor without replay. yield_time_ms and max_output_tokens are optional: ".to_owned() + &omitted_page + " yield_time_ms returns early without cancelling the managed VM. wait resumes yield_control unless continue_execution=false. When the returned page has vm_alive=true or has_more=true, callers must continue invoking action=\"wait\" with the same cell_id and cursor=next_cursor until vm_alive=false and has_more=false; do not replay exec. Helpers inside the Luau script: store(key,value,expected_version), load(key), text(string), image(mime,base64), audio(mime,base64), notify(message,completed,total), exit(code), yield_control(), toolDefinition(name), tool_search(query,limit). store(key,value,expected_version) requires all 3 arguments: expected_version is mandatory; pass 0 for a new key, or the version returned by load(key).version when updating an existing key. load(key) returns an object with version and value, or null if absent. ALL_TOOLS is a read-only array of tool names. toolDefinition and tool_search are Luau functions, not external tool names. Use return or cayw.emit(value) for JSON values, including tables. pcall/xpcall handle ordinary known errors; cancellation, exhausted budgets, unknown effects and exit still stop the cell. Pure computation coroutines and per-cell globals are available. Await host tools from the main script. print, io, os, package, require and math.tointeger are unavailable. Use ordinary Luau operators and bounded string/table/math/utf8 functions. Invoke host tools with cayw.call(name,args); each invocation is authorized. Do not register any other execute_code tool. max_output_tokens is a conservative serialized UTF-8 BYTE budget (minimum 1024), not provider token usage. A page too small for the next item returns required_budget with unchanged cursor. Restart recovers durable records, never a Lua stack. No automatic replay." + &script_byte_note,
+            description: "Execute or wait for one bounded Luau cell. Arguments are a JSON object. cursor, yield_time_ms and max_output_tokens require unsigned JSON integers, not strings or floats. Example exec arguments: {\"action\":\"exec\",\"script\":\"return 1 + 1\"}. exec creates a globally unique cell_id; wait reads incremental output after cursor without replay. yield_time_ms and max_output_tokens are optional: ".to_owned() + &omitted_page + " yield_time_ms returns early without cancelling the managed VM. wait resumes yield_control unless continue_execution=false. When the returned page has vm_alive=true or has_more=true, callers must continue invoking action=\"wait\" with the same cell_id and cursor=next_cursor until vm_alive=false and has_more=false; do not replay exec. Helpers inside the Luau script: store(key,value,expected_version), load(key), text(string), image(mime,base64), audio(mime,base64), notify(message,completed,total), exit(code), yield_control(), toolDefinition(name), tool_search(query,limit). store(key,value,expected_version) requires all 3 arguments: expected_version is mandatory; pass 0 for a new key, or the version returned by load(key).version when updating an existing key. load(key) returns an object with version and value, or null if absent. ALL_TOOLS is a read-only array of tool names. toolDefinition and tool_search are Luau functions, not external tool names. Use return or cayw.emit(value) for JSON values, including tables. pcall/xpcall handle ordinary known errors; cancellation, exhausted budgets, unknown effects and exit still stop the cell. Pure computation coroutines and per-cell globals are available. Await host tools from the main script. print, io, os, package, require and math.tointeger are unavailable. Use ordinary Luau operators and bounded string/table/math/utf8 functions. Invoke host tools with cayw.call(name,args); each invocation is authorized. Do not register any other execute_code tool. max_output_tokens is a serialized UTF-8 BYTE budget, not provider token usage. A page too small for the next item returns the execution receipt and required_budget with unchanged cursor; receipt metadata may exceed the requested budget. Restart recovers durable records, never a Lua stack. No automatic replay." + &script_byte_note,
             parameters: json!({"type":"object","oneOf":[
                 {"type":"object","properties":{"action":{"const":"exec"},"script":script,"yield_time_ms":yield_time_ms,"max_output_tokens":max_output_tokens},"required":["action","script"],"additionalProperties":false},
                 {"type":"object","properties":{"action":{"const":"wait"},"cell_id":{"type":"string","minLength":1,"maxLength":128},"cursor":{"type":"integer","minimum":0},"yield_time_ms":yield_time_ms,"max_output_tokens":max_output_tokens,"continue_execution":{"type":"boolean"}},"required":["action","cell_id","cursor"],"additionalProperties":false}
             ]}),
         }
     }
-    fn prepare_arguments(
-        &self,
-        mut arguments: serde_json::Value,
-    ) -> Result<serde_json::Value, String> {
-        let fields: &[&str] = match arguments.get("action").and_then(serde_json::Value::as_str) {
-            Some("exec") => &["yield_time_ms", "max_output_tokens"],
-            Some("wait") => &["cursor", "yield_time_ms", "max_output_tokens"],
-            _ => return Ok(arguments),
-        };
-        for field in fields {
-            if let Some(value) = arguments.get_mut(*field)
-                && (value.is_string() || value.is_f64())
+    fn prepare_arguments(&self, arguments: serde_json::Value) -> Result<serde_json::Value, String> {
+        // JSON Schema accepts integral floats as integers; the wire format for
+        // these fields is an unsigned JSON integer, not a coercion.
+        for field in ["cursor", "yield_time_ms", "max_output_tokens"] {
+            if let Some(value) = arguments.get(field)
+                && !value.is_u64()
             {
-                let number = cayw_ai::unsigned_tool_integer(value)
-                    .map_err(|error| format!("/{field}: {error}"))?;
-                *value = number.into();
+                return Err(format!("/{field}: expected an unsigned JSON integer"));
             }
         }
         Ok(arguments)

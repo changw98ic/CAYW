@@ -73,19 +73,47 @@ function setupEditorSandbox() {
       body: makeEl()
     },
     location: { href: 'http://127.0.0.1:4200/' },
+    clearTimeout,
     globalThis: {}
   };
   sandbox.globalThis = sandbox;
 
   const instrumented = editorSource.replace(
     /\}\)\(\);\s*$/,
-    'globalThis.__test = { normalizeSelection, layoutGroup }; })();'
+    `globalThis.__test = {
+      normalizeSelection, layoutGroup, onBridgePortMessage, state,
+      stubContextMenu(open) { updateSelectionUi = () => {}; openContextMenu = open; }
+    }; })();`
   );
 
   vm.createContext(sandbox);
   vm.runInContext(instrumented, sandbox);
   return sandbox.__test;
 }
+
+test('editor bridge accepts numeric zero and ignores coerced ids and coordinates', () => {
+  const editor = setupEditorSandbox();
+  const send = data => editor.onBridgePortMessage({ data });
+  editor.state.editing = true;
+
+  let resolved = false;
+  editor.state.palettePending.set(0, { resolve() { resolved = true; } });
+  for (const request of ['0', false, null]) send({ type: 'cayw:palette-result', request });
+  assert.equal(resolved, false);
+  send({ type: 'cayw:palette-result', request: 0 });
+  assert.equal(resolved, true);
+
+  const positions = [];
+  editor.stubContextMenu((_selection, { x, y }) => positions.push([x, y]));
+  const selection = { type: 'cayw:context', id: 'node', tag: 'div', rect: { x: 0, y: 0, width: 1, height: 1 } };
+  for (const value of ['0', false, null]) {
+    send({ ...selection, x: value, y: 0 });
+    send({ ...selection, x: 0, y: value });
+  }
+  assert.deepEqual(positions, []);
+  send({ ...selection, x: 0, y: 0 });
+  assert.deepEqual(positions, [[0, 0]]);
+});
 
 test('bridge.js extracts alignItems and justifyContent from getComputedStyle', () => {
   const mockStyle = {

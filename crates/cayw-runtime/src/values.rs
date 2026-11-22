@@ -1,7 +1,6 @@
 //! Trusted Runtime dispatch for cell value capabilities. The model can choose a
-//! key and value, but never the session. Every store/load traverses the original
-//! Host permission, start, budget and settlement path before touching the Cell
-//! journal.
+//! key and value, but never the session. Host checks the fixed call scope and
+//! records execution without requesting approval for the session's own values.
 use crate::cells::CallScope;
 use async_trait::async_trait;
 use cayw_ai::{CancellationToken, ToolDefinition};

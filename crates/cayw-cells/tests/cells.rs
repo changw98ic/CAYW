@@ -198,6 +198,43 @@ async fn wait_entered(host: &Host) {
 }
 
 #[tokio::test]
+async fn zero_byte_page_returns_a_receipt_and_wait_reads_original_output() {
+    let (_dir, _journal, host, cells) = setup();
+    let receipt = cells
+        .exec_fixture(
+            ExecRequest {
+                max_output_tokens: 0,
+                ..exec("cayw.call('write', {}); text('written'); yield_control()")
+            },
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+    assert!(receipt.outputs.is_empty());
+    assert_eq!(receipt.next_cursor, 0);
+    assert!(receipt.has_more);
+    let required_budget = receipt.required_budget.unwrap();
+    assert!(required_budget < 1024);
+
+    let page = cells
+        .wait(
+            WaitRequest {
+                max_output_tokens: required_budget,
+                ..wait(&receipt, false)
+            },
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(page.cell_id, receipt.cell_id);
+    assert_eq!(page.next_cursor, 1);
+    assert!(matches!(&page.outputs[0].output, CellOutput::Text { text } if text == "written"));
+    assert!(serde_json::to_vec(&page).unwrap().len() <= required_budget);
+    assert_eq!(host.calls.load(Ordering::SeqCst), 1);
+    cells.close().await;
+}
+
+#[tokio::test]
 async fn yield_is_owned_and_resumed_only_by_explicit_wait() {
     let (_dir, _journal, host, cells) = setup();
     let first = cells
@@ -854,36 +891,26 @@ async fn single_agent_entry_schema_has_only_exec_and_wait_and_no_session_overrid
     let definition = tool.definition();
     assert_eq!(definition.name, "execute_code");
     let validator = cayw_ai::ArgumentValidator::new(&definition.parameters).unwrap();
-    assert!(validator.validate(&json!({"action":"exec","script":"text('ok')","yield_time_ms":0,"max_output_tokens":1024})).is_ok());
-    let raw = json!({"action":"exec","script":"return '00123'","yield_time_ms":"30000","max_output_tokens":"8192.0"});
-    let prepared = tool.prepare_arguments(raw.clone()).unwrap();
-    assert_eq!(
-        prepared,
-        json!({"action":"exec","script":"return '00123'","yield_time_ms":30000,"max_output_tokens":8192})
-    );
-    assert!(validator.validate(&prepared).is_ok());
-    assert_eq!(raw["max_output_tokens"], "8192.0");
-    let wait = tool.prepare_arguments(json!({"action":"wait","cell_id":"00123","cursor":"9007199254740993","yield_time_ms":"3e4","max_output_tokens":"8192","continue_execution":false})).unwrap();
-    assert_eq!(wait["cursor"], json!(9007199254740993_u64));
-    assert_eq!(wait["cell_id"], "00123");
-    assert_eq!(wait["yield_time_ms"], 30000);
-    assert_eq!(wait["continue_execution"], false);
+    assert!(validator.validate(&json!({"action":"exec","script":"text('ok')","yield_time_ms":0,"max_output_tokens":0})).is_ok());
+    let wait = json!({"action":"wait","cell_id":"00123","cursor":u64::MAX,"yield_time_ms":0,"max_output_tokens":0,"continue_execution":false});
+    assert_eq!(tool.prepare_arguments(wait.clone()).unwrap(), wait);
     assert!(validator.validate(&wait).is_ok());
-    for value in ["-1", "8192.5", "18446744073709551616", "NaN", "", "true"] {
-        let arguments = json!({"action":"exec","script":"return 1","yield_time_ms":0,"max_output_tokens":value});
-        assert!(
-            tool.prepare_arguments(arguments).is_err(),
-            "accepted {value}"
-        );
+    for field in ["cursor", "yield_time_ms", "max_output_tokens"] {
+        for value in [
+            json!("1024"),
+            json!(1024.0),
+            json!(false),
+            json!(null),
+            json!(-1),
+        ] {
+            let mut arguments = wait.clone();
+            arguments[field] = value;
+            assert!(
+                tool.prepare_arguments(arguments).is_err(),
+                "accepted a non-u64 {field}"
+            );
+        }
     }
-    let mut arguments =
-        json!({"action":"exec","script":"return 1","yield_time_ms":0,"max_output_tokens":1024});
-    arguments["max_output_tokens"] = json!("1023");
-    let prepared = tool.prepare_arguments(arguments).unwrap();
-    assert!(
-        validator.validate(&prepared).is_err(),
-        "accepted {prepared}"
-    );
     // No artificial upper ceilings: unconfigured limits accept large values,
     // and omitted fields fall back to the documented defaults.
     for arguments in [
@@ -900,7 +927,7 @@ async fn single_agent_entry_schema_has_only_exec_and_wait_and_no_session_overrid
     }
     for arguments in [
         json!({"action":"exec","script":"return 1","yield_time_ms":-1,"max_output_tokens":1024}),
-        json!({"action":"exec","script":"return 1","yield_time_ms":0,"max_output_tokens":1023}),
+        json!({"action":"exec","script":"return 1","yield_time_ms":0,"max_output_tokens":-1}),
         json!({"action":"exec","script":"return 1","yield_time_ms":true,"max_output_tokens":1024}),
         json!({"action":"wait","cell_id":"x","cursor":"0","yield_time_ms":0,"max_output_tokens":1024}),
         json!({"action":"wait","cell_id":"x","cursor":0,"yield_time_ms":0,"max_output_tokens":1024,"continue_execution":"true"}),

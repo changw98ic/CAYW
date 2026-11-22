@@ -1,13 +1,12 @@
-//! Runtime value capabilities must keep the original Host admission, start and
-//! settlement path. A matching session id is not authorization, while an exact
-//! host permission can reuse a value across turns with compare-and-set versions.
+//! The current session can store and load its own values without approval.
+//! These calls still use the original Host admission, start and settlement path.
 use cayw_ai::{
     AssistantEvent, AssistantStream, CancellationToken, Message, Model, ModelRequest, Provider,
 };
 use cayw_core::{
     CapabilityCallRecord, CapabilityOutcome, CapabilityStage, CoreEvent, EventRecord, SessionState,
 };
-use cayw_runtime::{ApprovalChoice, Runtime, RuntimeConfig, ScopedPermission};
+use cayw_runtime::{ApprovalMode, Runtime, RuntimeConfig, ScopedPermission};
 use futures::stream;
 use serde_json::{Value, json};
 use std::{collections::BTreeMap, sync::Arc, time::Duration};
@@ -46,6 +45,7 @@ fn last_user_text(request: &ModelRequest) -> String {
 fn runtime(
     temp: &tempfile::TempDir,
     provider: Turns,
+    approval_mode: ApprovalMode,
     permissions: Vec<ScopedPermission>,
 ) -> Runtime {
     std::fs::create_dir(temp.path().join("workspace")).unwrap();
@@ -56,26 +56,19 @@ fn runtime(
         Model::new("fixture", "values"),
         RuntimeConfig {
             max_run_time: Some(Duration::from_secs(10)),
+            approval_mode,
             permissions,
             ..Default::default()
         },
     )
     .unwrap()
 }
-async fn pending(runtime: &Runtime, id: &str) -> cayw_core::ApprovalRequest {
-    tokio::time::timeout(Duration::from_secs(10), async {
-        loop {
-            if let Some(pending) = runtime.get(id).unwrap().pending_approvals.first() {
-                return pending.clone();
-            }
-            tokio::task::yield_now().await;
-        }
-    })
-    .await
-    .unwrap()
-}
-fn store_args(value: Value, version: u64) -> Value {
-    json!({"key":"state","value":value,"expected_version":version})
+fn assert_no_approval(runtime: &Runtime, id: &str) {
+    assert!(
+        events(runtime, id)
+            .iter()
+            .all(|record| !matches!(record.event, CoreEvent::ApprovalRequested { .. }))
+    );
 }
 fn events(runtime: &Runtime, id: &str) -> Vec<EventRecord> {
     runtime.events(id, 0, 1000).unwrap()
@@ -124,104 +117,45 @@ fn stage_calls(runtime: &Runtime, id: &str, stage: CapabilityStage) -> Vec<Capab
 }
 
 #[tokio::test]
-async fn cross_task_value_reuse_without_host_permission_is_not_executed() {
+async fn session_store_does_not_block_a_following_file_write_or_leak_to_other_sessions() {
     let temp = tempfile::tempdir().unwrap();
+    let write_args = json!({"path":"result.txt","content":"saved"});
     let rt = runtime(
         &temp,
         Turns {
             scripts: vec![
-                ("store seed", "store('state',{count=7},0)"),
                 (
-                    "load across task",
-                    "local current=load('state'); if current then return current.value.count else return -1 end",
+                    "store and write",
+                    "store('state',{count=7},0); return cayw.call('fs.write',{path='result.txt',content='saved'})",
                 ),
+                ("load state", "return load('state')"),
             ],
         },
-        vec![ScopedPermission::exact(
-            "cells.store",
-            store_args(json!({"count":7}), 0),
-        )],
+        ApprovalMode::ModelAuto,
+        vec![ScopedPermission::exact("fs.write", write_args)],
     );
-    let id = rt.create(None).unwrap().id;
-    let seeded = rt
-        .prompt(&id, "store seed", CancellationToken::new())
+    let owner = rt.create(None).unwrap().id;
+    rt.prompt(&owner, "store and write", CancellationToken::new())
         .await
         .unwrap();
-    assert_eq!(seeded.state, SessionState::Idle);
-    assert!(seeded.pending_approvals.is_empty());
-
-    let worker_rt = rt.clone();
-    let worker_id = id.clone();
-    let worker = tokio::spawn(async move {
-        worker_rt
-            .prompt(&worker_id, "load across task", CancellationToken::new())
-            .await
-    });
-    let approval = pending(&rt, &id).await;
-    assert_eq!(approval.input.capability, "cells.load");
-    assert!(
-        matches!(
-            &approval.input.target,
-            cayw_core::ApprovalTarget::CapabilityCall { .. }
-        ),
-        "{approval:?}"
-    );
-    rt.approve(&id, &approval.id, ApprovalChoice::Deny, "test-user")
-        .unwrap();
-    let blocked = worker.await.unwrap().unwrap();
-    assert_eq!(blocked.state, SessionState::Idle);
-    assert!(blocked.pending_approvals.is_empty());
-
-    let groups = value_groups(&rt, &id);
-    let planned = stage_calls(&rt, &id, CapabilityStage::Planned);
-    let started = stage_calls(&rt, &id, CapabilityStage::Started);
-    let settled = stage_calls(&rt, &id, CapabilityStage::Settled);
-    assert_eq!(planned.len(), 2, "{groups:?}");
-    assert_eq!(started.len(), 1, "{groups:?}");
-    assert_eq!(settled.len(), 2, "{groups:?}");
-    let store = planned
-        .iter()
-        .find(|call| call.name == "cells.store")
-        .unwrap();
-    let load = planned
-        .iter()
-        .find(|call| call.name == "cells.load")
-        .unwrap();
-    assert_ne!(store.task_id, load.task_id);
-    assert_eq!(store.lease.session_id, load.lease.session_id);
     assert_eq!(
-        completed_result(
-            settled
-                .iter()
-                .find(|call| call.name == "cells.store")
-                .unwrap()
-        ),
-        &json!({"version":1})
+        std::fs::read_to_string(temp.path().join("workspace/result.txt")).unwrap(),
+        "saved"
     );
-    let denied = settled
-        .iter()
-        .find(|call| call.name == "cells.load")
+    assert_no_approval(&rt, &owner);
+
+    let other = rt.create(None).unwrap().id;
+    rt.prompt(&other, "load state", CancellationToken::new())
+        .await
         .unwrap();
-    assert!(matches!(
-        &denied.outcome,
-        Some(CapabilityOutcome::NotExecuted { reason })
-            if reason.contains("permission denied")
-    ));
-    assert!(
-        !started.iter().any(|call| call.name == "cells.load"),
-        "denied load crossed the Host start boundary: {groups:?}"
-    );
-    assert!(
-        !blocked
-            .messages
-            .iter()
-            .any(|message| message.text().contains("\"count\":7")),
-        "denied value leaked into history: {blocked:?}"
-    );
+    let calls = stage_calls(&rt, &other, CapabilityStage::Settled);
+    assert_eq!(calls.len(), 1);
+    assert_eq!(completed_result(&calls[0]), &Value::Null);
+    assert_no_approval(&rt, &other);
 }
 
 #[tokio::test]
-async fn authorized_value_reuse_keeps_cas_versions_across_turns() {
+async fn session_values_keep_cas_versions_across_turns_without_approval() {
     let temp = tempfile::tempdir().unwrap();
     let rt = runtime(
         &temp,
@@ -237,11 +171,8 @@ async fn authorized_value_reuse_keeps_cas_versions_across_turns() {
                 ),
             ],
         },
-        vec![
-            ScopedPermission::exact("cells.store", store_args(json!({"count":1}), 0)),
-            ScopedPermission::exact("cells.load", json!({"key":"state"})),
-            ScopedPermission::exact("cells.store", store_args(json!({"count":2}), 1)),
-        ],
+        ApprovalMode::Explicit,
+        vec![],
     );
     let id = rt.create(None).unwrap().id;
     let seeded = rt
@@ -255,7 +186,7 @@ async fn authorized_value_reuse_keeps_cas_versions_across_turns() {
         .await
         .unwrap();
     assert_eq!(advanced.state, SessionState::Idle);
-    assert!(advanced.pending_approvals.is_empty());
+    assert_no_approval(&rt, &id);
 
     let groups = value_groups(&rt, &id);
     let planned = stage_calls(&rt, &id, CapabilityStage::Planned);
@@ -317,10 +248,8 @@ async fn value_calls_pair_original_core_and_host_start_settle_once() {
                 "store('state',{ok=true},0); return load('state')",
             )],
         },
-        vec![
-            ScopedPermission::exact("cells.store", store_args(json!({"ok":true}), 0)),
-            ScopedPermission::exact("cells.load", json!({"key":"state"})),
-        ],
+        ApprovalMode::Explicit,
+        vec![],
     );
     let id = rt.create(None).unwrap().id;
     let result = rt

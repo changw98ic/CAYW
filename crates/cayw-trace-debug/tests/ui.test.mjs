@@ -12,7 +12,7 @@ class E {
 function harness(){
  const context=vm.createContext({document:{activeElement:null,createElement:()=>new E,createElementNS:()=>new E},Node:E,setTimeout,clearTimeout,AbortController,console});
  vm.runInContext(source.replace('  boot();', `
- globalThis.audit={layoutModules,preferredNodeForModule,renderNodeGraph,undoToVersion,
+ globalThis.audit={layoutModules,preferredNodeForModule,renderNodeGraph,undoToVersion,selectedVersion,
  setup(d,p,e,u){doc=d;selectedProject=p;selectedEvaluation=e;undoTarget=u;ui=new Proxy({}, {get:(o,k)=>o[k]||(o[k]=new Node)});},
  filter(v){moduleFilter=v;}, nodes(){return Array.from(nodeElements.values())},
  switchProject(p,e){selectedProject=p;selectedEvaluation=e;},
@@ -21,6 +21,16 @@ function harness(){
  `),context);
  return context.audit;
 }
+test('version selection distinguishes zero from an empty or unrecognized value', () => {
+ const {selectedVersion} = harness();
+ const entries = [{version: 0}, {version: 1}];
+ assert.equal(selectedVersion({value: '0'}, entries), 0);
+ assert.equal(selectedVersion({value: '1'}, entries), 1);
+ for (const value of ['', ' ', '01', '1e0', '2']) {
+  assert.equal(selectedVersion({value}, entries), null);
+ }
+});
+
 test('unnamed module retains its raw key and visible node',()=>{
  const a=harness();a.setup(null,null,null,null);
  const plan={nodes:[{id:'n',module:'',label:'N'}],edges:[]};
