@@ -350,6 +350,7 @@ dependencies = [
 name = "cayw-artifacts"
 version = "0.1.0"
 dependencies = [
+ "rusqlite",
  "serde",
  "serde_json",
  "thiserror",
@@ -706,6 +707,7 @@ dependencies = [
  "cayw-codemode",
  "globset",
  "ignore",
+ "libc",
  "proc-macro2",
  "regex",
  "serde",
