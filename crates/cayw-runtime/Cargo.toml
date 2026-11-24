@@ -10,7 +10,7 @@ description = "Headless runtime integrating durable sessions, bounded Luau tools
 [features]
 default = []
 fault-injection = ["cayw-ai/fault-injection", "cayw-core/fault-injection", "cayw-cells/fault-injection", "cayw-host/fault-injection", "cayw-content/fault-injection", "cayw-queue/fault-injection"]
-plugins = ["dep:cayw-plugins"]
+plugins = ["dep:cayw-plugins", "cayw-plugins/observer"]
 pi-compat = ["plugins", "dep:cayw-pi-compat"]
 strongflow = ["plugins", "cayw-plugins/strongflow"]
 remote = ["dep:cayw-remote"]

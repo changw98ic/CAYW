@@ -153,9 +153,40 @@ impl Observer {
             self.counters.closed.fetch_add(1, Ordering::Relaxed);
             return PublishOutcome::DroppedClosed;
         }
+        let event = match self.redacted(observation) {
+            Ok(event) => event,
+            Err(outcome) => return outcome,
+        };
+        let permit = tokio::select! {
+            biased;
+            _ = self.stopped.cancelled() => None,
+            permit = self.sender.reserve() => permit.ok(),
+        };
+        self.deliver(permit, event)
+    }
+
+    /// Publish without waiting for a slow reader. `None` means the queue is full.
+    pub fn try_publish(&self, observation: Observation) -> Option<PublishOutcome> {
+        if self.stopped.is_cancelled() {
+            self.counters.closed.fetch_add(1, Ordering::Relaxed);
+            return Some(PublishOutcome::DroppedClosed);
+        }
+        let event = match self.redacted(observation) {
+            Ok(event) => event,
+            Err(outcome) => return Some(outcome),
+        };
+        let permit = match self.sender.try_reserve() {
+            Ok(permit) => Some(permit),
+            Err(mpsc::error::TrySendError::Closed(())) => None,
+            Err(mpsc::error::TrySendError::Full(())) => return None,
+        };
+        Some(self.deliver(permit, event))
+    }
+
+    fn redacted(&self, observation: Observation) -> Result<RedactedObservation, PublishOutcome> {
         if !valid_name(&observation.kind) || observation.fields.keys().any(|key| !valid_name(key)) {
             self.counters.invalid.fetch_add(1, Ordering::Relaxed);
-            return PublishOutcome::DroppedInvalid;
+            return Err(PublishOutcome::DroppedInvalid);
         }
         let fields = observation
             .fields
@@ -175,15 +206,17 @@ impl Observer {
                 (key, value)
             })
             .collect();
-        let event = RedactedObservation {
+        Ok(RedactedObservation {
             kind: observation.kind,
             fields,
-        };
-        let permit = tokio::select! {
-            biased;
-            _ = self.stopped.cancelled() => None,
-            permit = self.sender.reserve() => permit.ok(),
-        };
+        })
+    }
+
+    fn deliver(
+        &self,
+        permit: Option<mpsc::Permit<'_, RedactedObservation>>,
+        event: RedactedObservation,
+    ) -> PublishOutcome {
         match permit {
             Some(permit) => {
                 permit.send(event);

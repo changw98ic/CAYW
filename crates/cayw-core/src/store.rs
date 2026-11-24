@@ -493,14 +493,25 @@ impl SessionStore {
     }
 
     pub fn create_session(&self, label: impl Into<String>) -> Result<SessionSnapshot, CoreError> {
-        let label = label.into();
-        nonempty(&label, "label")?;
+        self.ensure_host_session(&Uuid::new_v4().to_string(), &label.into())
+    }
+
+    /// Open or create a fixed session selected by the trusted host.
+    pub fn ensure_host_session(&self, id: &str, label: &str) -> Result<SessionSnapshot, CoreError> {
+        nonempty(id, "session id")?;
+        nonempty(label, "label")?;
         let mut connection = self
             .connection
             .lock()
             .map_err(|_| CoreError::StorePoisoned)?;
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let mut session = StoredSession::new(Uuid::new_v4().to_string(), label.clone());
+        match self.cached_projection(&transaction, id) {
+            Ok(session) => return Ok(session.snapshot()),
+            Err(CoreError::SessionNotFound(_)) => {}
+            Err(error) => return Err(error),
+        }
+        let label = label.to_owned();
+        let mut session = StoredSession::new(id.into(), label.clone());
         insert_session(&transaction, &session)?;
         persist(
             &transaction,

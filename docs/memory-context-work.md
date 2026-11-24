@@ -67,6 +67,7 @@ CAYW 以一个长期存在的主 session 作为用户入口。WorkItem 表示一
 - 主 session：只传话。它路由工作、在用户交互时查询状态，并在任务状态更新后把状态告诉用户。它不查看子 session 做了什么，也不审查结果。
 - 执行 session：负责做事和审查。它自己决定是否开始 workflow 或 subagent，完成后把任务状态通知主 session。
 - WorkItem：把多次执行、等待、监控和交付连成一项工作。它是持久记录，不是另一份模型上下文。
+- Observer 监控会话：启用 `plugins` 的本地 Client 使用固定会话 `cayw-observer`，通过 `session.events` 查看派工子任务的终态。每条 `observer.task_status` 有工作项、原任务和执行会话的标识。失败和结果不明标记为需关注。详细记录仍由原任务所属的工作区提供，主 session 沿原路径转告任务状态。
 
 | 部分 | 保存什么 | 上下文方式 |
 | --- | --- | --- |
@@ -88,7 +89,7 @@ CAYW 以一个长期存在的主 session 作为用户入口。WorkItem 表示一
 - 主 session 是一个默认工作区，目录是 `~/CodeAsYouWish`，按当前用户的 `HOME` 解析。目录不存在时，Client 启动时创建它（权限 0700），并登记为工作区。
 - 设备配置可以覆盖这个目录，便于测试和多账号。测试和验收脚本设置 `CAYW_HOME` 时，必须同时覆盖主 session 目录，避免读写真实用户的记忆。
 - 主 session 工作区和其他工作区结构相同：状态在 `<CAYW_HOME>/workspaces/<目录摘要>/`，包括 SQLite、Session 和插件启用关系。
-- 主 session 工作区里只有一个长期的主 session。它的 `session_id` 不因压缩、淘汰、重启或模型切换改变。
+- 主 session 工作区里有一个长期的主 session。它的 `session_id` 不因压缩、淘汰、重启或模型切换改变。启用 `plugins` 时，同一工作区也保存固定的 Observer 监控会话。
 - 目录中保存用户可以直接查看的内容：基础记忆与偏好（`memory/`，见“基础记忆与偏好”），以及主 session 交给用户的文件。
 - 已有目录读取失败或损坏时，在原位置报告，不重新初始化覆盖。
 - Client 启动时总是打开主 session 工作区。

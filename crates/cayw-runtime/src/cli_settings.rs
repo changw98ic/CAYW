@@ -462,7 +462,11 @@ pub fn ensure_main_session(runtime: &Runtime, paths: &LocalPaths) -> Result<Stri
             Ok(record.session_id)
         }
         None => {
-            let sessions = runtime.list()?;
+            let sessions = runtime
+                .list()?
+                .into_iter()
+                .filter(|session| session.id != Runtime::OBSERVER_SESSION_ID)
+                .collect::<Vec<_>>();
             let id = match sessions.len() {
                 0 => runtime.create(Some("主 session".into()))?.id,
                 1 => sessions.into_iter().next().expect("one session").id,

@@ -41,6 +41,7 @@ Core Only 的完整真实模型闭环是 [#6](https://github.com/changw98ic/CAYW
 | `cayw-codeintel` | 工作区相对路径、内容摘要、文件版本与符号位置 | Host、Editor 与 Trace 可注入同一个进程内共享实例；轻量大纲不等于完整跨文件语义索引 |
 | `cayw-output-filter` | 固定进程 profile 的显示过滤与原文引用 | 原文通过宿主注入的内容接口保存；过滤不改变进程实际终态 |
 | `cayw-context` / `cayw-run-inspector` | 从模型请求账本、Core 事件生成上下文和运行过程视图 | 派生展示，不另建执行权威或伪造缺失费用 |
+| Observer | 启用 `plugins` 的本地 Client 把派工子任务的终态转发到固定只读会话 `cayw-observer`。会话事件保存任务身份和状态，标记失败与结果不明 | 复用原任务回执和 Core 会话事件。队列满时记录漏报，任务继续执行 |
 | `cayw-trace-debug` | 可选本机调试插件应用：按 Session 游标消费认证 IPC 事件，维护自己的追踪文件与网页，并对捕获的 Luau 节点本地重新求值 | 经认证 IPC 消费 Runtime 事件，不直接读写 Core 或 Cells 数据库；复用 `cayw-codemode` 求值，但重放执行器不持有真实 Host/Runtime 写接口；Runtime 与普通无界面任务不依赖它 |
 | `cayw-panel` / `cayw-plannotator` / `cayw-artifacts` | 面板登记、带来源的批注与产物动作 | 界面通过公开 Runtime 接口提交动作；批注不成为授权 |
 | `cayw-web-access` / `cayw-vision` | 宿主显式启用的网页与图像能力 | 调用沿原 Host 权限和预算执行；存储由宿主注入，不反向依赖 Runtime |

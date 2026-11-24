@@ -2408,6 +2408,9 @@ impl Runtime {
     pub fn capabilities(&self) -> Result<Vec<ToolDefinition>, RuntimeError> {
         execution::capabilities(&self.inner)
     }
+    /// The fixed monitor is a host-owned session for read-only diagnostic events.
+    pub const OBSERVER_SESSION_ID: &str = "cayw-observer";
+
     pub(crate) fn check_ready(&self, id: &str) -> Result<SessionView, RuntimeError> {
         let snapshot = self.get(id)?;
         self.ensure_artifact_executor_idle(id)?;
@@ -2426,6 +2429,11 @@ impl Runtime {
         id: &str,
         snapshot: SessionView,
     ) -> Result<SessionView, RuntimeError> {
+        if self.inner.config.main_session && id == Self::OBSERVER_SESSION_ID {
+            return Err(RuntimeError::InvalidInput(
+                "Observer session is read-only".into(),
+            ));
+        }
         if self
             .inner
             .cells

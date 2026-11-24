@@ -54,6 +54,31 @@ async fn slow_reader_receives_every_event_with_backpressure() {
     );
     assert_eq!(produced, 1000);
 }
+#[test]
+fn optional_diagnostics_return_immediately_when_the_queue_is_full() {
+    let (observer, mut reader) = Observer::channel(ObserverConfig {
+        capacity: 1,
+        ..Default::default()
+    })
+    .unwrap();
+    assert_eq!(
+        observer.try_publish(observation(1)),
+        Some(PublishOutcome::Queued)
+    );
+    assert_eq!(observer.try_publish(observation(2)), None);
+    assert_eq!(reader.try_recv().unwrap().fields["count"], 1);
+    assert_eq!(
+        observer.try_publish(observation(3)),
+        Some(PublishOutcome::Queued)
+    );
+    observer.request_shutdown();
+    assert_eq!(
+        observer.try_publish(observation(4)),
+        Some(PublishOutcome::DroppedClosed)
+    );
+    assert_eq!(reader.try_recv().unwrap().fields["count"], 3);
+}
+
 #[tokio::test]
 async fn unloading_wakes_a_waiting_publisher_and_preserves_queued_events() {
     let (observer, mut reader) = Observer::channel(ObserverConfig {

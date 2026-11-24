@@ -1074,6 +1074,7 @@ fn spawn_worker_task(
         // Keep cancellation outside the whole synchronous settlement. Queue
         // rereads durable cancellation under its write transaction, then ends
         // the exact original Requests authority with that canonical decision.
+        let mut settled_terminal = terminal;
         let settlement = (|| {
             let _coordinate = inner.coordination.enter()?;
             let original = inner.queue.get(&lease.id)?;
@@ -1086,6 +1087,7 @@ fn spawn_worker_task(
                     .map(ToString::to_string)
                     .or_else(|| lock(&flags.reason).clone()),
                 |terminal| {
+                    settled_terminal = terminal;
                     crate::requests::finish(&inner, &original, crate::requests::outcome(terminal))
                 },
             )
@@ -1110,7 +1112,13 @@ fn spawn_worker_task(
             }
             return Err(error);
         }
-        report_dispatched_status(&inner, &task, terminal, settlement_error(&outcome, &flags)).await;
+        report_dispatched_status(
+            &inner,
+            &task,
+            settled_terminal,
+            settlement_error(&outcome, &flags),
+        )
+        .await;
         outcome
     })
 }

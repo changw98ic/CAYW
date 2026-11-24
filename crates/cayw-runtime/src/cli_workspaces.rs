@@ -291,6 +291,14 @@ struct Inner {
     main: OnceLock<Weak<WorkspaceHost>>,
     #[cfg(feature = "plugins")]
     plugins: crate::cli_plugins::Plugins,
+    #[cfg(feature = "plugins")]
+    monitor: std::sync::OnceLock<SessionMonitor>,
+}
+
+#[cfg(feature = "plugins")]
+struct SessionMonitor {
+    observer: cayw_plugins::observer::Observer,
+    worker: tokio::sync::Mutex<Option<tokio::task::JoinHandle<()>>>,
 }
 
 #[derive(Deserialize)]
@@ -325,8 +333,47 @@ impl Workspaces {
                 main: OnceLock::new(),
                 #[cfg(feature = "plugins")]
                 plugins,
+                #[cfg(feature = "plugins")]
+                monitor: std::sync::OnceLock::new(),
             }),
         }
+    }
+
+    #[cfg(feature = "plugins")]
+    pub fn start_observer(&self, runtime: Arc<Runtime>) -> Result<()> {
+        use cayw_plugins::observer::{Observer, ObserverConfig};
+        let session_id = Runtime::OBSERVER_SESSION_ID;
+        runtime
+            .store()
+            .ensure_host_session(session_id, "Observer")?;
+        let (observer, mut reader) = Observer::channel(ObserverConfig::default())?;
+        let worker = tokio::spawn(async move {
+            while let Some(event) = reader.recv().await {
+                let stored = (|| -> Result<()> {
+                    let snapshot = runtime.store().snapshot(session_id)?;
+                    runtime.store().append_control_event(
+                        session_id,
+                        snapshot.cursor,
+                        None,
+                        "observer",
+                        &event.kind,
+                        serde_json::to_value(event.fields)?,
+                    )?;
+                    Ok(())
+                })();
+                if let Err(error) = stored {
+                    eprintln!("Observer could not record a background task status: {error}");
+                }
+            }
+        });
+        self.inner
+            .monitor
+            .set(SessionMonitor {
+                observer,
+                worker: tokio::sync::Mutex::new(Some(worker)),
+            })
+            .map_err(|_| "Observer is already running")?;
+        Ok(())
     }
 
     // Called once during Client startup, before IPC begins accepting requests.
@@ -349,6 +396,8 @@ impl Workspaces {
         if !primary.runtime.is_main_session() {
             primary.runtime.set_work_owner(Arc::new(ClientWorkOwner {
                 inner: Arc::downgrade(&self.inner),
+                #[cfg(feature = "plugins")]
+                workspace: "local".into(),
             }))?;
         }
         Ok(())
@@ -754,6 +803,8 @@ impl Workspaces {
                     host.runtime
                         .set_work_owner(Arc::new(ClientWorkOwner {
                             inner: Arc::downgrade(&self.inner),
+                            #[cfg(feature = "plugins")]
+                            workspace: open.id.clone(),
                         }))
                         .map_err(|error| error.to_string())?;
                 }
@@ -779,6 +830,18 @@ impl Workspaces {
         for host in hosts {
             if let Err(error) = host.shutdown().await {
                 failures.push(error.to_string());
+            }
+        }
+        #[cfg(feature = "plugins")]
+        if let Some(monitor) = self.inner.monitor.get() {
+            use cayw_plugins::Plugin;
+            monitor.observer.request_shutdown();
+            let mut worker = monitor.worker.lock().await;
+            if let Some(task) = worker.as_mut() {
+                if let Err(error) = task.await {
+                    failures.push(format!("Observer stopped unexpectedly: {error}"));
+                }
+                *worker = None;
             }
         }
         if failures.is_empty() {
@@ -868,6 +931,8 @@ impl WorkRouter for ClientWorkRouter {
 /// Client catalog as the router, so a shut-down Client cannot be kept alive.
 struct ClientWorkOwner {
     inner: Weak<Inner>,
+    #[cfg(feature = "plugins")]
+    workspace: String,
 }
 
 impl ClientWorkOwner {
@@ -918,6 +983,42 @@ impl WorkOwner for ClientWorkOwner {
         &self,
         report: WorkStatusReport,
     ) -> std::result::Result<WorkSessionNoticeReply, WorkRouterError> {
+        #[cfg(feature = "plugins")]
+        if let Some(monitor) = self.client()?.inner.monitor.get() {
+            use cayw_plugins::observer::{Observation, ObservedField, PublishOutcome, Sensitivity};
+            let fields = [
+                ("workspace", json!(self.workspace)),
+                ("work_id", json!(report.work_id)),
+                ("task_id", json!(report.task_id)),
+                ("session_id", json!(report.session_id)),
+                ("state", json!(report.state)),
+                (
+                    "needs_attention",
+                    json!(matches!(
+                        report.state.as_str(),
+                        "failed" | "outcome_unknown"
+                    )),
+                ),
+            ]
+            .into_iter()
+            .map(|(name, value)| {
+                (
+                    name.into(),
+                    ObservedField {
+                        value,
+                        sensitivity: Sensitivity::Public,
+                    },
+                )
+            })
+            .collect();
+            let delivery = monitor.observer.try_publish(Observation {
+                kind: "observer.task_status".into(),
+                fields,
+            });
+            if delivery != Some(PublishOutcome::Queued) {
+                eprintln!("Observer missed task {}: {delivery:?}", report.task_id);
+            }
+        }
         let host = self.main()?;
         host.runtime
             .relay_task_status(report)
@@ -1228,6 +1329,8 @@ mod tests {
         client.register_main(main).await.unwrap();
         let owner = Arc::new(ClientWorkOwner {
             inner: Arc::downgrade(&client.inner),
+            #[cfg(feature = "plugins")]
+            workspace: "other".into(),
         });
         assert!(Arc::ptr_eq(&owner.main().unwrap(), main));
         // register_main must have installed the owner on the already-cached primary.
@@ -1489,7 +1592,7 @@ mod tests {
             None,
             true,
             true,
-            main_host,
+            main_host.clone(),
             #[cfg(feature = "plugins")]
             crate::cli_plugins::Plugins::new(temp.path().join("plugins.json")),
         );
@@ -1501,8 +1604,38 @@ mod tests {
             .await
             .insert(ext_id.clone(), ext_host);
 
+        workspaces.register_main(&main_host).await.unwrap();
         let router = workspaces.work_router();
         main_runtime.set_work_router(router.clone()).unwrap();
+        let owner = main_runtime.create(Some("Main".into())).unwrap();
+        main_runtime
+            .create_work_item(
+                serde_json::from_value(json!({
+                    "work_id": "work-ext-auto",
+                    "owner_main_session_id": owner.id,
+                    "title": "Observe dispatched task",
+                    "goal": "Check the original task and its terminal notice",
+                    "acceptance_criteria": []
+                }))
+                .unwrap(),
+            )
+            .unwrap();
+        #[cfg(feature = "plugins")]
+        {
+            workspaces.start_observer(main_runtime.clone()).unwrap();
+            assert!(
+                main_runtime
+                    .enqueue(Runtime::OBSERVER_SESSION_ID, "run a task")
+                    .is_err()
+            );
+        }
+        ext_runtime
+            .set_work_owner(Arc::new(ClientWorkOwner {
+                inner: Arc::downgrade(&workspaces.inner),
+                #[cfg(feature = "plugins")]
+                workspace: ext_id.clone(),
+            }))
+            .unwrap();
 
         let target_session = router
             .create_session(&ext_id, "External Worker")
@@ -1542,6 +1675,36 @@ mod tests {
                 .any(|m| m.text().contains("external-task-finished"))
         );
 
+        main_runtime.wait_idle(&owner.id).await;
+        let notice_key = format!("status-notice:{}", reply.task_id);
+        let notice = main_runtime
+            .task_by_dispatch_key(&notice_key)
+            .unwrap()
+            .unwrap();
+        assert_eq!(notice.session_id, owner.id);
+
         workspaces.shutdown().await.unwrap();
+        #[cfg(feature = "plugins")]
+        {
+            let events = main_runtime
+                .events(Runtime::OBSERVER_SESSION_ID, 0, 10)
+                .unwrap();
+            assert_eq!(events.len(), 2);
+            let cayw_core::CoreEvent::Host { kind, data } = &events[1].event else {
+                panic!("expected a committed Observer event");
+            };
+            assert_eq!(kind, "observer.task_status");
+            assert_eq!(
+                data["decision"],
+                json!({
+                    "workspace": ext_id,
+                    "work_id": reply.work_id,
+                    "task_id": reply.task_id,
+                    "session_id": target_session_id,
+                    "state": "completed",
+                    "needs_attention": false
+                })
+            );
+        }
     }
 }

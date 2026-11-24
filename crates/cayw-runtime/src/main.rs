@@ -408,6 +408,10 @@ async fn open_main_session(
     // Client's registered workspaces. The router owns only a weak reference to
     // the Client catalog, so shutdown is not held open by the Runtime.
     host.runtime.set_work_router(workspaces.work_router())?;
+    #[cfg(feature = "plugins")]
+    if let Err(error) = workspaces.start_observer(host.runtime.clone()) {
+        eprintln!("Observer unavailable: {error}");
+    }
     Ok(())
 }
 
